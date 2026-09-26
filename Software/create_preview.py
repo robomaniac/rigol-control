@@ -1,7 +1,7 @@
 """Rebuild the clearly labelled offline UI preview without contacting hardware.
 
 Run from the repository root after installing the package:
-    python 08_Software/create_preview.py
+    python Software/create_preview.py
 These illustrative numbers are not instrument measurements or calibration data.
 """
 
@@ -11,7 +11,7 @@ from pathlib import Path
 from benchctl.report import Sample, render_report
 
 
-def create_preview(output: Path = Path("05_Data/sweep-preview.html")) -> Path:
+def create_preview(output: Path = Path("Data/sweep-preview.html")) -> Path:
     targets = [float(Decimal("0.05") + i * Decimal("0.025")) for i in range(11)]
     targets += targets[-2::-1]
     samples = [Sample("no_load", "", "simulated", {

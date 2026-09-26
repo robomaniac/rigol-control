@@ -1,5 +1,18 @@
 # Measurements and reports
 
+## Open the reports
+
+- [Real 21-point power test](https://robomaniac.github.io/rigol-control/Data/power-test-report.html)
+- [Simulated example](https://robomaniac.github.io/rigol-control/Data/sweep-preview.html)
+- [Original three-point test](https://robomaniac.github.io/rigol-control/Data/demo-report.html)
+
+These GitHub Pages links open interactive reports without the Pi, SSH, or port
+forwarding. Opening an HTML file in GitHub's repository view shows its source
+code. You can also download any report and open the file in your browser;
+each report works offline.
+
+## Saved files
+
 | File or folder | Contents |
 | --- | --- |
 | [power-test-report.html](power-test-report.html) | Real 5 V power delivery test: 21 loaded readings plus a starting reference. |
@@ -11,7 +24,7 @@
 | `Runs/` | Full local run records, ignored by Git. |
 | `Logs/` | Local SCPI command traffic, ignored by Git. |
 
-Rebuild the simulated preview with `python 08_Software/create_preview.py`. It uses
+Rebuild the simulated preview with `python Software/create_preview.py`. It uses
 illustrative values, not readings from the bench.
 
 ## Real 21-point test
@@ -60,7 +73,7 @@ Both contain the same 22 measured records. Rebuild the example's report from
 the repository root, with no hardware connection:
 
 ```bash
-benchctl report 05_Data/Example_Run/20260926T072124Z_load_sweep
+benchctl report Data/Example_Run/20260926T072124Z_load_sweep
 ```
 
 ## Original three-point test
@@ -71,7 +84,7 @@ checks passed and both outputs were verified off afterward. The report UI has
 been upgraded using those saved readings. The new 21-point run uses its own
 4.75–5.25 V window; it does not change the historical data.
 
-The chart in [04_Media](../04_Media/demo-load-sweep.svg) is unchanged. Its voltage
+The chart in [Media](../Media/demo-load-sweep.svg) is unchanged. Its voltage
 difference includes instrument offset and connection effects; derived lead
 resistance is an apparent estimate, not a calibrated cable measurement. Supply
 and load power/current are separate sequential instrument readbacks.
@@ -113,7 +126,7 @@ while the Pi or your computer is offline.
 Open the HTML directly on your computer, or serve the shareable data folder:
 
 ```bash
-python3 -m http.server 8081 --bind 127.0.0.1 --directory 05_Data
+python3 -m http.server 8081 --bind 127.0.0.1 --directory Data
 ```
 
 For this manual command, keep the terminal running; skip it if the service is

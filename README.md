@@ -7,16 +7,33 @@ Pi or Linux computer and inspect the results in an offline HTML report.
 
 **Status:** working bench prototype · **Python:** 3.11+ · **Verified bench:** DP821A + DL3031A
 
-[Open the real 5 V power test](05_Data/power-test-report.html) · [Measured CSV](05_Data/power-test-results.csv) · [Simulated example](05_Data/sweep-preview.html) ·
-[Demo YAML](08_Software/recipes/load_sweep.yaml) · [Wiring](01_Electrical/Wiring.md)
+[Open the real 5 V power test](https://robomaniac.github.io/rigol-control/Data/power-test-report.html) · [Measured CSV](Data/power-test-results.csv) · [Simulated example](https://robomaniac.github.io/rigol-control/Data/sweep-preview.html) ·
+[Demo YAML](Software/recipes/load_sweep.yaml) · [Wiring](Electrical/Wiring.md)
 
-![Measured supply-to-load voltage difference](04_Media/demo-load-sweep.svg)
+## Table of contents
+
+- [Start here](#start-here)
+- [Demo: will your circuit still receive 5 V?](#demo-will-your-circuit-still-receive-5-v)
+  - [What happens during the test](#what-happens-during-the-test)
+  - [What the result tells you](#what-the-result-tells-you)
+  - [Real bench result](#real-bench-result)
+  - [Connect and run — YAML recipe](#connect-and-run)
+  - [Actual files from the demo](#actual-files-from-the-demo)
+- [Explore the report](#explore-the-report)
+- [Commands](#commands)
+- [Project folders](#project-folders)
+- [Verify and publish](#verify-and-publish)
+- [Next experiments](#next-experiments)
+
+![Measured supply-to-load voltage difference](Media/demo-load-sweep.svg)
 
 This original three-point chart is a measured snapshot from the bench. The
 new measured report contains 21 loaded readings plus a starting reference.
-See [data provenance](05_Data/README.md) for which run each artifact contains.
-GitHub displays the SVG directly; download the HTML report and open it in a
-browser to use its controls.
+See [data provenance](Data/README.md) for which run each artifact contains.
+The report links above open interactive pages hosted on GitHub Pages, with no
+Pi connection or port forwarding needed. Opening an `.html` file in GitHub's
+repository view shows its source code. You can also download the file and open
+it in a browser to use the same report offline.
 
 ## Start here
 
@@ -35,7 +52,7 @@ To run the software, work from the **repository root**:
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e '.[dev]'
-cp -n 08_Software/config/lab.example.yaml 08_Software/config/lab.yaml
+cp -n Software/config/lab.example.yaml Software/config/lab.yaml
 ```
 
 The local `lab.yaml` is ignored by Git. Replace its two `.invalid` hostnames
@@ -53,11 +70,11 @@ limits for this 5 V demo, not the instruments' full ratings.
 Validate the complete sweep without contacting hardware:
 
 ```bash
-benchctl run 08_Software/recipes/load_sweep.yaml --setup main_bench --dry-run
+benchctl run Software/recipes/load_sweep.yaml --setup main_bench --dry-run
 ```
 
 For a completely offline first check, add
-`--config 08_Software/config/lab.example.yaml` to that command.
+`--config Software/config/lab.example.yaml` to that command.
 
 ## Demo: will your circuit still receive 5 V?
 
@@ -110,7 +127,7 @@ compare. Tick labels are rounded; the saved readings retain their precision.
 
 ### Real bench result
 
-The [measured 21-point test](05_Data/power-test-report.html) passed on
+The [measured 21-point test](https://robomaniac.github.io/rigol-control/Data/power-test-report.html) passed on
 26 September 2026 UTC. Voltage at the device stayed between **4.978736 and
 4.989864 V**, within the chosen 4.75–5.25 V range. The largest difference between
 the supply and device readings was **26.264 mV**. Peak measured demand was
@@ -118,20 +135,20 @@ the supply and device readings was **26.264 mV**. Peak measured demand was
 
 The run took about **105 seconds**. All acceptance checks passed; a separate
 readback afterward confirmed both the load input and CH1 output were off.
-The [original three-point report](05_Data/demo-report.html) and chart remain
-available, and the [simulated example](05_Data/sweep-preview.html) stays separate.
+The [original three-point report](https://robomaniac.github.io/rigol-control/Data/demo-report.html) and chart remain
+available, and the [simulated example](https://robomaniac.github.io/rigol-control/Data/sweep-preview.html) stays separate.
 
 ### Connect and run
 
 With both outputs off, connect CH1 positive to load positive and CH1 negative
-to load negative. Follow the [wiring and protection settings](01_Electrical/Wiring.md).
+to load negative. Follow the [wiring and protection settings](Electrical/Wiring.md).
 The supply allows **up to 500 mA**; this demo requests at most **300 mA**.
 The current limit is a ceiling, not a current forced into the load.
 The recipe attempts to turn the load off, then CH1 off when execution exits.
 Configure the instruments' hardware protection settings separately.
 
 The actual runnable script is
-[08_Software/recipes/load_sweep.yaml](08_Software/recipes/load_sweep.yaml):
+[Software/recipes/load_sweep.yaml](Software/recipes/load_sweep.yaml):
 
 ```yaml
 # 5 V power delivery test: does enough voltage reach a device as demand rises?
@@ -242,7 +259,7 @@ finally:
 After checking wiring, hardware limits and your local inventory:
 
 ```bash
-benchctl run 08_Software/recipes/load_sweep.yaml --setup main_bench
+benchctl run Software/recipes/load_sweep.yaml --setup main_bench
 benchctl report --latest load_sweep
 ```
 
@@ -253,11 +270,11 @@ against the configured limits **before** an instrument connection opens.
 ### Actual files from the demo
 
 The successful run produced the files below. Open the
-[complete example run](05_Data/Example_Run/20260926T072124Z_load_sweep/) to inspect
+[complete example run](Data/Example_Run/20260926T072124Z_load_sweep/) to inspect
 the actual records from the **50 → 300 → 50 mA** test:
 
 ```text
-05_Data/Example_Run/20260926T072124Z_load_sweep/
+Data/Example_Run/20260926T072124Z_load_sweep/
 ├── run.json
 ├── execution.jsonl
 ├── measurements.jsonl
@@ -268,12 +285,12 @@ the actual records from the **50 → 300 → 50 mA** test:
 
 | File | What you will find |
 | --- | --- |
-| [run.json](05_Data/Example_Run/20260926T072124Z_load_sweep/run.json) | Test settings, start/end times, instrument models, and the final `pass` result. |
-| [execution.jsonl](05_Data/Example_Run/20260926T072124Z_load_sweep/execution.jsonl) | Each action in order: change current, enable the load, wait, measure, and shut down. |
-| [measurements.jsonl](05_Data/Example_Run/20260926T072124Z_load_sweep/measurements.jsonl) | All 22 readings, including the limits checked and each reading's result. |
-| [measurements.csv](05_Data/Example_Run/20260926T072124Z_load_sweep/measurements.csv) | Those readings and checks in a spreadsheet-friendly table. |
-| [report.html](05_Data/Example_Run/20260926T072124Z_load_sweep/report.html) | The interactive graphs and results, generated from these files. |
-| [postflight.json](05_Data/Example_Run/20260926T072124Z_load_sweep/postflight.json) | The separate check confirming CH1 and the load input were off afterward. |
+| [run.json](Data/Example_Run/20260926T072124Z_load_sweep/run.json) | Test settings, start/end times, instrument models, and the final `pass` result. |
+| [execution.jsonl](Data/Example_Run/20260926T072124Z_load_sweep/execution.jsonl) | Each action in order: change current, enable the load, wait, measure, and shut down. |
+| [measurements.jsonl](Data/Example_Run/20260926T072124Z_load_sweep/measurements.jsonl) | All 22 readings, including the limits checked and each reading's result. |
+| [measurements.csv](Data/Example_Run/20260926T072124Z_load_sweep/measurements.csv) | Those readings and checks in a spreadsheet-friendly table. |
+| [report.html](https://robomaniac.github.io/rigol-control/Data/Example_Run/20260926T072124Z_load_sweep/report.html) | Open the interactive graphs and results, generated from these files. |
+| [postflight.json](Data/Example_Run/20260926T072124Z_load_sweep/postflight.json) | The separate check confirming CH1 and the load input were off afterward. |
 
 `JSONL` means one JSON record per line. This is a shareable copy of the real
 run: instrument serial numbers are redacted; measurements and action records
@@ -284,7 +301,7 @@ creates the HTML.
 You can regenerate this example's report **without connecting instruments**:
 
 ```bash
-benchctl report 05_Data/Example_Run/20260926T072124Z_load_sweep
+benchctl report Data/Example_Run/20260926T072124Z_load_sweep
 ```
 
 ## Explore the report
@@ -297,7 +314,7 @@ benchctl report 05_Data/Example_Run/20260926T072124Z_load_sweep
 
 The [actual demo files](#actual-files-from-the-demo) above show what a run
 contains. Your own raw runs and traffic logs stay local because they can contain
-addresses and serials. See [05_Data](05_Data/README.md) for provenance, file
+addresses and serials. See [Data](Data/README.md) for provenance, file
 formats, timestamps, and instructions for opening the report over SSH.
 
 ## Commands
@@ -313,7 +330,7 @@ formats, timestamps, and instructions for opening the report over SSH.
 | `benchctl output-off --device psu_rigol_1 --channel 1` | Request CH1 shutdown. |
 | `benchctl web` | Open the separate read-only live dashboard on port 8080. |
 
-Rebuild the simulated preview with `python 08_Software/create_preview.py`.
+Rebuild the simulated preview with `python Software/create_preview.py`.
 
 Use `benchctl COMMAND --help` for manual setpoints and path overrides.
 The software targets Linux/Pi; native Windows is not supported because the
@@ -322,19 +339,19 @@ binds to localhost by default. Use SSH forwarding for remote access.
 
 ## Project folders
 
-Only the folders needed from the numbered project template are included:
+Folders are named for their contents:
 
 ```text
-00_Documentations/   Architecture, limitations and GitHub publishing guide
-01_Electrical/       Bench wiring and protection settings
-04_Media/            README chart
-05_Data/             Reports/CSV and Example_Run/; ignored local Runs/ and Logs/
-08_Software/         src/, tests/, config/, recipes/, developer guide
-pyproject.toml       Install and test entry point from the repository root
+Documentation/   Architecture, limitations and GitHub publishing guide
+Electrical/      Bench wiring and protection settings
+Media/           README chart
+Data/            Reports/CSV and Example_Run/; ignored local Runs/ and Logs/
+Software/        src/, tests/, config/, recipes/, developer guide
+pyproject.toml   Install and test entry point from the repository root
 ```
 
-See the [developer guide](08_Software/README.md) and
-[architecture](00_Documentations/Architecture.md) for the code map and extension points.
+See the [developer guide](Software/README.md) and
+[architecture](Documentation/Architecture.md) for the code map and extension points.
 
 ## Verify and publish
 
@@ -342,8 +359,8 @@ See the [developer guide](08_Software/README.md) and
 python -m pytest
 ```
 
-Tests use fake instruments. See the [verification record](05_Data/Verification.md).
-[Publishing to GitHub](00_Documentations/Publishing.md)
+Tests use fake instruments. See the [verification record](Data/Verification.md).
+[Publishing to GitHub](Documentation/Publishing.md)
 explains commit identity, ignored files, authentication and the first push.
 Choose a license before inviting others to reuse the code.
 

@@ -6,11 +6,11 @@ __pycache__/
 build/
 dist/
 # Local instrument addresses and serial numbers belong only in this file.
-08_Software/config/lab.yaml
-05_Data/Logs/*
-!05_Data/Logs/.gitkeep
-05_Data/Runs/*
-!05_Data/Runs/.gitkeep
+Software/config/lab.yaml
+Data/Logs/*
+!Data/Logs/.gitkeep
+Data/Runs/*
+!Data/Runs/.gitkeep
 .DS_Store
 Thumbs.db
 .browser-check/

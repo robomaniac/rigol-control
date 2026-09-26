@@ -1,10 +1,10 @@
 # How benchctl works
 
-benchctl runs finite YAML recipes through a small set of typed instrument actions. The software lives in [`08_Software`](../08_Software/README.md); the repository root holds the Python package configuration so installation and tests run from the root.
+benchctl runs finite YAML recipes through a small set of typed instrument actions. The software lives in [`Software`](../Software/README.md); the repository root holds the Python package configuration so installation and tests run from the root.
 
 ## Code map
 
-Paths below are relative to `08_Software/src/benchctl/`.
+Paths below are relative to `Software/src/benchctl/`.
 
 | File | Responsibility |
 | --- | --- |
@@ -43,15 +43,15 @@ Connection or identity failures occur before recipe execution and do not send re
 
 ## Data and reports
 
-Each run creates a directory in `05_Data/Runs/` containing `run.json`, `execution.jsonl`, and, when measurements exist, `measurements.jsonl` and `measurements.csv`. Raw VISA traffic is recorded in `05_Data/Logs/commands.jsonl`. Local runs and logs are ignored by Git because they can contain instrument addresses and serial numbers.
+Each run creates a directory in `Data/Runs/` containing `run.json`, `execution.jsonl`, and, when measurements exist, `measurements.jsonl` and `measurements.csv`. Raw VISA traffic is recorded in `Data/Logs/commands.jsonl`. Local runs and logs are ignored by Git because they can contain instrument addresses and serial numbers.
 
 Report generation needs only saved files and never contacts hardware. The current overview shows requested and measured current against reading number. Comparison plots use measured load current and keep acquisition order, so an upward and downward sweep can be compared. Requested currents come from successful configuration events in the execution log. Human reading names combine this current with the direction of demand; internal record IDs remain available in CSV and raw data. Report conclusions use the voltage range saved with the run, so changing a recipe never rewrites historical acceptance limits. Simulated examples are labelled and do not receive a real bench verdict. Missing or damaged records are called out when possible, allowing inspection of partial runs.
 
 Supply and load readings are sequential. Their voltage difference includes instrument offsets and connection effects; dividing it by load current gives an apparent resistance, not an isolated cable-resistance measurement. A pass means the recorded expectations were satisfied, not that the bench is calibrated.
 
-The [21-reading measured report](../05_Data/power-test-report.html) and
-[matching CSV](../05_Data/power-test-results.csv) contain the completed 5 V
-test. The original [three-point report](../05_Data/demo-report.html),
-[CSV](../05_Data/demo-results.csv), and [README chart](../04_Media/demo-load-sweep.svg)
+The [21-reading measured report](https://robomaniac.github.io/rigol-control/Data/power-test-report.html) and
+[matching CSV](../Data/power-test-results.csv) contain the completed 5 V
+test. The original [three-point report](https://robomaniac.github.io/rigol-control/Data/demo-report.html),
+[CSV](../Data/demo-results.csv), and [README chart](../Media/demo-load-sweep.svg)
 remain as the earlier measured snapshot. These shareable artifacts are separate
 from private run logs.

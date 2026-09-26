@@ -1,7 +1,7 @@
 """Safety profiles: strict parsing and setpoint validation.
 
 Safety profiles describe manually maintained physical limits for each
-instrument (see ``08_Software/config/safety_profiles.yaml``). Any command that would
+instrument (see ``Software/config/safety_profiles.yaml``). Any command that would
 apply a setpoint must validate it here first; validation failures raise
 :class:`SafetyError` and nothing is sent to the instrument.
 

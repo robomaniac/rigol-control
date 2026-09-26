@@ -7,11 +7,11 @@
       "command": "${workspaceFolder}/.venv/bin/benchctl",
       "args": [
         "run",
-        "08_Software/recipes/load_sweep.yaml",
+        "Software/recipes/load_sweep.yaml",
         "--setup",
         "main_bench",
         "--config",
-        "08_Software/config/lab.example.yaml",
+        "Software/config/lab.example.yaml",
         "--dry-run"
       ],
       "options": {
@@ -29,7 +29,7 @@
       "command": "${workspaceFolder}/.venv/bin/benchctl",
       "args": [
         "run",
-        "08_Software/recipes/load_sweep.yaml",
+        "Software/recipes/load_sweep.yaml",
         "--setup",
         "main_bench"
       ],
@@ -63,7 +63,7 @@
         "--bind",
         "127.0.0.1",
         "--directory",
-        "05_Data"
+        "Data"
       ],
       "options": {
         "cwd": "${workspaceFolder}"

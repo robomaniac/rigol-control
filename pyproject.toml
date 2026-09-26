@@ -24,7 +24,7 @@ dev = [
 benchctl = "benchctl.cli:main"
 
 [tool.setuptools.packages.find]
-where = ["08_Software/src"]
+where = ["Software/src"]
 
 [tool.pytest.ini_options]
-testpaths = ["08_Software/tests"]
+testpaths = ["Software/tests"]

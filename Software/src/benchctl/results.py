@@ -2,7 +2,7 @@
 
 Each run gets its own timestamped directory under the results base:
 
-    05_Data/Runs/<UTCstamp>_<recipe_name>/
+    Data/Runs/<UTCstamp>_<recipe_name>/
         measurements.jsonl   values + optional per-value verdicts
         execution.jsonl      one record per executed (or failed) action
         run.json             summary with status + pass/fail/error outcome
@@ -40,7 +40,7 @@ def _append_jsonl(path: Path, record: Mapping[str, Any]) -> None:
 
 
 def create_run_dir(recipe_name: str, base: str | Path = DEFAULT_RESULTS_DIR) -> Path:
-    """Create and return a fresh 05_Data/Runs/<UTCstamp>_<recipe_name>/ directory."""
+    """Create and return a fresh Data/Runs/<UTCstamp>_<recipe_name>/ directory."""
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     base_path = Path(base)
     safe_name = _sanitize(recipe_name)

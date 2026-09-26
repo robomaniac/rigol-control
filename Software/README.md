@@ -16,9 +16,9 @@ Tests use fake instruments and do not connect to the bench. Dashboard tests bind
 The shipped example config uses reserved `.invalid` hostnames. It is sufficient to validate the complete demo plan offline:
 
 ```bash
-benchctl run 08_Software/recipes/load_sweep.yaml \
+benchctl run Software/recipes/load_sweep.yaml \
   --setup main_bench \
-  --config 08_Software/config/lab.example.yaml \
+  --config Software/config/lab.example.yaml \
   --dry-run
 ```
 
@@ -26,17 +26,17 @@ This expands the 21 loaded points and validates all setpoints without touching h
 
 ## Preview without a bench
 
-Open [the 5 V power test example](../05_Data/sweep-preview.html), or rebuild it:
+Open [the 5 V power test example](https://robomaniac.github.io/rigol-control/Data/sweep-preview.html), or rebuild it:
 
 ```bash
-python 08_Software/create_preview.py
+python Software/create_preview.py
 ```
 
 It shows how to check whether enough voltage reaches a circuit as it draws
 more current. The electronic load stands in for that circuit, requesting
 50–300 mA. The example is labelled SIMULATED and contains illustrative values.
-The [real 21-point report](../05_Data/power-test-report.html) contains the measured
-test, including its unloaded reference; the [original three-point report](../05_Data/demo-report.html)
+The [real 21-point report](https://robomaniac.github.io/rigol-control/Data/power-test-report.html) contains the measured
+test, including its unloaded reference; the [original three-point report](https://robomaniac.github.io/rigol-control/Data/demo-report.html)
 preserves the earlier run shown in the README chart.
 
 ## Where to make changes
@@ -48,7 +48,7 @@ preserves the earlier run shown in the README chart.
 | [`config/`](config/) | Shareable inventory example and explicit safety profiles; private `lab.yaml` is ignored. |
 | [`recipes/`](recipes/) | Runnable YAML; `load_sweep.yaml` tests 5 V delivery as current demand changes. |
 
-See [Architecture](../00_Documentations/Architecture.md) for the module map and control boundaries. Default file locations are centralized in `src/benchctl/paths.py`; CLI options can select a different config or results directory.
+See [Architecture](../Documentation/Architecture.md) for the module map and control boundaries. Default file locations are centralized in `src/benchctl/paths.py`; CLI options can select a different config or results directory.
 
 ## Working on recipes and drivers
 

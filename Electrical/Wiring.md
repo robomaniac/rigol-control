@@ -42,4 +42,4 @@ The recipe requests load input off before changing CC setpoints and requests
 load off followed by CH1 off on completion or an execution error. A connection,
 identity, process, power or logging failure can prevent cleanup. Inspect front
 panels after an error; software alone cannot establish a safe physical state.
-The [architecture notes](../00_Documentations/Architecture.md) describe these limits.
+The [architecture notes](../Documentation/Architecture.md) describe these limits.

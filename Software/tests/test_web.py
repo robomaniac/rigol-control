@@ -406,7 +406,7 @@ def build_parser_with_web():
 def test_register_adds_web_command_with_defaults():
     args = build_parser_with_web().parse_args(["web"])
     assert args.command == "web"
-    assert args.config == Path("08_Software/config/lab.yaml")
+    assert args.config == Path("Software/config/lab.yaml")
     assert args.host == "127.0.0.1"
     assert args.port == 8080
     assert args.func is commands_web.handler

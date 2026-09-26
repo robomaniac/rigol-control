@@ -1,4 +1,4 @@
-# Copy to 08_Software/config/lab.yaml and replace both .invalid hostnames with your
+# Copy to Software/config/lab.yaml and replace both .invalid hostnames with your
 # instruments' addresses. Identify each instrument read-only, then fill in
 # both expected_serial values before using any control command or recipe.
 # The .invalid names are reserved and must never identify a live device.

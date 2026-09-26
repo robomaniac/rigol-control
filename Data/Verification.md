@@ -57,7 +57,7 @@
   the load input **off**, CH1 output **off**, and load terminal voltage **0.0 V**.
   The postflight record is saved with the ignored local run data.
 
-The [real 21-point report](power-test-report.html) and [CSV](power-test-results.csv)
-contain this successful run. The [original measured report](demo-report.html)
+The [real 21-point report](https://robomaniac.github.io/rigol-control/Data/power-test-report.html) and [CSV](power-test-results.csv)
+contain this successful run. The [original measured report](https://robomaniac.github.io/rigol-control/Data/demo-report.html)
 retains the three-point run used for the unchanged README SVG. The
-[21-point preview](sweep-preview.html) remains explicitly simulated.
+[21-point preview](https://robomaniac.github.io/rigol-control/Data/sweep-preview.html) remains explicitly simulated.
