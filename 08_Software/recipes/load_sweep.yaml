@@ -1,0 +1,103 @@
+# 5 V power delivery test: does enough voltage reach a device as demand rises?
+# The electronic load stands in for a device, drawing 50 to 300 mA in 25 mA
+# steps, then reducing demand. We measure voltage at both ends of the wires.
+# There are 21 loaded readings at 11 current levels, plus an unloaded reference.
+# This demo accepts 4.75–5.25 V; choose bounds appropriate for your own circuit.
+# Check wiring/protection settings first. The load briefly turns off between
+# readings, so this checks settled voltage rather than fast changes in demand.
+# Run from the project root; report with: benchctl report --latest load_sweep
+schema_version: 1
+name: load_sweep
+
+requires:
+  supply: {kind: power_supply}
+  load: {kind: electronic_load}
+
+parameters:
+  supply_channel: 1
+  voltage_v: 5.0
+  current_limit_a: 0.50
+  load_start_a: 0.05
+  load_stop_a: 0.30
+  load_step_a: 0.025
+  load_tolerance_a: 0.02
+  supply_tolerance_a: 0.03
+  min_acceptable_voltage_v: 4.75
+  max_expected_voltage_v: 5.25
+  max_load_power_w: 2.0
+  configure_settle_s: 0.5
+  settle_s: 4.0
+
+steps:
+  # Start from a known off state before changing either instrument's settings.
+  - action: load.input_off
+  - action: supply.output_off
+    channel: "${parameters.supply_channel}"
+  - action: supply.configure
+    channel: "${parameters.supply_channel}"
+    voltage_v: "${parameters.voltage_v}"
+    current_limit_a: "${parameters.current_limit_a}"
+  - action: supply.output_on
+    channel: "${parameters.supply_channel}"
+  - action: wait
+    seconds: "${parameters.settle_s}"
+
+  # Baseline for voltage droop: load input is still off.
+  - action: measure
+    save_as: no_load
+    values:
+      supply_voltage_v:
+        source: supply.voltage
+        channel: "${parameters.supply_channel}"
+        expect: {min: "${parameters.min_acceptable_voltage_v}", max: "${parameters.max_expected_voltage_v}"}
+      supply_current_a:
+        source: supply.current
+        channel: "${parameters.supply_channel}"
+        expect: {min: 0.0, max: 0.03}
+      supply_power_w: {source: supply.power, channel: "${parameters.supply_channel}"}
+
+  # The parser expands and validates every point before contacting hardware.
+  # Keep the load off while changing CC setpoints. Each enable also checks
+  # measured voltage/current/power before waiting for the final reading.
+  - action: sweep
+    start: "${parameters.load_start_a}"
+    stop: "${parameters.load_stop_a}"
+    step: "${parameters.load_step_a}"
+    return_to_start: true
+    steps:
+      - action: load.input_off
+      - action: load.configure_cc
+        current_a: "${sweep.value}"
+        max_voltage_v: "${parameters.max_expected_voltage_v}"
+      # Allow the instrument to finish changing mode/current before enabling.
+      - action: wait
+        seconds: "${parameters.configure_settle_s}"
+      - action: load.input_on
+      - action: wait
+        seconds: "${parameters.settle_s}"
+      - action: measure
+        save_as: "point_${sweep.index}_${sweep.value}_a"
+        values:
+          supply_voltage_v:
+            source: supply.voltage
+            channel: "${parameters.supply_channel}"
+            expect: {min: "${parameters.min_acceptable_voltage_v}", max: "${parameters.max_expected_voltage_v}"}
+          supply_current_a:
+            source: supply.current
+            channel: "${parameters.supply_channel}"
+            expect: {target: "${sweep.value}", tolerance: "${parameters.supply_tolerance_a}"}
+          supply_power_w: {source: supply.power, channel: "${parameters.supply_channel}"}
+          load_voltage_v:
+            source: load.voltage
+            expect: {min: "${parameters.min_acceptable_voltage_v}", max: "${parameters.max_expected_voltage_v}"}
+          load_current_a:
+            source: load.current
+            expect: {target: "${sweep.value}", tolerance: "${parameters.load_tolerance_a}"}
+          load_power_w:
+            source: load.power
+            expect: {min: 0.0, max: "${parameters.max_load_power_w}"}
+
+finally:
+  - action: load.input_off
+  - action: supply.output_off
+    channel: "${parameters.supply_channel}"

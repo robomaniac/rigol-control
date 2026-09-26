@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+# Local instrument addresses and serial numbers belong only in this file.
+08_Software/config/lab.yaml
+05_Data/Logs/*
+!05_Data/Logs/.gitkeep
+05_Data/Runs/*
+!05_Data/Runs/.gitkeep
+.DS_Store
+Thumbs.db
+.browser-check/

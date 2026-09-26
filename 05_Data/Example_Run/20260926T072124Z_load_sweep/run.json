@@ -1,0 +1,38 @@
+{
+  "recipe": "load_sweep",
+  "setup": "main_bench",
+  "parameters": {
+    "supply_channel": 1,
+    "voltage_v": 5.0,
+    "current_limit_a": 0.5,
+    "load_start_a": 0.05,
+    "load_stop_a": 0.3,
+    "load_step_a": 0.025,
+    "load_tolerance_a": 0.02,
+    "supply_tolerance_a": 0.03,
+    "min_acceptable_voltage_v": 4.75,
+    "max_expected_voltage_v": 5.25,
+    "max_load_power_w": 2.0,
+    "configure_settle_s": 0.5,
+    "settle_s": 4.0
+  },
+  "started_at": "2026-09-26T07:21:24.561709+00:00",
+  "finished_at": "2026-09-26T07:23:09.411214+00:00",
+  "status": "success",
+  "outcome": "pass",
+  "error": null,
+  "identities": {
+    "supply": {
+      "manufacturer": "RIGOL TECHNOLOGIES",
+      "model": "DP821A",
+      "serial": "[redacted]",
+      "firmware": "00.01.16"
+    },
+    "load": {
+      "manufacturer": "RIGOL TECHNOLOGIES",
+      "model": "DL3031A",
+      "serial": "[redacted]",
+      "firmware": "00.01.04.00.05"
+    }
+  }
+}

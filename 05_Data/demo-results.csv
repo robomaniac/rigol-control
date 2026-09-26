@@ -1,0 +1,5 @@
+step,requested_load_current_a,measured_load_current_a,supply_voltage_v,load_voltage_v,supply_power_w,load_power_w,voltage_drop_mv
+no_load,,,5.005,,0.002,,
+load_0p10_a,0.1,0.098868,5.005,4.984664,0.427,0.492821,20.336
+load_0p20_a,0.2,0.199361,5.006,4.976998,0.93,0.99222,29.002
+load_0p30_a,0.3,0.29884,5.005,4.969243,1.426,1.485006,35.757

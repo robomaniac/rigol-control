@@ -1,0 +1,925 @@
+<!doctype html>
+<html lang="en" data-source="simulated"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-CjVftAsAMZnA70prini9b2Xjr4UAQ8Cky+0X2/qRoZc='; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<title>5 V power delivery test · Bench report</title><style>
+.mobile-axes {
+  display:none
+}
+:root {
+  color-scheme:dark;
+  font-family:Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;
+  background:#09111b;
+  color:#e4edf6;
+  font-synthesis:none
+}
+* {
+  box-sizing:border-box
+}
+body {
+  margin:0;
+  background:radial-gradient(ellipse at 12% 0%,#16313c55,transparent 50%)
+}
+[hidden] {
+  display:none!important
+}
+a {
+  color:#60e0ca;
+  text-underline-offset:4px
+}
+button,input {
+  font:inherit
+}
+button,a,input,svg,summary {
+  -webkit-tap-highlight-color:transparent
+}
+button {
+  cursor:pointer
+}
+button:disabled {
+  opacity:.35;
+  cursor:default
+}
+button:focus-visible,a:focus-visible,input:focus-visible,summary:focus-visible,svg:focus-visible,.table-scroll:focus-visible {
+  outline:2px solid #64ead2;
+  outline-offset:4px
+}
+.shell {
+  max-width:1280px;
+  margin:auto;
+  padding:36px 28px 56px
+}
+.topline,.header-main,.section-heading,.inspection-head,.point-nav {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:20px
+}
+.topline {
+  padding-bottom:24px;
+  border-bottom:1px solid #294050
+}
+.brand {
+  font-size:.9rem;
+  font-weight:750;
+  letter-spacing:.05em
+}
+.brand b {
+  color:#64ead2
+}
+.offline {
+  color:#97acbe;
+  font-size:.75rem
+}
+.offline:before {
+  content:'';
+  display:inline-block;
+  width:6px;
+  height:6px;
+  margin-right:8px;
+  border-radius:100%;
+  background:#64ead2
+}
+.header-main {
+  padding:34px 0 28px;
+  align-items:flex-start
+}
+.eyebrow {
+  color:#61d9c5;
+  font-size:.67rem;
+  letter-spacing:.17em;
+  text-transform:uppercase;
+  font-weight:750
+}
+h1 {
+  font-size:clamp(1.85rem,4vw,3rem);
+  letter-spacing:-.04em;
+  margin:10px 0;
+  line-height:1.15;
+  overflow-wrap:anywhere
+}
+h2 {
+  font-size:1.15rem;
+  letter-spacing:-.02em;
+  margin:7px 0 0
+}
+h3 {
+  font-size:1rem;
+  margin:0;
+  letter-spacing:-.01em
+}
+.meta {
+  color:#97acbe;
+  font-size:.82rem;
+  line-height:1.8
+}
+.meta code {
+  font-size:.8rem;
+  color:#c4d3df;
+  overflow-wrap:anywhere
+}
+.badge {
+  display:inline-flex;
+  align-items:center;
+  padding:6px 10px;
+  border:1px solid #3a4a5d;
+  border-radius:7px;
+  background:#263449;
+  color:#dbeafe;
+  font-size:.7rem;
+  font-weight:750;
+  letter-spacing:.04em
+}
+.badge.pass {
+  background:#14362e;
+  color:#6fe4c8;
+  border-color:#285848
+}
+.badge.fail {
+  background:#4b232e;
+  color:#fda4af;
+  border-color:#774251
+}
+.header-actions {
+  display:flex;
+  gap:8px;
+  padding-top:15px;
+  flex-shrink:0
+}
+.button {
+  border:1px solid #35505e;
+  border-radius:8px;
+  background:#162a36;
+  color:#ddecf5;
+  padding:10px 14px;
+  text-decoration:none;
+  font-weight:650;
+  font-size:.78rem;
+  white-space:nowrap
+}
+.button:hover {
+  background:#234251;
+  border-color:#568a96
+}
+.button.primary {
+  background:#61dbc1;
+  color:#09221d;
+  border-color:#61dbc1
+}
+.button.primary:hover {
+  background:#8becd6
+}
+.metrics {
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(195px,1fr));
+  gap:10px;
+  margin:0 0 28px
+}
+.metric {
+  padding:17px 18px;
+  border:1px solid #263b4b;
+  border-radius:12px;
+  background:linear-gradient(130deg,#142332,#101c28)
+}
+.metric-label {
+  color:#a9bac9;
+  font-size:.72rem
+}
+.metric-value {
+  font-size:1.6rem;
+  font-weight:680;
+  letter-spacing:-.035em;
+  margin:7px 0;
+  font-variant-numeric:tabular-nums
+}
+.metric-detail {
+  color:#839bac;
+  font-size:.66rem;
+  line-height:1.5
+}
+.section-heading {
+  margin:0 0 16px
+}
+.section-copy {
+  color:#a0b4c4;
+  font-size:.78rem;
+  line-height:1.6;
+  margin:8px 0 0
+}
+.charts {
+  display:grid;
+  grid-template-columns:minmax(0,1fr) minmax(0,1fr);
+  gap:16px
+}
+.chart-card,.data-card,.inspector {
+  background:#101d2a;
+  border:1px solid #293e4e;
+  border-radius:14px
+}
+.chart-card {
+  padding:22px;
+  min-width:0
+}
+.chart-card.featured {
+  grid-column:1/-1
+}
+.chart-heading p {
+  color:#97acbe;
+  font-size:.76rem;
+  margin:7px 0 16px;
+  line-height:1.5
+}
+.chart-card svg {
+  display:block;
+  width:100%;
+  height:auto;
+  overflow:visible;
+  border-radius:8px;
+  touch-action:pan-y
+}
+.plot-wrap {
+  position:relative
+}
+.plot-surface {
+  fill:#0c1723
+}
+.grid {
+  stroke:#294052;
+  stroke-dasharray:3 6
+}
+.axis {
+  stroke:#486075
+}
+.tick,.axis-label {
+  fill:#9cb1c2;
+  font:12px system-ui,sans-serif
+}
+.axis-label {
+  font-weight:550
+}
+.cursor-line {
+  stroke:#d4ede7;
+  stroke-width:1;
+  stroke-dasharray:4 4;
+  pointer-events:none
+}
+.data-point {
+  transition:r .08s
+}
+.data-point.is-active {
+  r:6;
+  stroke:#e8fff9;
+  stroke-width:2.5
+}
+.legend {
+  display:flex;
+  gap:18px;
+  flex-wrap:wrap;
+  margin:10px 0 0 8px;
+  color:#b9c6d8;
+  font-size:.72rem
+}
+.legend-item {
+  display:inline-flex;
+  align-items:center;
+  gap:7px
+}
+.legend i {
+  width:8px;
+  height:8px;
+  border-radius:50%;
+  display:inline-block
+}
+.plot-tooltip {
+  position:absolute;
+  z-index:4;
+  pointer-events:none;
+  background:#193143f5;
+  color:#edf7fe;
+  backdrop-filter:blur(8px);
+  border:1px solid #628291;
+  border-radius:10px;
+  padding:11px 13px;
+  font-size:.72rem;
+  box-shadow:0 12px 32px #0007;
+  min-width:185px;
+  max-width:min(285px,95%);
+  line-height:1.65
+}
+.tip-title {
+  font-weight:750;
+  color:#77e6cf;
+  margin-bottom:4px;
+  overflow-wrap:anywhere
+}
+.tip-row {
+  display:flex;
+  justify-content:space-between;
+  gap:20px
+}
+.tip-row span:first-child {
+  color:#acbfce
+}
+.tip-row span:last-child {
+  font-variant-numeric:tabular-nums;
+  font-weight:600
+}
+.inspector {
+  margin:16px 0 30px;
+  padding:18px 22px;
+  border-color:#34594f;
+  background:linear-gradient(110deg,#122b2c,#10202e 75%)
+}
+.inspection-head {
+  margin-bottom:15px
+}
+.selected-title {
+  font-size:.9rem;
+  margin:6px 0 0;
+  overflow-wrap:anywhere
+}
+.point-nav {
+  gap:10px;
+  color:#b7cbd8;
+  font-size:.73rem
+}
+.point-nav .button {
+  padding:6px 12px
+}
+.selected-grid {
+  display:grid;
+  grid-template-columns:repeat(5,minmax(0,1fr));
+  gap:14px
+}
+.selected-grid dt {
+  color:#98b2bf;
+  font-size:.68rem;
+  margin-bottom:5px
+}
+.selected-grid dd {
+  font-size:1.1rem;
+  font-variant-numeric:tabular-nums;
+  margin:0;
+  letter-spacing:-.02em
+}
+.point-scrubber {
+  display:flex;
+  align-items:center;
+  gap:12px;
+  margin-top:15px;
+  padding-top:12px;
+  border-top:1px solid #2e4b53
+}
+.point-scrubber label {
+  color:#a6c0cb;
+  font-size:.7rem;
+  flex-shrink:0
+}
+input[type=range] {
+  width:100%;
+  accent-color:#63ddc5;
+  cursor:pointer
+}
+.selected-meta {
+  font-size:.68rem;
+  color:#8eacbd;
+  margin:12px 0 0
+}
+.data-card {
+  padding:22px;
+  margin-top:20px
+}
+.search-label {
+  display:flex;
+  gap:10px;
+  align-items:center;
+  color:#9eb6c6;
+  font-size:.73rem
+}
+.search-label input {
+  min-width:160px;
+  max-width:240px;
+  background:#0b1824;
+  border:1px solid #3b5465;
+  color:#e6f0f8;
+  border-radius:7px;
+  padding:9px 11px;
+  font-size:.75rem
+}
+.table-scroll {
+  overflow:auto;
+  max-height:520px;
+  border:1px solid #263d4d;
+  border-radius:9px;
+  scrollbar-color:#4e6878 #101d2a
+}
+table {
+  width:100%;
+  border-collapse:separate;
+  border-spacing:0;
+  white-space:nowrap;
+  font-variant-numeric:tabular-nums
+}
+th,td {
+  text-align:right;
+  padding:11px 13px;
+  border-bottom:1px solid #26394a;
+  font-size:.73rem
+}
+th {
+  position:sticky;
+  top:0;
+  z-index:1;
+  background:#192b3b;
+  color:#b5c8d6;
+  font-weight:600
+}
+td:nth-child(2),th:nth-child(2),td:nth-child(3),th:nth-child(3),td:nth-child(4),th:nth-child(4) {
+  text-align:left
+}
+tbody tr:hover,tbody tr.selected {
+  background:#1a3542
+}
+tbody tr.selected td:first-child {
+  box-shadow:inset 3px 0 #60e0ca
+}
+tbody tr.failed {
+  background:#392332
+}
+.point-link {
+  color:#d9eef6;
+  background:none;
+  border:0;
+  padding:0;
+  text-align:left;
+  font-size:inherit;
+  text-decoration:underline;
+  text-decoration-color:#3e6072;
+  text-underline-offset:4px
+}
+.note,.empty {
+  color:#96acbf;
+  font-size:.74rem;
+  line-height:1.7
+}
+.method {
+  margin-top:16px
+}
+.method summary {
+  cursor:pointer;
+  color:#adbfcd;
+  font-size:.75rem
+}
+.method .note {
+  max-width:960px
+}
+.purpose-card,.technical-card {
+  border:1px solid #2d4858;
+  border-radius:12px;
+  padding:22px;
+  margin-bottom:24px;
+  background:#10212e
+}
+.purpose-card p {
+  color:#b6cad8;
+  line-height:1.75;
+  font-size:.86rem;
+  max-width:1000px
+}
+.bench-flow {
+  display:flex;
+  align-items:center;
+  gap:12px;
+  margin:20px 0;
+  font-size:.78rem
+}
+.bench-flow div {
+  border:1px solid #2d4858;
+  border-radius:8px;
+  padding:14px;
+  flex:1
+}
+.bench-flow b,.bench-flow div span {
+  display:block
+}
+.bench-flow div span {
+  color:#abc0d0;
+  line-height:1.5;
+  margin-top:6px
+}
+.flow-arrow {
+  color:#61dbc1;
+  font-size:1.2rem
+}
+.conclusion {
+  border-left:3px solid #61dbc1;
+  padding:4px 0 4px 16px;
+  margin-top:20px
+}
+.conclusion p {
+  margin-bottom:0
+}
+.technical-card summary {
+  cursor:pointer;
+  color:#b6cad8;
+  font-size:.85rem
+}
+.technical-card .metrics {
+  margin:16px 0 0
+}
+.notices {
+  border-left:3px solid #f5ae72;
+  padding:6px 16px;
+  margin:0 0 20px;
+  background:#33291f;
+  color:#f6d3b2;
+  border-radius:0 8px 8px 0;
+  font-size:.8rem;
+  line-height:1.6
+}
+.notices p {
+  margin:7px 0
+}
+footer {
+  color:#7f9bac;
+  font-size:.71rem;
+  margin-top:26px;
+  line-height:1.7
+}
+.sr-only {
+  position:absolute;
+  width:1px;
+  height:1px;
+  overflow:hidden;
+  clip:rect(0,0,0,0);
+  white-space:nowrap
+}
+.keyboard-hint {
+  color:#779aaa;
+  font-size:.68rem
+}
+kbd {
+  font:inherit;
+  background:#1a303e;
+  border:1px solid #375363;
+  border-radius:3px;
+  padding:0 4px
+}
+noscript p {
+  background:#203444;
+  padding:12px;
+  border-radius:8px;
+  color:#cbdde8;
+  font-size:.8rem
+}
+@media(min-width:1000px) {
+  .featured .plot-wrap {
+    max-width:1080px;
+    margin:auto
+  }
+  .metrics .metric:nth-child(n+6) {
+    padding:13px 18px
+  }
+  .metrics .metric:nth-child(n+6) .metric-value {
+    font-size:1.3rem
+  }
+}
+@media(max-width:760px) {
+  .bench-flow {
+    display:grid;
+    gap:4px
+  }
+  .flow-arrow {
+    transform:rotate(90deg);
+    text-align:center
+  }
+  .shell {
+    padding:22px 16px 36px
+  }
+  .header-main {
+    display:block;
+    padding:25px 0
+  }
+  .header-actions {
+    padding-top:18px
+  }
+  .charts {
+    grid-template-columns:minmax(0,1fr)
+  }
+  .chart-card {
+    padding:16px 10px
+  }
+  .chart-heading,.legend {
+    padding-left:8px
+  }
+  .selected-grid {
+    grid-template-columns:repeat(3,minmax(0,1fr));
+    row-gap:20px
+  }
+  .section-heading {
+    align-items:flex-start;
+    flex-wrap:wrap
+  }
+  .inspector,.data-card {
+    padding:17px 14px
+  }
+  .inspection-head {
+    gap:12px
+  }
+  .point-nav {
+    gap:5px
+  }
+  .point-nav .button {
+    padding:6px 9px
+  }
+  .metrics {
+    grid-template-columns:repeat(2,minmax(0,1fr));
+    gap:8px
+  }
+  .metric {
+    padding:14px
+  }
+  .metric-value {
+    font-size:1.45rem
+  }
+  .search-label {
+    width:100%;
+    justify-content:space-between
+  }
+  .search-label input {
+    max-width:none;
+    flex:1
+  }
+  .offline {
+    font-size:.65rem
+  }
+  .keyboard-hint {
+    display:none
+  }
+}
+@media(prefers-reduced-motion:reduce) {
+  * {
+    transition:none!important
+  }
+}
+@media(max-width:760px) {
+  svg.interactive-chart {
+    width:calc(100% - 16px);
+    margin:0 8px;
+    border-radius:0
+  }
+  .interactive-chart .tick {
+    font-size:24px
+  }
+  .interactive-chart .axis-label {
+    display:none
+  }
+  .mobile-axes {
+    display:flex;
+    gap:4px 14px;
+    flex-wrap:wrap;
+    color:#b1c5d3;
+    font-size:.7rem;
+    line-height:1.6;
+    margin:0 0 12px
+  }
+}
+@media print {
+  :root {
+    color-scheme:light;
+    background:white;
+    color:#102330
+  }
+  body {
+    background:white
+  }
+  .shell {
+    max-width:none;
+    padding:0
+  }
+  .button,.plot-tooltip,.point-nav,.point-scrubber,.search-label,.keyboard-hint,.inspector {
+    display:none!important
+  }
+  .metric,.chart-card,.data-card {
+    background:white;
+    border-color:#b7c4ce;
+    break-inside:avoid
+  }
+  .metric-label,.metric-detail,.meta,.note,footer,.chart-heading p,.section-copy {
+    color:#476071
+  }
+  .chart-card {
+    padding:12px
+  }
+  .plot-surface {
+    fill:#f0f5f8
+  }
+  .tick,.axis-label {
+    fill:#375367
+  }
+  .grid {
+    stroke:#c9d5de
+  }
+  .table-scroll {
+    max-height:none;
+    overflow:visible
+  }
+  th,td {
+    font-size:6pt;
+    padding:5px 3px
+  }
+  th {
+    position:static;
+    background:#edf3f6;
+    color:#253f50
+  }
+  .point-link {
+    color:#253f50
+  }
+  table {
+    white-space:normal
+  }
+  .topline {
+    padding-bottom:12px
+  }
+  .header-main {
+    padding:18px 0
+  }
+  .metrics {
+    gap:7px
+  }
+  .metric {
+    padding:10px
+  }
+  .metric-value {
+    font-size:1.15rem
+  }
+  .data-card {
+    padding:10px
+  }
+  .legend {
+    color:#375367
+  }
+}
+</style></head>
+<body><main class="shell">
+<header><div class="topline"><div class="brand"><b>▰</b> BENCHCTL <span class="offline">/ ILLUSTRATED EXAMPLE</span></div><div class="offline">Offline · generated example readings</div></div>
+<div class="header-main"><div><span class="badge neutral">SIMULATED</span><h1>5 V power delivery test</h1>
+<div class="meta">Setup: <code>Offline preview · no instruments</code> · Recipe: <code>load_sweep_preview</code><br>Run timing unavailable</div></div>
+<div class="header-actions"><a class="button primary" id="download-csv" download="example-readings.csv" href="data:text/csv;base64,77u/UG9pbnQsU3RlcCxTdGF0dXMsVGltZXN0YW1wLFJlcXVlc3RlZCBsb2FkIGN1cnJlbnQgKEEpLFN1cHBseSBWb2x0YWdlIChWKSxMb2FkIFZvbHRhZ2UgKFYpLFN1cHBseSBDdXJyZW50IChBKSxMb2FkIEN1cnJlbnQgKEEpLFN1cHBseSBQb3dlciAoVyksTG9hZCBQb3dlciAoVyksU3VwcGx5IOKIkiBsb2FkIGN1cnJlbnQgKG1BKSxWb2x0YWdlIGRyb3AgKG1WKSxFc3RpbWF0ZWQgbGVhZCByZXNpc3RhbmNlIChtzqkpLFN1cHBseSBkcm9vcCBmcm9tIG5vLWxvYWQgKCUpDQoxLG5vX2xvYWQsc2ltdWxhdGVkLCwsNS4wMDUsLDAuMDAwNCwsMC4wMDIsLCwsLDAuMA0KMixwb2ludF8xXzAuMDVfYSxzaW11bGF0ZWQsLDAuMDUsNS4wMDUsNC45ODkwOCwwLjAzNSwwLjA0OSwwLjE3NTE3NSwwLjI0NDQ2NSwtMTMuOTk5OTk5OTk5OTk5OTk4LDE1LjkxOTk5OTk5OTk5OTQ5LDMyNC44OTc5NTkxODM2NjMwMywwLjANCjMscG9pbnRfMl8wLjA3NV9hLHNpbXVsYXRlZCwsMC4wNzUsNS4wMDUsNC45ODcwOCwwLjA2LDAuMDc0LDAuMzAwMywwLjM2OTA0NCwtMTMuOTk5OTk5OTk5OTk5OTk4LDE3LjkyMDAwMDAwMDAwMDE1OCwyNDIuMTYyMTYyMTYyMTY0MywwLjANCjQscG9pbnRfM18wLjFfYSxzaW11bGF0ZWQsLDAuMSw1LjAwNSw0Ljk4NTA4LDAuMDg1LDAuMDk5LDAuNDI1NDI1LDAuNDkzNTIzLC0xMy45OTk5OTk5OTk5OTk5OTgsMTkuOTE5OTk5OTk5OTk5OTM4LDIwMS4yMTIxMjEyMTIxMjA1NiwwLjANCjUscG9pbnRfNF8wLjEyNV9hLHNpbXVsYXRlZCwsMC4xMjUsNS4wMDUsNC45ODMwOCwwLjExLDAuMTI0LDAuNTUwNTUsMC42MTc5MDIsLTEzLjk5OTk5OTk5OTk5OTk5OCwyMS45MTk5OTk5OTk5OTk3MTcsMTc2Ljc3NDE5MzU0ODM4NDgsMC4wDQo2LHBvaW50XzVfMC4xNV9hLHNpbXVsYXRlZCwsMC4xNSw1LjAwNSw0Ljk4MTA4LDAuMTM1LDAuMTQ5LDAuNjc1Njc1LDAuNzQyMTgxLC0xMy45OTk5OTk5OTk5OTk5ODQsMjMuOTE5OTk5OTk5OTk5NDk3LDE2MC41MzY5MTI3NTE2NzQ0NiwwLjANCjcscG9pbnRfNl8wLjE3NV9hLHNpbXVsYXRlZCwsMC4xNzUsNS4wMDUsNC45NzkwOCwwLjE2LDAuMTc0LDAuODAwOCwwLjg2NjM2LC0xMy45OTk5OTk5OTk5OTk5ODQsMjUuOTIwMDAwMDAwMDAwMTY1LDE0OC45NjU1MTcyNDEzODAyNywwLjANCjgscG9pbnRfN18wLjJfYSxzaW11bGF0ZWQsLDAuMiw1LjAwNSw0Ljk3NzA4LDAuMTg1LDAuMTk5LDAuOTI1OTI1LDAuOTkwNDM5LC0xNC4wMDAwMDAwMDAwMDAwMTIsMjcuOTE5OTk5OTk5OTk5OTQ1LDE0MC4zMDE1MDc1Mzc2ODgxNywwLjANCjkscG9pbnRfOF8wLjIyNV9hLHNpbXVsYXRlZCwsMC4yMjUsNS4wMDUsNC45NzUwOCwwLjIxLDAuMjI0LDEuMDUxMDUsMS4xMTQ0MTgsLTE0LjAwMDAwMDAwMDAwMDAxMiwyOS45MTk5OTk5OTk5OTk3MjUsMTMzLjU3MTQyODU3MTQyNzMzLDAuMA0KMTAscG9pbnRfOV8wLjI1X2Esc2ltdWxhdGVkLCwwLjI1LDUuMDA1LDQuOTczMDgsMC4yMzUsMC4yNDksMS4xNzYxNzUsMS4yMzgyOTcsLTE0LjAwMDAwMDAwMDAwMDAxMiwzMS45MTk5OTk5OTk5OTk1MDQsMTI4LjE5Mjc3MTA4NDMzNTM2LDAuMA0KMTEscG9pbnRfMTBfMC4yNzVfYSxzaW11bGF0ZWQsLDAuMjc1LDUuMDA1LDQuOTcxMDgsMC4yNiwwLjI3NCwxLjMwMTMsMS4zNjIwNzYsLTE0LjAwMDAwMDAwMDAwMDAxMiwzMy45MjAwMDAwMDAwMDAxNywxMjMuNzk1NjIwNDM3OTU2ODEsMC4wDQoxMixwb2ludF8xMV8wLjNfYSxzaW11bGF0ZWQsLDAuMyw1LjAwNSw0Ljk2OTA4LDAuMjg1LDAuMjk5LDEuNDI2NDI1LDEuNDg1NzU1LC0xNC4wMDAwMDAwMDAwMDAwMTIsMzUuOTE5OTk5OTk5OTk5OTUsMTIwLjEzMzc3OTI2NDIxMzksMC4wDQoxMyxwb2ludF8xMl8wLjI3NV9hLHNpbXVsYXRlZCwsMC4yNzUsNS4wMDUsNC45Njk1OCwwLjI2LDAuMjc0LDEuMzAxMywxLjM2MTY2NSwtMTQuMDAwMDAwMDAwMDAwMDEyLDM1LjQyMDAwMDAwMDAwMDIzLDEyOS4yNzAwNzI5OTI3MDE1NiwwLjANCjE0LHBvaW50XzEzXzAuMjVfYSxzaW11bGF0ZWQsLDAuMjUsNS4wMDUsNC45NzE1OCwwLjIzNSwwLjI0OSwxLjE3NjE3NSwxLjIzNzkyMywtMTQuMDAwMDAwMDAwMDAwMDEyLDMzLjQxOTk5OTk5OTk5OTU2LDEzNC4yMTY4Njc0Njk4Nzc3NywwLjANCjE1LHBvaW50XzE0XzAuMjI1X2Esc2ltdWxhdGVkLCwwLjIyNSw1LjAwNSw0Ljk3MzU4LDAuMjEsMC4yMjQsMS4wNTEwNSwxLjExNDA4MiwtMTQuMDAwMDAwMDAwMDAwMDEyLDMxLjQxOTk5OTk5OTk5OTc4LDE0MC4yNjc4NTcxNDI4NTYxNywwLjANCjE2LHBvaW50XzE1XzAuMl9hLHNpbXVsYXRlZCwsMC4yLDUuMDA1LDQuOTc1NTgsMC4xODUsMC4xOTksMC45MjU5MjUsMC45OTAxNCwtMTQuMDAwMDAwMDAwMDAwMDEyLDI5LjQyLDE0Ny44MzkxOTU5Nzk4OTk1LDAuMA0KMTcscG9pbnRfMTZfMC4xNzVfYSxzaW11bGF0ZWQsLDAuMTc1LDUuMDA1LDQuOTc3NTgsMC4xNiwwLjE3NCwwLjgwMDgsMC44NjYwOTksLTEzLjk5OTk5OTk5OTk5OTk4NCwyNy40MjAwMDAwMDAwMDAyMjIsMTU3LjU4NjIwNjg5NjU1MywwLjANCjE4LHBvaW50XzE3XzAuMTVfYSxzaW11bGF0ZWQsLDAuMTUsNS4wMDUsNC45Nzk1OCwwLjEzNSwwLjE0OSwwLjY3NTY3NSwwLjc0MTk1NywtMTMuOTk5OTk5OTk5OTk5OTg0LDI1LjQxOTk5OTk5OTk5OTU1NCwxNzAuNjA0MDI2ODQ1NjM0NjIsMC4wDQoxOSxwb2ludF8xOF8wLjEyNV9hLHNpbXVsYXRlZCwsMC4xMjUsNS4wMDUsNC45ODE1OCwwLjExLDAuMTI0LDAuNTUwNTUsMC42MTc3MTYsLTEzLjk5OTk5OTk5OTk5OTk5OCwyMy40MTk5OTk5OTk5OTk3NzQsMTg4Ljg3MDk2Nzc0MTkzMzY0LDAuMA0KMjAscG9pbnRfMTlfMC4xX2Esc2ltdWxhdGVkLCwwLjEsNS4wMDUsNC45ODM1OCwwLjA4NSwwLjA5OSwwLjQyNTQyNSwwLjQ5MzM3NCwtMTMuOTk5OTk5OTk5OTk5OTk4LDIxLjQxOTk5OTk5OTk5OTk5NSwyMTYuMzYzNjM2MzYzNjM2MywwLjANCjIxLHBvaW50XzIwXzAuMDc1X2Esc2ltdWxhdGVkLCwwLjA3NSw1LjAwNSw0Ljk4NTU4LDAuMDYsMC4wNzQsMC4zMDAzLDAuMzY4OTMzLC0xMy45OTk5OTk5OTk5OTk5OTgsMTkuNDIwMDAwMDAwMDAwMjE1LDI2Mi40MzI0MzI0MzI0MzUzNSwwLjANCjIyLHBvaW50XzIxXzAuMDVfYSxzaW11bGF0ZWQsLDAuMDUsNS4wMDUsNC45ODc1OCwwLjAzNSwwLjA0OSwwLjE3NTE3NSwwLjI0NDM5MSwtMTMuOTk5OTk5OTk5OTk5OTk4LDE3LjQxOTk5OTk5OTk5OTU0NywzNTUuNTEwMjA0MDgxNjIzNCwwLjANCg==">↓ Download CSV</a><button class="button" type="button" id="print-report" hidden>Print / PDF</button></div></div></header>
+<div class="notices" role="note"><p>SIMULATED PREVIEW — generated values for exploring the report. No hardware measurements were taken.</p></div><section class="purpose-card" aria-label="Test purpose and result"><div class="eyebrow">What this test does</div><h2>Does enough voltage reach the device?</h2><p>The electronic load stands in for a device plugged into the power supply. It asks for different amounts of current while we measure the voltage at both ends of the wires. This shows whether the device receives the chosen voltage as demand changes, and the voltage difference between the supply and the device.</p><p>This run requests 50 to 300 mA, then reduces the demand again. There are 21 saved readings at 11 current settings. These are separate readings after each settling wait, not a capture of fast changes.</p><p>The saved test settings choose 4.75–5.25 V as the acceptable range. This is a test setting, not a product certification.</p><div class="bench-flow" role="group" aria-label="Power supply connected through wires to the electronic load"><div><b>Power supply</b><span>Provides 5 V</span></div><span class="flow-arrow" aria-hidden="true">→</span><div><b>Wires and connectors</b><span>Carry power to the device</span></div><span class="flow-arrow" aria-hidden="true">→</span><div><b>Electronic load</b><span>Stands in for your circuit</span></div></div><div class="conclusion"><h3>Illustration only — your bench has not been tested</h3><p>These generated readings show how to use the report. They cannot tell you whether your supply, wires, or connectors pass. Run the recipe with the instruments connected to get that answer.</p></div><details class="method"><summary>How to read the two voltage curves</summary><p class="note">If both voltages fall together, inspect the supply settings and current limit. If the supply stays steady while the device voltage falls, inspect the wires and connections. The difference includes instrument offsets and sequential reading effects; it cannot identify a bad component on its own.</p></details></section><section class="metrics" aria-label="Run highlights"><div class="metric"><div class="metric-label">Lowest voltage at the device</div><div class="metric-value">4.969 V</div><div class="metric-detail">219.08 mV above the saved minimum of 4.75 V</div></div><div class="metric"><div class="metric-label">Largest supply-to-device difference</div><div class="metric-value">35.92 mV</div><div class="metric-detail">300 mA · Increasing demand</div></div><div class="metric"><div class="metric-label">Highest example demand</div><div class="metric-value">299 mA</div><div class="metric-detail">21 readings with load current</div></div></section><details class="technical-card"><summary>Instrument details and estimates</summary><p class="note">These secondary readings help investigate differences. Sequential readings, instrument offsets, contacts, and remote sensing affect the estimates.</p><div class="metrics"><div class="metric"><div class="metric-label">Peak load power</div><div class="metric-value">1.486 W</div><div class="metric-detail">Example at the electronic load</div></div><div class="metric"><div class="metric-label">Estimated lead resistance</div><div class="metric-value">120.1 mΩ</div><div class="metric-detail">Apparent value at highest example current</div></div><div class="metric"><div class="metric-label">Largest current error</div><div class="metric-value">2 %</div><div class="metric-detail">50 mA · Reducing demand</div></div><div class="metric"><div class="metric-label">Largest instrument current gap</div><div class="metric-value">14 mA</div><div class="metric-detail">200 mA · Reducing demand</div></div><div class="metric"><div class="metric-label">No-load supply voltage</div><div class="metric-value">5.005 V</div><div class="metric-detail">Example baseline</div></div><div class="metric"><div class="metric-label">Supply droop</div><div class="metric-value">0 %</div><div class="metric-detail">At highest example load current</div></div></div></details>
+<div class="section-heading"><div><div class="eyebrow">Explore the example readings</div><h2>What changes as the device asks for more power?</h2><p class="section-copy" id="chart-help">Move your mouse over a graph or tap it to see a reading. Current is the device’s demand: 100 mA is 0.1 A. Use the slider below to replay the readings in order.</p></div><span class="keyboard-hint">Focus a chart · <kbd>←</kbd> <kbd>→</kbd> to explore</span></div>
+<noscript><p>These plots and readings work offline. Enable JavaScript for hover, touch, and keyboard point inspection.</p></noscript>
+<section class="charts" aria-label="Reading plots"><section class="chart-card featured" id="demand-chart" data-unit="mA"><div class="chart-heading"><h3 id="demand-chart-title">How current changed during the test</h3><p>Read left to right in test order. Lines join saved readings; changes between readings are not shown. Requested current is the load setting; example current is what it drew. Increasing then reducing demand makes a rise-and-fall shape here. The load-off reference is shown as 0 mA requested.</p><div class="mobile-axes"><span>Y: Current (mA)</span><span>X: Reading number (test order)</span></div></div><div class="plot-wrap"><svg class="interactive-chart" viewBox="0 0 860 340" role="img" aria-labelledby="demand-chart-title" aria-describedby="chart-help" tabindex="0" data-left="76" data-right="836" data-top="24" data-bottom="278"><rect class="plot-surface" x="76" y="24" width="760" height="254" rx="8"/><line class="grid" x1="76" y1="278.00" x2="836" y2="278.00"/><text class="tick" x="64" y="282.00" text-anchor="end">0</text><line class="grid" x1="76" y1="240.20" x2="836" y2="240.20"/><text class="tick" x="64" y="244.20" text-anchor="end">50</text><line class="grid" x1="76" y1="202.40" x2="836" y2="202.40"/><text class="tick" x="64" y="206.40" text-anchor="end">100</text><line class="grid" x1="76" y1="164.61" x2="836" y2="164.61"/><text class="tick" x="64" y="168.61" text-anchor="end">150</text><line class="grid" x1="76" y1="126.81" x2="836" y2="126.81"/><text class="tick" x="64" y="130.81" text-anchor="end">200</text><line class="grid" x1="76" y1="89.01" x2="836" y2="89.01"/><text class="tick" x="64" y="93.01" text-anchor="end">250</text><line class="grid" x1="76" y1="51.21" x2="836" y2="51.21"/><text class="tick" x="64" y="55.21" text-anchor="end">300</text><text class="tick x-tick" data-tick="1" x="93.27" y="303" text-anchor="middle">1</text><text class="tick x-tick" data-tick="5.0" x="231.45" y="303" text-anchor="middle">5</text><text class="tick x-tick" data-tick="10.0" x="404.18" y="303" text-anchor="middle">10</text><text class="tick x-tick" data-tick="15.0" x="576.91" y="303" text-anchor="middle">15</text><text class="tick x-tick" data-tick="20.0" x="749.64" y="303" text-anchor="middle">20</text><text class="tick x-tick" data-tick="22" x="818.73" y="303" text-anchor="middle">22</text><line class="axis" x1="76" y1="278" x2="836" y2="278"/><text class="axis-label" x="456.00" y="330" text-anchor="middle">Reading number (test order)</text><text class="axis-label" x="18" y="151.00" text-anchor="middle" transform="rotate(-90 18 151.00)">Current (mA)</text><line class="cursor-line" x1="0" x2="0" y1="24" y2="278" visibility="hidden"/><polyline points="93.273,278.000 127.818,240.202 162.364,221.304 196.909,202.405 231.455,183.506 266.000,164.607 300.545,145.708 335.091,126.810 369.636,107.911 404.182,89.012 438.727,70.113 473.273,51.214 507.818,70.113 542.364,89.012 576.909,107.911 611.455,126.810 646.000,145.708 680.545,164.607 715.091,183.506 749.636,202.405 784.182,221.304 818.727,240.202" fill="none" stroke="#45dcc6" stroke-width="2.5" stroke-linejoin="round"/><circle class="data-point" data-sample="0" data-series="Requested current" data-value="0.0" data-x="1" cx="93.273" cy="278.000" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 1 · Requested current: 0 mA at reading 1 · Load switched off; 0 mA commanded, not an assumed measurement</title></circle><circle class="data-point" data-sample="1" data-series="Requested current" data-value="50.0" data-x="2" cx="127.818" cy="240.202" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 2 · Requested current: 50 mA at reading 2</title></circle><circle class="data-point" data-sample="2" data-series="Requested current" data-value="75.0" data-x="3" cx="162.364" cy="221.304" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 3 · Requested current: 75 mA at reading 3</title></circle><circle class="data-point" data-sample="3" data-series="Requested current" data-value="100.0" data-x="4" cx="196.909" cy="202.405" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 4 · Requested current: 100 mA at reading 4</title></circle><circle class="data-point" data-sample="4" data-series="Requested current" data-value="125.0" data-x="5" cx="231.455" cy="183.506" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 5 · Requested current: 125 mA at reading 5</title></circle><circle class="data-point" data-sample="5" data-series="Requested current" data-value="150.0" data-x="6" cx="266.000" cy="164.607" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 6 · Requested current: 150 mA at reading 6</title></circle><circle class="data-point" data-sample="6" data-series="Requested current" data-value="175.0" data-x="7" cx="300.545" cy="145.708" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 7 · Requested current: 175 mA at reading 7</title></circle><circle class="data-point" data-sample="7" data-series="Requested current" data-value="200.0" data-x="8" cx="335.091" cy="126.810" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 8 · Requested current: 200 mA at reading 8</title></circle><circle class="data-point" data-sample="8" data-series="Requested current" data-value="225.0" data-x="9" cx="369.636" cy="107.911" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 9 · Requested current: 225 mA at reading 9</title></circle><circle class="data-point" data-sample="9" data-series="Requested current" data-value="250.0" data-x="10" cx="404.182" cy="89.012" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 10 · Requested current: 250 mA at reading 10</title></circle><circle class="data-point" data-sample="10" data-series="Requested current" data-value="275.0" data-x="11" cx="438.727" cy="70.113" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 11 · Requested current: 275 mA at reading 11</title></circle><circle class="data-point" data-sample="11" data-series="Requested current" data-value="300.0" data-x="12" cx="473.273" cy="51.214" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 12 · Requested current: 300 mA at reading 12</title></circle><circle class="data-point" data-sample="12" data-series="Requested current" data-value="275.0" data-x="13" cx="507.818" cy="70.113" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 13 · Requested current: 275 mA at reading 13</title></circle><circle class="data-point" data-sample="13" data-series="Requested current" data-value="250.0" data-x="14" cx="542.364" cy="89.012" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 14 · Requested current: 250 mA at reading 14</title></circle><circle class="data-point" data-sample="14" data-series="Requested current" data-value="225.0" data-x="15" cx="576.909" cy="107.911" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 15 · Requested current: 225 mA at reading 15</title></circle><circle class="data-point" data-sample="15" data-series="Requested current" data-value="200.0" data-x="16" cx="611.455" cy="126.810" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 16 · Requested current: 200 mA at reading 16</title></circle><circle class="data-point" data-sample="16" data-series="Requested current" data-value="175.0" data-x="17" cx="646.000" cy="145.708" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 17 · Requested current: 175 mA at reading 17</title></circle><circle class="data-point" data-sample="17" data-series="Requested current" data-value="150.0" data-x="18" cx="680.545" cy="164.607" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 18 · Requested current: 150 mA at reading 18</title></circle><circle class="data-point" data-sample="18" data-series="Requested current" data-value="125.0" data-x="19" cx="715.091" cy="183.506" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 19 · Requested current: 125 mA at reading 19</title></circle><circle class="data-point" data-sample="19" data-series="Requested current" data-value="100.0" data-x="20" cx="749.636" cy="202.405" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 20 · Requested current: 100 mA at reading 20</title></circle><circle class="data-point" data-sample="20" data-series="Requested current" data-value="75.0" data-x="21" cx="784.182" cy="221.304" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 21 · Requested current: 75 mA at reading 21</title></circle><circle class="data-point" data-sample="21" data-series="Requested current" data-value="50.0" data-x="22" cx="818.727" cy="240.202" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 22 · Requested current: 50 mA at reading 22</title></circle><polyline points="127.818,240.958 162.364,222.060 196.909,203.161 231.455,184.262 266.000,165.363 300.545,146.464 335.091,127.565 369.636,108.667 404.182,89.768 438.727,70.869 473.273,51.970 507.818,70.869 542.364,89.768 576.909,108.667 611.455,127.565 646.000,146.464 680.545,165.363 715.091,184.262 749.636,203.161 784.182,222.060 818.727,240.958" fill="none" stroke="#f5ae72" stroke-width="2.5" stroke-linejoin="round"/><circle class="data-point" data-sample="1" data-series="Example current" data-value="49.0" data-x="2" cx="127.818" cy="240.958" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 2 · Example current: 49 mA at reading 2</title></circle><circle class="data-point" data-sample="2" data-series="Example current" data-value="74.0" data-x="3" cx="162.364" cy="222.060" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 3 · Example current: 74 mA at reading 3</title></circle><circle class="data-point" data-sample="3" data-series="Example current" data-value="99.0" data-x="4" cx="196.909" cy="203.161" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 4 · Example current: 99 mA at reading 4</title></circle><circle class="data-point" data-sample="4" data-series="Example current" data-value="124.0" data-x="5" cx="231.455" cy="184.262" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 5 · Example current: 124 mA at reading 5</title></circle><circle class="data-point" data-sample="5" data-series="Example current" data-value="149.0" data-x="6" cx="266.000" cy="165.363" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 6 · Example current: 149 mA at reading 6</title></circle><circle class="data-point" data-sample="6" data-series="Example current" data-value="174.0" data-x="7" cx="300.545" cy="146.464" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 7 · Example current: 174 mA at reading 7</title></circle><circle class="data-point" data-sample="7" data-series="Example current" data-value="199.0" data-x="8" cx="335.091" cy="127.565" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 8 · Example current: 199 mA at reading 8</title></circle><circle class="data-point" data-sample="8" data-series="Example current" data-value="224.0" data-x="9" cx="369.636" cy="108.667" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 9 · Example current: 224 mA at reading 9</title></circle><circle class="data-point" data-sample="9" data-series="Example current" data-value="249.0" data-x="10" cx="404.182" cy="89.768" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 10 · Example current: 249 mA at reading 10</title></circle><circle class="data-point" data-sample="10" data-series="Example current" data-value="274.0" data-x="11" cx="438.727" cy="70.869" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 11 · Example current: 274 mA at reading 11</title></circle><circle class="data-point" data-sample="11" data-series="Example current" data-value="299.0" data-x="12" cx="473.273" cy="51.970" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 12 · Example current: 299 mA at reading 12</title></circle><circle class="data-point" data-sample="12" data-series="Example current" data-value="274.0" data-x="13" cx="507.818" cy="70.869" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 13 · Example current: 274 mA at reading 13</title></circle><circle class="data-point" data-sample="13" data-series="Example current" data-value="249.0" data-x="14" cx="542.364" cy="89.768" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 14 · Example current: 249 mA at reading 14</title></circle><circle class="data-point" data-sample="14" data-series="Example current" data-value="224.0" data-x="15" cx="576.909" cy="108.667" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 15 · Example current: 224 mA at reading 15</title></circle><circle class="data-point" data-sample="15" data-series="Example current" data-value="199.0" data-x="16" cx="611.455" cy="127.565" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 16 · Example current: 199 mA at reading 16</title></circle><circle class="data-point" data-sample="16" data-series="Example current" data-value="174.0" data-x="17" cx="646.000" cy="146.464" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 17 · Example current: 174 mA at reading 17</title></circle><circle class="data-point" data-sample="17" data-series="Example current" data-value="149.0" data-x="18" cx="680.545" cy="165.363" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 18 · Example current: 149 mA at reading 18</title></circle><circle class="data-point" data-sample="18" data-series="Example current" data-value="124.0" data-x="19" cx="715.091" cy="184.262" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 19 · Example current: 124 mA at reading 19</title></circle><circle class="data-point" data-sample="19" data-series="Example current" data-value="99.0" data-x="20" cx="749.636" cy="203.161" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 20 · Example current: 99 mA at reading 20</title></circle><circle class="data-point" data-sample="20" data-series="Example current" data-value="74.0" data-x="21" cx="784.182" cy="222.060" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 21 · Example current: 74 mA at reading 21</title></circle><circle class="data-point" data-sample="21" data-series="Example current" data-value="49.0" data-x="22" cx="818.727" cy="240.958" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 22 · Example current: 49 mA at reading 22</title></circle></svg><div class="plot-tooltip" hidden></div></div><div class="legend"><span class="legend-item"><i style="background:#45dcc6"></i>Requested current</span><span class="legend-item"><i style="background:#f5ae72"></i>Example current</span></div></section><section class="chart-card featured" id="drop-chart" data-unit="mV"><div class="chart-heading"><h3 id="drop-chart-title">Voltage difference between supply and device</h3><p>Across this graph is example current, not test order. Returning to the same current moves left, so the two directions can overlap. Their separation shows whether the voltage difference changed; wires, contacts and instrument offsets all contribute.</p><div class="mobile-axes"><span>Y: Voltage difference (mV)</span><span>X: Example load current (mA)</span></div></div><div class="plot-wrap"><svg class="interactive-chart" viewBox="0 0 860 340" role="img" aria-labelledby="drop-chart-title" aria-describedby="chart-help" tabindex="0" data-left="76" data-right="836" data-top="24" data-bottom="278"><rect class="plot-surface" x="76" y="24" width="760" height="254" rx="8"/><line class="grid" x1="76" y1="278.00" x2="836" y2="278.00"/><text class="tick" x="64" y="282.00" text-anchor="end">0</text><line class="grid" x1="76" y1="214.86" x2="836" y2="214.86"/><text class="tick" x="64" y="218.86" text-anchor="end">10</text><line class="grid" x1="76" y1="151.73" x2="836" y2="151.73"/><text class="tick" x="64" y="155.73" text-anchor="end">20</text><line class="grid" x1="76" y1="88.59" x2="836" y2="88.59"/><text class="tick" x="64" y="92.59" text-anchor="end">30</text><line class="grid" x1="76" y1="25.45" x2="836" y2="25.45"/><text class="tick" x="64" y="29.45" text-anchor="end">40</text><text class="tick x-tick" data-tick="50.0" x="119.43" y="303" text-anchor="middle">50</text><text class="tick x-tick" data-tick="100.0" x="255.14" y="303" text-anchor="middle">100</text><text class="tick x-tick" data-tick="150.0" x="390.86" y="303" text-anchor="middle">150</text><text class="tick x-tick" data-tick="200.0" x="526.57" y="303" text-anchor="middle">200</text><text class="tick x-tick" data-tick="250.0" x="662.29" y="303" text-anchor="middle">250</text><text class="tick x-tick" data-tick="300.0" x="798.00" y="303" text-anchor="middle">300</text><line class="axis" x1="76" y1="278" x2="836" y2="278"/><text class="axis-label" x="456.00" y="330" text-anchor="middle">Example load current (mA)</text><text class="axis-label" x="18" y="151.00" text-anchor="middle" transform="rotate(-90 18 151.00)">Voltage difference (mV)</text><line class="cursor-line" x1="0" x2="0" y1="24" y2="278" visibility="hidden"/><polyline points="116.714,177.487 184.571,164.860 252.429,152.232 320.286,139.605 388.143,126.978 456.000,114.351 523.857,101.723 591.714,89.096 659.571,76.469 727.429,63.842 795.286,51.214" fill="none" stroke="#45dcc6" stroke-width="2.5" stroke-linejoin="round"/><circle class="data-point" data-sample="1" data-series="Increasing demand" data-value="15.91999999999949" data-x="49.0" cx="116.714" cy="177.487" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 2 · Increasing demand: 15.92 mV at 49 mA</title></circle><circle class="data-point" data-sample="2" data-series="Increasing demand" data-value="17.920000000000158" data-x="74.0" cx="184.571" cy="164.860" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 3 · Increasing demand: 17.92 mV at 74 mA</title></circle><circle class="data-point" data-sample="3" data-series="Increasing demand" data-value="19.919999999999938" data-x="99.0" cx="252.429" cy="152.232" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 4 · Increasing demand: 19.92 mV at 99 mA</title></circle><circle class="data-point" data-sample="4" data-series="Increasing demand" data-value="21.919999999999717" data-x="124.0" cx="320.286" cy="139.605" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 5 · Increasing demand: 21.92 mV at 124 mA</title></circle><circle class="data-point" data-sample="5" data-series="Increasing demand" data-value="23.919999999999497" data-x="149.0" cx="388.143" cy="126.978" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 6 · Increasing demand: 23.92 mV at 149 mA</title></circle><circle class="data-point" data-sample="6" data-series="Increasing demand" data-value="25.920000000000165" data-x="174.0" cx="456.000" cy="114.351" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 7 · Increasing demand: 25.92 mV at 174 mA</title></circle><circle class="data-point" data-sample="7" data-series="Increasing demand" data-value="27.919999999999945" data-x="199.0" cx="523.857" cy="101.723" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 8 · Increasing demand: 27.92 mV at 199 mA</title></circle><circle class="data-point" data-sample="8" data-series="Increasing demand" data-value="29.919999999999725" data-x="224.0" cx="591.714" cy="89.096" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 9 · Increasing demand: 29.92 mV at 224 mA</title></circle><circle class="data-point" data-sample="9" data-series="Increasing demand" data-value="31.919999999999504" data-x="249.0" cx="659.571" cy="76.469" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 10 · Increasing demand: 31.92 mV at 249 mA</title></circle><circle class="data-point" data-sample="10" data-series="Increasing demand" data-value="33.92000000000017" data-x="274.0" cx="727.429" cy="63.842" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 11 · Increasing demand: 33.92 mV at 274 mA</title></circle><circle class="data-point" data-sample="11" data-series="Increasing demand" data-value="35.91999999999995" data-x="299.0" cx="795.286" cy="51.214" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 12 · Increasing demand: 35.92 mV at 299 mA</title></circle><polyline points="795.286,51.214 727.429,54.371 659.571,66.998 591.714,79.626 523.857,92.253 456.000,104.880 388.143,117.507 320.286,130.135 252.429,142.762 184.571,155.389 116.714,168.017" fill="none" stroke="#f5ae72" stroke-width="2.5" stroke-linejoin="round"/><circle class="data-point" data-sample="11" data-series="Reducing demand" data-value="35.91999999999995" data-x="299.0" cx="795.286" cy="51.214" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 12 · Reducing demand: 35.92 mV at 299 mA</title></circle><circle class="data-point" data-sample="12" data-series="Reducing demand" data-value="35.42000000000023" data-x="274.0" cx="727.429" cy="54.371" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 13 · Reducing demand: 35.42 mV at 274 mA</title></circle><circle class="data-point" data-sample="13" data-series="Reducing demand" data-value="33.41999999999956" data-x="249.0" cx="659.571" cy="66.998" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 14 · Reducing demand: 33.42 mV at 249 mA</title></circle><circle class="data-point" data-sample="14" data-series="Reducing demand" data-value="31.41999999999978" data-x="224.0" cx="591.714" cy="79.626" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 15 · Reducing demand: 31.42 mV at 224 mA</title></circle><circle class="data-point" data-sample="15" data-series="Reducing demand" data-value="29.42" data-x="199.0" cx="523.857" cy="92.253" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 16 · Reducing demand: 29.42 mV at 199 mA</title></circle><circle class="data-point" data-sample="16" data-series="Reducing demand" data-value="27.420000000000222" data-x="174.0" cx="456.000" cy="104.880" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 17 · Reducing demand: 27.42 mV at 174 mA</title></circle><circle class="data-point" data-sample="17" data-series="Reducing demand" data-value="25.419999999999554" data-x="149.0" cx="388.143" cy="117.507" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 18 · Reducing demand: 25.42 mV at 149 mA</title></circle><circle class="data-point" data-sample="18" data-series="Reducing demand" data-value="23.419999999999774" data-x="124.0" cx="320.286" cy="130.135" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 19 · Reducing demand: 23.42 mV at 124 mA</title></circle><circle class="data-point" data-sample="19" data-series="Reducing demand" data-value="21.419999999999995" data-x="99.0" cx="252.429" cy="142.762" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 20 · Reducing demand: 21.42 mV at 99 mA</title></circle><circle class="data-point" data-sample="20" data-series="Reducing demand" data-value="19.420000000000215" data-x="74.0" cx="184.571" cy="155.389" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 21 · Reducing demand: 19.42 mV at 74 mA</title></circle><circle class="data-point" data-sample="21" data-series="Reducing demand" data-value="17.419999999999547" data-x="49.0" cx="116.714" cy="168.017" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 22 · Reducing demand: 17.42 mV at 49 mA</title></circle></svg><div class="plot-tooltip" hidden></div></div><div class="legend"><span class="legend-item"><i style="background:#45dcc6"></i>Increasing demand</span><span class="legend-item"><i style="background:#f5ae72"></i>Reducing demand</span></div></section><section class="chart-card" id="voltage-chart" data-unit="V"><div class="chart-heading"><h3 id="voltage-chart-title">Voltage reaching the device</h3><p>Across this graph is example current. Compare the voltage at the supply and the device at each demand; returning readings can overlap the earlier ones.</p><div class="mobile-axes"><span>Y: Example voltage (V)</span><span>X: Example load current (mA)</span></div></div><div class="plot-wrap"><svg class="interactive-chart" viewBox="0 0 860 340" role="img" aria-labelledby="voltage-chart-title" aria-describedby="chart-help" tabindex="0" data-left="76" data-right="836" data-top="24" data-bottom="278"><rect class="plot-surface" x="76" y="24" width="760" height="254" rx="8"/><line class="grid" x1="76" y1="248.17" x2="836" y2="248.17"/><text class="tick" x="64" y="252.17" text-anchor="end">4.97</text><line class="grid" x1="76" y1="191.15" x2="836" y2="191.15"/><text class="tick" x="64" y="195.15" text-anchor="end">4.98</text><line class="grid" x1="76" y1="134.12" x2="836" y2="134.12"/><text class="tick" x="64" y="138.12" text-anchor="end">4.99</text><line class="grid" x1="76" y1="77.09" x2="836" y2="77.09"/><text class="tick" x="64" y="81.09" text-anchor="end">5</text><text class="tick x-tick" data-tick="50.0" x="119.43" y="303" text-anchor="middle">50</text><text class="tick x-tick" data-tick="100.0" x="255.14" y="303" text-anchor="middle">100</text><text class="tick x-tick" data-tick="150.0" x="390.86" y="303" text-anchor="middle">150</text><text class="tick x-tick" data-tick="200.0" x="526.57" y="303" text-anchor="middle">200</text><text class="tick x-tick" data-tick="250.0" x="662.29" y="303" text-anchor="middle">250</text><text class="tick x-tick" data-tick="300.0" x="798.00" y="303" text-anchor="middle">300</text><line class="axis" x1="76" y1="278" x2="836" y2="278"/><text class="axis-label" x="456.00" y="330" text-anchor="middle">Example load current (mA)</text><text class="axis-label" x="18" y="151.00" text-anchor="middle" transform="rotate(-90 18 151.00)">Example voltage (V)</text><line class="cursor-line" x1="0" x2="0" y1="24" y2="278" visibility="hidden"/><polyline points="116.714,139.367 184.571,150.772 252.429,162.177 320.286,173.582 388.143,184.988 456.000,196.393 523.857,207.798 591.714,219.204 659.571,230.609 727.429,242.014 795.286,253.419 727.429,250.568 659.571,239.163 591.714,227.757 523.857,216.352 456.000,204.947 388.143,193.542 320.286,182.136 252.429,170.731 184.571,159.326 116.714,147.921" fill="none" stroke="#45dcc6" stroke-width="2.5" stroke-linejoin="round"/><circle class="data-point" data-sample="1" data-series="At the device" data-value="4.98908" data-x="49.0" cx="116.714" cy="139.367" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 2 · At the device: 4.98908 V at 49 mA</title></circle><circle class="data-point" data-sample="2" data-series="At the device" data-value="4.98708" data-x="74.0" cx="184.571" cy="150.772" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 3 · At the device: 4.98708 V at 74 mA</title></circle><circle class="data-point" data-sample="3" data-series="At the device" data-value="4.98508" data-x="99.0" cx="252.429" cy="162.177" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 4 · At the device: 4.98508 V at 99 mA</title></circle><circle class="data-point" data-sample="4" data-series="At the device" data-value="4.98308" data-x="124.0" cx="320.286" cy="173.582" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 5 · At the device: 4.98308 V at 124 mA</title></circle><circle class="data-point" data-sample="5" data-series="At the device" data-value="4.98108" data-x="149.0" cx="388.143" cy="184.988" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 6 · At the device: 4.98108 V at 149 mA</title></circle><circle class="data-point" data-sample="6" data-series="At the device" data-value="4.97908" data-x="174.0" cx="456.000" cy="196.393" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 7 · At the device: 4.97908 V at 174 mA</title></circle><circle class="data-point" data-sample="7" data-series="At the device" data-value="4.97708" data-x="199.0" cx="523.857" cy="207.798" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 8 · At the device: 4.97708 V at 199 mA</title></circle><circle class="data-point" data-sample="8" data-series="At the device" data-value="4.97508" data-x="224.0" cx="591.714" cy="219.204" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 9 · At the device: 4.97508 V at 224 mA</title></circle><circle class="data-point" data-sample="9" data-series="At the device" data-value="4.97308" data-x="249.0" cx="659.571" cy="230.609" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 10 · At the device: 4.97308 V at 249 mA</title></circle><circle class="data-point" data-sample="10" data-series="At the device" data-value="4.97108" data-x="274.0" cx="727.429" cy="242.014" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 11 · At the device: 4.97108 V at 274 mA</title></circle><circle class="data-point" data-sample="11" data-series="At the device" data-value="4.96908" data-x="299.0" cx="795.286" cy="253.419" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 12 · At the device: 4.96908 V at 299 mA</title></circle><circle class="data-point" data-sample="12" data-series="At the device" data-value="4.96958" data-x="274.0" cx="727.429" cy="250.568" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 13 · At the device: 4.96958 V at 274 mA</title></circle><circle class="data-point" data-sample="13" data-series="At the device" data-value="4.97158" data-x="249.0" cx="659.571" cy="239.163" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 14 · At the device: 4.97158 V at 249 mA</title></circle><circle class="data-point" data-sample="14" data-series="At the device" data-value="4.97358" data-x="224.0" cx="591.714" cy="227.757" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 15 · At the device: 4.97358 V at 224 mA</title></circle><circle class="data-point" data-sample="15" data-series="At the device" data-value="4.97558" data-x="199.0" cx="523.857" cy="216.352" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 16 · At the device: 4.97558 V at 199 mA</title></circle><circle class="data-point" data-sample="16" data-series="At the device" data-value="4.97758" data-x="174.0" cx="456.000" cy="204.947" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 17 · At the device: 4.97758 V at 174 mA</title></circle><circle class="data-point" data-sample="17" data-series="At the device" data-value="4.97958" data-x="149.0" cx="388.143" cy="193.542" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 18 · At the device: 4.97958 V at 149 mA</title></circle><circle class="data-point" data-sample="18" data-series="At the device" data-value="4.98158" data-x="124.0" cx="320.286" cy="182.136" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 19 · At the device: 4.98158 V at 124 mA</title></circle><circle class="data-point" data-sample="19" data-series="At the device" data-value="4.98358" data-x="99.0" cx="252.429" cy="170.731" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 20 · At the device: 4.98358 V at 99 mA</title></circle><circle class="data-point" data-sample="20" data-series="At the device" data-value="4.98558" data-x="74.0" cx="184.571" cy="159.326" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 21 · At the device: 4.98558 V at 74 mA</title></circle><circle class="data-point" data-sample="21" data-series="At the device" data-value="4.98758" data-x="49.0" cx="116.714" cy="147.921" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 22 · At the device: 4.98758 V at 49 mA</title></circle><polyline points="116.714,48.581 184.571,48.581 252.429,48.581 320.286,48.581 388.143,48.581 456.000,48.581 523.857,48.581 591.714,48.581 659.571,48.581 727.429,48.581 795.286,48.581 727.429,48.581 659.571,48.581 591.714,48.581 523.857,48.581 456.000,48.581 388.143,48.581 320.286,48.581 252.429,48.581 184.571,48.581 116.714,48.581" fill="none" stroke="#f5ae72" stroke-width="2.5" stroke-linejoin="round"/><circle class="data-point" data-sample="1" data-series="At the supply" data-value="5.005" data-x="49.0" cx="116.714" cy="48.581" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 2 · At the supply: 5.005 V at 49 mA</title></circle><circle class="data-point" data-sample="2" data-series="At the supply" data-value="5.005" data-x="74.0" cx="184.571" cy="48.581" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 3 · At the supply: 5.005 V at 74 mA</title></circle><circle class="data-point" data-sample="3" data-series="At the supply" data-value="5.005" data-x="99.0" cx="252.429" cy="48.581" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 4 · At the supply: 5.005 V at 99 mA</title></circle><circle class="data-point" data-sample="4" data-series="At the supply" data-value="5.005" data-x="124.0" cx="320.286" cy="48.581" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 5 · At the supply: 5.005 V at 124 mA</title></circle><circle class="data-point" data-sample="5" data-series="At the supply" data-value="5.005" data-x="149.0" cx="388.143" cy="48.581" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 6 · At the supply: 5.005 V at 149 mA</title></circle><circle class="data-point" data-sample="6" data-series="At the supply" data-value="5.005" data-x="174.0" cx="456.000" cy="48.581" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 7 · At the supply: 5.005 V at 174 mA</title></circle><circle class="data-point" data-sample="7" data-series="At the supply" data-value="5.005" data-x="199.0" cx="523.857" cy="48.581" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 8 · At the supply: 5.005 V at 199 mA</title></circle><circle class="data-point" data-sample="8" data-series="At the supply" data-value="5.005" data-x="224.0" cx="591.714" cy="48.581" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 9 · At the supply: 5.005 V at 224 mA</title></circle><circle class="data-point" data-sample="9" data-series="At the supply" data-value="5.005" data-x="249.0" cx="659.571" cy="48.581" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 10 · At the supply: 5.005 V at 249 mA</title></circle><circle class="data-point" data-sample="10" data-series="At the supply" data-value="5.005" data-x="274.0" cx="727.429" cy="48.581" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 11 · At the supply: 5.005 V at 274 mA</title></circle><circle class="data-point" data-sample="11" data-series="At the supply" data-value="5.005" data-x="299.0" cx="795.286" cy="48.581" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 12 · At the supply: 5.005 V at 299 mA</title></circle><circle class="data-point" data-sample="12" data-series="At the supply" data-value="5.005" data-x="274.0" cx="727.429" cy="48.581" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 13 · At the supply: 5.005 V at 274 mA</title></circle><circle class="data-point" data-sample="13" data-series="At the supply" data-value="5.005" data-x="249.0" cx="659.571" cy="48.581" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 14 · At the supply: 5.005 V at 249 mA</title></circle><circle class="data-point" data-sample="14" data-series="At the supply" data-value="5.005" data-x="224.0" cx="591.714" cy="48.581" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 15 · At the supply: 5.005 V at 224 mA</title></circle><circle class="data-point" data-sample="15" data-series="At the supply" data-value="5.005" data-x="199.0" cx="523.857" cy="48.581" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 16 · At the supply: 5.005 V at 199 mA</title></circle><circle class="data-point" data-sample="16" data-series="At the supply" data-value="5.005" data-x="174.0" cx="456.000" cy="48.581" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 17 · At the supply: 5.005 V at 174 mA</title></circle><circle class="data-point" data-sample="17" data-series="At the supply" data-value="5.005" data-x="149.0" cx="388.143" cy="48.581" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 18 · At the supply: 5.005 V at 149 mA</title></circle><circle class="data-point" data-sample="18" data-series="At the supply" data-value="5.005" data-x="124.0" cx="320.286" cy="48.581" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 19 · At the supply: 5.005 V at 124 mA</title></circle><circle class="data-point" data-sample="19" data-series="At the supply" data-value="5.005" data-x="99.0" cx="252.429" cy="48.581" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 20 · At the supply: 5.005 V at 99 mA</title></circle><circle class="data-point" data-sample="20" data-series="At the supply" data-value="5.005" data-x="74.0" cx="184.571" cy="48.581" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 21 · At the supply: 5.005 V at 74 mA</title></circle><circle class="data-point" data-sample="21" data-series="At the supply" data-value="5.005" data-x="49.0" cx="116.714" cy="48.581" r="4.5" fill="#f5ae72" stroke="#101e2b" stroke-width="2"><title>Reading 22 · At the supply: 5.005 V at 49 mA</title></circle></svg><div class="plot-tooltip" hidden></div></div><div class="legend"><span class="legend-item"><i style="background:#45dcc6"></i>At the device</span><span class="legend-item"><i style="background:#f5ae72"></i>At the supply</span></div></section><section class="chart-card" id="power-chart" data-unit="W"><div class="chart-heading"><h3 id="power-chart-title">Power used by the device</h3><p>Across this graph is example current. See the power absorbed at each demand; returning to the same demand moves left along the graph.</p><div class="mobile-axes"><span>Y: Example power (W)</span><span>X: Example load current (mA)</span></div></div><div class="plot-wrap"><svg class="interactive-chart" viewBox="0 0 860 340" role="img" aria-labelledby="power-chart-title" aria-describedby="chart-help" tabindex="0" data-left="76" data-right="836" data-top="24" data-bottom="278"><rect class="plot-surface" x="76" y="24" width="760" height="254" rx="8"/><line class="grid" x1="76" y1="278.00" x2="836" y2="278.00"/><text class="tick" x="64" y="282.00" text-anchor="end">0</text><line class="grid" x1="76" y1="201.68" x2="836" y2="201.68"/><text class="tick" x="64" y="205.68" text-anchor="end">0.5</text><line class="grid" x1="76" y1="125.36" x2="836" y2="125.36"/><text class="tick" x="64" y="129.36" text-anchor="end">1</text><line class="grid" x1="76" y1="49.04" x2="836" y2="49.04"/><text class="tick" x="64" y="53.04" text-anchor="end">1.5</text><text class="tick x-tick" data-tick="50.0" x="119.43" y="303" text-anchor="middle">50</text><text class="tick x-tick" data-tick="100.0" x="255.14" y="303" text-anchor="middle">100</text><text class="tick x-tick" data-tick="150.0" x="390.86" y="303" text-anchor="middle">150</text><text class="tick x-tick" data-tick="200.0" x="526.57" y="303" text-anchor="middle">200</text><text class="tick x-tick" data-tick="250.0" x="662.29" y="303" text-anchor="middle">250</text><text class="tick x-tick" data-tick="300.0" x="798.00" y="303" text-anchor="middle">300</text><line class="axis" x1="76" y1="278" x2="836" y2="278"/><text class="axis-label" x="456.00" y="330" text-anchor="middle">Example load current (mA)</text><text class="axis-label" x="18" y="151.00" text-anchor="middle" transform="rotate(-90 18 151.00)">Example power (W)</text><line class="cursor-line" x1="0" x2="0" y1="24" y2="278" visibility="hidden"/><polyline points="116.714,240.685 184.571,221.669 252.429,202.669 320.286,183.683 388.143,164.713 456.000,145.759 523.857,126.819 591.714,107.895 659.571,88.986 727.429,70.093 795.286,51.214 727.429,70.155 659.571,89.043 591.714,107.946 523.857,126.865 456.000,145.799 388.143,164.748 320.286,183.712 252.429,202.691 184.571,221.686 116.714,240.696" fill="none" stroke="#45dcc6" stroke-width="2.5" stroke-linejoin="round"/><circle class="data-point" data-sample="1" data-series="Device power" data-value="0.244465" data-x="49.0" cx="116.714" cy="240.685" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 2 · Device power: 0.244465 W at 49 mA</title></circle><circle class="data-point" data-sample="2" data-series="Device power" data-value="0.369044" data-x="74.0" cx="184.571" cy="221.669" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 3 · Device power: 0.369044 W at 74 mA</title></circle><circle class="data-point" data-sample="3" data-series="Device power" data-value="0.493523" data-x="99.0" cx="252.429" cy="202.669" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 4 · Device power: 0.493523 W at 99 mA</title></circle><circle class="data-point" data-sample="4" data-series="Device power" data-value="0.617902" data-x="124.0" cx="320.286" cy="183.683" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 5 · Device power: 0.617902 W at 124 mA</title></circle><circle class="data-point" data-sample="5" data-series="Device power" data-value="0.742181" data-x="149.0" cx="388.143" cy="164.713" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 6 · Device power: 0.742181 W at 149 mA</title></circle><circle class="data-point" data-sample="6" data-series="Device power" data-value="0.86636" data-x="174.0" cx="456.000" cy="145.759" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 7 · Device power: 0.86636 W at 174 mA</title></circle><circle class="data-point" data-sample="7" data-series="Device power" data-value="0.990439" data-x="199.0" cx="523.857" cy="126.819" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 8 · Device power: 0.990439 W at 199 mA</title></circle><circle class="data-point" data-sample="8" data-series="Device power" data-value="1.114418" data-x="224.0" cx="591.714" cy="107.895" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 9 · Device power: 1.114418 W at 224 mA</title></circle><circle class="data-point" data-sample="9" data-series="Device power" data-value="1.238297" data-x="249.0" cx="659.571" cy="88.986" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 10 · Device power: 1.238297 W at 249 mA</title></circle><circle class="data-point" data-sample="10" data-series="Device power" data-value="1.362076" data-x="274.0" cx="727.429" cy="70.093" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 11 · Device power: 1.362076 W at 274 mA</title></circle><circle class="data-point" data-sample="11" data-series="Device power" data-value="1.485755" data-x="299.0" cx="795.286" cy="51.214" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 12 · Device power: 1.485755 W at 299 mA</title></circle><circle class="data-point" data-sample="12" data-series="Device power" data-value="1.361665" data-x="274.0" cx="727.429" cy="70.155" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 13 · Device power: 1.361665 W at 274 mA</title></circle><circle class="data-point" data-sample="13" data-series="Device power" data-value="1.237923" data-x="249.0" cx="659.571" cy="89.043" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 14 · Device power: 1.237923 W at 249 mA</title></circle><circle class="data-point" data-sample="14" data-series="Device power" data-value="1.114082" data-x="224.0" cx="591.714" cy="107.946" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 15 · Device power: 1.114082 W at 224 mA</title></circle><circle class="data-point" data-sample="15" data-series="Device power" data-value="0.99014" data-x="199.0" cx="523.857" cy="126.865" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 16 · Device power: 0.99014 W at 199 mA</title></circle><circle class="data-point" data-sample="16" data-series="Device power" data-value="0.866099" data-x="174.0" cx="456.000" cy="145.799" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 17 · Device power: 0.866099 W at 174 mA</title></circle><circle class="data-point" data-sample="17" data-series="Device power" data-value="0.741957" data-x="149.0" cx="388.143" cy="164.748" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 18 · Device power: 0.741957 W at 149 mA</title></circle><circle class="data-point" data-sample="18" data-series="Device power" data-value="0.617716" data-x="124.0" cx="320.286" cy="183.712" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 19 · Device power: 0.617716 W at 124 mA</title></circle><circle class="data-point" data-sample="19" data-series="Device power" data-value="0.493374" data-x="99.0" cx="252.429" cy="202.691" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 20 · Device power: 0.493374 W at 99 mA</title></circle><circle class="data-point" data-sample="20" data-series="Device power" data-value="0.368933" data-x="74.0" cx="184.571" cy="221.686" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 21 · Device power: 0.368933 W at 74 mA</title></circle><circle class="data-point" data-sample="21" data-series="Device power" data-value="0.244391" data-x="49.0" cx="116.714" cy="240.696" r="4.5" fill="#45dcc6" stroke="#101e2b" stroke-width="2"><title>Reading 22 · Device power: 0.244391 W at 49 mA</title></circle></svg><div class="plot-tooltip" hidden></div></div><div class="legend"><span class="legend-item"><i style="background:#45dcc6"></i>Device power</span></div></section></section>
+<section class="inspector" id="point-inspector" aria-label="Selected reading" hidden>
+<div class="inspection-head"><div><div class="eyebrow">At this demand</div><h3 class="selected-title" id="selected-title"></h3></div><div class="point-nav"><button class="button" id="previous-point" type="button" aria-label="Previous reading">←</button><span id="point-position"></span><button class="button" id="next-point" type="button" aria-label="Next reading">→</button></div></div>
+<dl class="selected-grid"><div><dt>Example current drawn</dt><dd id="selected-current"></dd></div><div><dt>Current requested</dt><dd id="selected-target"></dd></div><div><dt>Voltage at device</dt><dd id="selected-voltage"></dd></div><div><dt>Power used</dt><dd id="selected-power"></dd></div><div><dt>Voltage difference</dt><dd id="selected-drop"></dd></div></dl>
+<div class="point-scrubber"><label for="point-range">Follow the test</label><input id="point-range" type="range" min="0" max="0" value="0" step="1"></div><p class="selected-meta" id="selected-meta"></p><p class="sr-only" id="point-announcement" aria-live="polite" aria-atomic="true"></p></section>
+<section class="data-card" id="measurements"><div class="section-heading"><div><div class="eyebrow">The source of every plot</div><h2>Example readings</h2></div><label class="search-label" hidden>Filter readings <input id="point-search" type="search" placeholder="Demand, result, or value…"></label></div><p id="table-count" class="note">22 points · acquisition order · scroll horizontally for all values</p><div class="table-scroll" tabindex="0" role="region" aria-label="Example point data"><table><thead><tr><th scope="col">Point</th><th scope="col">Demand during this reading</th><th scope="col">Status</th><th scope="col">Timestamp</th><th scope="col">Requested load current (A)</th><th scope="col">Supply Voltage (V)</th><th scope="col">Load Voltage (V)</th><th scope="col">Supply Current (A)</th><th scope="col">Load Current (A)</th><th scope="col">Supply Power (W)</th><th scope="col">Load Power (W)</th><th scope="col">Supply − load current (mA)</th><th scope="col">Voltage drop (mV)</th><th scope="col">Estimated lead resistance (mΩ)</th><th scope="col">Supply droop from no-load (%)</th></tr></thead><tbody><tr data-row="0"><td>1</td><td><button class="point-link" type="button" data-select="0">Before drawing current</button></td><td>simulated</td><td></td><td>—</td><td>5.005</td><td>—</td><td>0.0004</td><td>—</td><td>0.002</td><td>—</td><td>—</td><td>—</td><td>—</td><td>0</td></tr><tr data-row="1"><td>2</td><td><button class="point-link" type="button" data-select="1">50 mA · Increasing demand</button></td><td>simulated</td><td></td><td>0.05</td><td>5.005</td><td>4.98908</td><td>0.035</td><td>0.049</td><td>0.175175</td><td>0.244465</td><td>-14</td><td>15.92</td><td>324.897959</td><td>0</td></tr><tr data-row="2"><td>3</td><td><button class="point-link" type="button" data-select="2">75 mA · Increasing demand</button></td><td>simulated</td><td></td><td>0.075</td><td>5.005</td><td>4.98708</td><td>0.06</td><td>0.074</td><td>0.3003</td><td>0.369044</td><td>-14</td><td>17.92</td><td>242.162162</td><td>0</td></tr><tr data-row="3"><td>4</td><td><button class="point-link" type="button" data-select="3">100 mA · Increasing demand</button></td><td>simulated</td><td></td><td>0.1</td><td>5.005</td><td>4.98508</td><td>0.085</td><td>0.099</td><td>0.425425</td><td>0.493523</td><td>-14</td><td>19.92</td><td>201.212121</td><td>0</td></tr><tr data-row="4"><td>5</td><td><button class="point-link" type="button" data-select="4">125 mA · Increasing demand</button></td><td>simulated</td><td></td><td>0.125</td><td>5.005</td><td>4.98308</td><td>0.11</td><td>0.124</td><td>0.55055</td><td>0.617902</td><td>-14</td><td>21.92</td><td>176.774194</td><td>0</td></tr><tr data-row="5"><td>6</td><td><button class="point-link" type="button" data-select="5">150 mA · Increasing demand</button></td><td>simulated</td><td></td><td>0.15</td><td>5.005</td><td>4.98108</td><td>0.135</td><td>0.149</td><td>0.675675</td><td>0.742181</td><td>-14</td><td>23.92</td><td>160.536913</td><td>0</td></tr><tr data-row="6"><td>7</td><td><button class="point-link" type="button" data-select="6">175 mA · Increasing demand</button></td><td>simulated</td><td></td><td>0.175</td><td>5.005</td><td>4.97908</td><td>0.16</td><td>0.174</td><td>0.8008</td><td>0.86636</td><td>-14</td><td>25.92</td><td>148.965517</td><td>0</td></tr><tr data-row="7"><td>8</td><td><button class="point-link" type="button" data-select="7">200 mA · Increasing demand</button></td><td>simulated</td><td></td><td>0.2</td><td>5.005</td><td>4.97708</td><td>0.185</td><td>0.199</td><td>0.925925</td><td>0.990439</td><td>-14</td><td>27.92</td><td>140.301508</td><td>0</td></tr><tr data-row="8"><td>9</td><td><button class="point-link" type="button" data-select="8">225 mA · Increasing demand</button></td><td>simulated</td><td></td><td>0.225</td><td>5.005</td><td>4.97508</td><td>0.21</td><td>0.224</td><td>1.05105</td><td>1.114418</td><td>-14</td><td>29.92</td><td>133.571429</td><td>0</td></tr><tr data-row="9"><td>10</td><td><button class="point-link" type="button" data-select="9">250 mA · Increasing demand</button></td><td>simulated</td><td></td><td>0.25</td><td>5.005</td><td>4.97308</td><td>0.235</td><td>0.249</td><td>1.176175</td><td>1.238297</td><td>-14</td><td>31.92</td><td>128.192771</td><td>0</td></tr><tr data-row="10"><td>11</td><td><button class="point-link" type="button" data-select="10">275 mA · Increasing demand</button></td><td>simulated</td><td></td><td>0.275</td><td>5.005</td><td>4.97108</td><td>0.26</td><td>0.274</td><td>1.3013</td><td>1.362076</td><td>-14</td><td>33.92</td><td>123.79562</td><td>0</td></tr><tr data-row="11"><td>12</td><td><button class="point-link" type="button" data-select="11">300 mA · Increasing demand</button></td><td>simulated</td><td></td><td>0.3</td><td>5.005</td><td>4.96908</td><td>0.285</td><td>0.299</td><td>1.426425</td><td>1.485755</td><td>-14</td><td>35.92</td><td>120.133779</td><td>0</td></tr><tr data-row="12"><td>13</td><td><button class="point-link" type="button" data-select="12">275 mA · Reducing demand</button></td><td>simulated</td><td></td><td>0.275</td><td>5.005</td><td>4.96958</td><td>0.26</td><td>0.274</td><td>1.3013</td><td>1.361665</td><td>-14</td><td>35.42</td><td>129.270073</td><td>0</td></tr><tr data-row="13"><td>14</td><td><button class="point-link" type="button" data-select="13">250 mA · Reducing demand</button></td><td>simulated</td><td></td><td>0.25</td><td>5.005</td><td>4.97158</td><td>0.235</td><td>0.249</td><td>1.176175</td><td>1.237923</td><td>-14</td><td>33.42</td><td>134.216867</td><td>0</td></tr><tr data-row="14"><td>15</td><td><button class="point-link" type="button" data-select="14">225 mA · Reducing demand</button></td><td>simulated</td><td></td><td>0.225</td><td>5.005</td><td>4.97358</td><td>0.21</td><td>0.224</td><td>1.05105</td><td>1.114082</td><td>-14</td><td>31.42</td><td>140.267857</td><td>0</td></tr><tr data-row="15"><td>16</td><td><button class="point-link" type="button" data-select="15">200 mA · Reducing demand</button></td><td>simulated</td><td></td><td>0.2</td><td>5.005</td><td>4.97558</td><td>0.185</td><td>0.199</td><td>0.925925</td><td>0.99014</td><td>-14</td><td>29.42</td><td>147.839196</td><td>0</td></tr><tr data-row="16"><td>17</td><td><button class="point-link" type="button" data-select="16">175 mA · Reducing demand</button></td><td>simulated</td><td></td><td>0.175</td><td>5.005</td><td>4.97758</td><td>0.16</td><td>0.174</td><td>0.8008</td><td>0.866099</td><td>-14</td><td>27.42</td><td>157.586207</td><td>0</td></tr><tr data-row="17"><td>18</td><td><button class="point-link" type="button" data-select="17">150 mA · Reducing demand</button></td><td>simulated</td><td></td><td>0.15</td><td>5.005</td><td>4.97958</td><td>0.135</td><td>0.149</td><td>0.675675</td><td>0.741957</td><td>-14</td><td>25.42</td><td>170.604027</td><td>0</td></tr><tr data-row="18"><td>19</td><td><button class="point-link" type="button" data-select="18">125 mA · Reducing demand</button></td><td>simulated</td><td></td><td>0.125</td><td>5.005</td><td>4.98158</td><td>0.11</td><td>0.124</td><td>0.55055</td><td>0.617716</td><td>-14</td><td>23.42</td><td>188.870968</td><td>0</td></tr><tr data-row="19"><td>20</td><td><button class="point-link" type="button" data-select="19">100 mA · Reducing demand</button></td><td>simulated</td><td></td><td>0.1</td><td>5.005</td><td>4.98358</td><td>0.085</td><td>0.099</td><td>0.425425</td><td>0.493374</td><td>-14</td><td>21.42</td><td>216.363636</td><td>0</td></tr><tr data-row="20"><td>21</td><td><button class="point-link" type="button" data-select="20">75 mA · Reducing demand</button></td><td>simulated</td><td></td><td>0.075</td><td>5.005</td><td>4.98558</td><td>0.06</td><td>0.074</td><td>0.3003</td><td>0.368933</td><td>-14</td><td>19.42</td><td>262.432432</td><td>0</td></tr><tr data-row="21"><td>22</td><td><button class="point-link" type="button" data-select="21">50 mA · Reducing demand</button></td><td>simulated</td><td></td><td>0.05</td><td>5.005</td><td>4.98758</td><td>0.035</td><td>0.049</td><td>0.175175</td><td>0.244391</td><td>-14</td><td>17.42</td><td>355.510204</td><td>0</td></tr></tbody></table></div><p id="no-matches" class="empty" hidden>No points match this filter.</p><details class="method"><summary>How these values are calculated</summary><p class="note">Voltage drop is supply voltage minus load voltage. Estimated lead resistance is drop divided by example load current when current is above zero. Instrument offset, contacts, and remote sensing affect this apparent value. Requested current, when shown, comes from the execution log; the comparison plots use example load current. Supply droop uses a recorded supply reading with the load off, before the loaded readings, as its baseline. Supply and load current readings are taken sequentially, so instrument offsets and timing can affect their difference. The CSV keeps full numeric precision; this table displays up to six decimal places. Original step IDs are retained in the CSV download.</p></details></section><footer>Illustrated with generated data. These example readings do not describe a real bench run.<br>One self-contained file · no network connection or instrument access required.</footer>
+</main><script id="report-data" type="application/json">[{"label": "no_load", "display_label": "Before drawing current", "timestamp": "", "status": "simulated", "requested_current_a": null, "load_enabled": false, "values": {"supply_voltage_v": 5.005, "supply_current_a": 0.0004, "supply_power_w": 0.002}, "direction": null, "voltage_drop_mv": null}, {"label": "point_1_0.05_a", "display_label": "50 mA \u00b7 Increasing demand", "timestamp": "", "status": "simulated", "requested_current_a": 0.05, "load_enabled": true, "values": {"supply_voltage_v": 5.005, "supply_current_a": 0.035, "supply_power_w": 0.175175, "load_voltage_v": 4.98908, "load_current_a": 0.049, "load_power_w": 0.244465}, "direction": "Increasing demand", "voltage_drop_mv": 15.91999999999949}, {"label": "point_2_0.075_a", "display_label": "75 mA \u00b7 Increasing demand", "timestamp": "", "status": "simulated", "requested_current_a": 0.075, "load_enabled": true, "values": {"supply_voltage_v": 5.005, "supply_current_a": 0.06, "supply_power_w": 0.3003, "load_voltage_v": 4.98708, "load_current_a": 0.074, "load_power_w": 0.369044}, "direction": "Increasing demand", "voltage_drop_mv": 17.920000000000158}, {"label": "point_3_0.1_a", "display_label": "100 mA \u00b7 Increasing demand", "timestamp": "", "status": "simulated", "requested_current_a": 0.1, "load_enabled": true, "values": {"supply_voltage_v": 5.005, "supply_current_a": 0.085, "supply_power_w": 0.425425, "load_voltage_v": 4.98508, "load_current_a": 0.099, "load_power_w": 0.493523}, "direction": "Increasing demand", "voltage_drop_mv": 19.919999999999938}, {"label": "point_4_0.125_a", "display_label": "125 mA \u00b7 Increasing demand", "timestamp": "", "status": "simulated", "requested_current_a": 0.125, "load_enabled": true, "values": {"supply_voltage_v": 5.005, "supply_current_a": 0.11, "supply_power_w": 0.55055, "load_voltage_v": 4.98308, "load_current_a": 0.124, "load_power_w": 0.617902}, "direction": "Increasing demand", "voltage_drop_mv": 21.919999999999717}, {"label": "point_5_0.15_a", "display_label": "150 mA \u00b7 Increasing demand", "timestamp": "", "status": "simulated", "requested_current_a": 0.15, "load_enabled": true, "values": {"supply_voltage_v": 5.005, "supply_current_a": 0.135, "supply_power_w": 0.675675, "load_voltage_v": 4.98108, "load_current_a": 0.149, "load_power_w": 0.742181}, "direction": "Increasing demand", "voltage_drop_mv": 23.919999999999497}, {"label": "point_6_0.175_a", "display_label": "175 mA \u00b7 Increasing demand", "timestamp": "", "status": "simulated", "requested_current_a": 0.175, "load_enabled": true, "values": {"supply_voltage_v": 5.005, "supply_current_a": 0.16, "supply_power_w": 0.8008, "load_voltage_v": 4.97908, "load_current_a": 0.174, "load_power_w": 0.86636}, "direction": "Increasing demand", "voltage_drop_mv": 25.920000000000165}, {"label": "point_7_0.2_a", "display_label": "200 mA \u00b7 Increasing demand", "timestamp": "", "status": "simulated", "requested_current_a": 0.2, "load_enabled": true, "values": {"supply_voltage_v": 5.005, "supply_current_a": 0.185, "supply_power_w": 0.925925, "load_voltage_v": 4.97708, "load_current_a": 0.199, "load_power_w": 0.990439}, "direction": "Increasing demand", "voltage_drop_mv": 27.919999999999945}, {"label": "point_8_0.225_a", "display_label": "225 mA \u00b7 Increasing demand", "timestamp": "", "status": "simulated", "requested_current_a": 0.225, "load_enabled": true, "values": {"supply_voltage_v": 5.005, "supply_current_a": 0.21, "supply_power_w": 1.05105, "load_voltage_v": 4.97508, "load_current_a": 0.224, "load_power_w": 1.114418}, "direction": "Increasing demand", "voltage_drop_mv": 29.919999999999725}, {"label": "point_9_0.25_a", "display_label": "250 mA \u00b7 Increasing demand", "timestamp": "", "status": "simulated", "requested_current_a": 0.25, "load_enabled": true, "values": {"supply_voltage_v": 5.005, "supply_current_a": 0.235, "supply_power_w": 1.176175, "load_voltage_v": 4.97308, "load_current_a": 0.249, "load_power_w": 1.238297}, "direction": "Increasing demand", "voltage_drop_mv": 31.919999999999504}, {"label": "point_10_0.275_a", "display_label": "275 mA \u00b7 Increasing demand", "timestamp": "", "status": "simulated", "requested_current_a": 0.275, "load_enabled": true, "values": {"supply_voltage_v": 5.005, "supply_current_a": 0.26, "supply_power_w": 1.3013, "load_voltage_v": 4.97108, "load_current_a": 0.274, "load_power_w": 1.362076}, "direction": "Increasing demand", "voltage_drop_mv": 33.92000000000017}, {"label": "point_11_0.3_a", "display_label": "300 mA \u00b7 Increasing demand", "timestamp": "", "status": "simulated", "requested_current_a": 0.3, "load_enabled": true, "values": {"supply_voltage_v": 5.005, "supply_current_a": 0.285, "supply_power_w": 1.426425, "load_voltage_v": 4.96908, "load_current_a": 0.299, "load_power_w": 1.485755}, "direction": "Increasing demand", "voltage_drop_mv": 35.91999999999995}, {"label": "point_12_0.275_a", "display_label": "275 mA \u00b7 Reducing demand", "timestamp": "", "status": "simulated", "requested_current_a": 0.275, "load_enabled": true, "values": {"supply_voltage_v": 5.005, "supply_current_a": 0.26, "supply_power_w": 1.3013, "load_voltage_v": 4.96958, "load_current_a": 0.274, "load_power_w": 1.361665}, "direction": "Reducing demand", "voltage_drop_mv": 35.42000000000023}, {"label": "point_13_0.25_a", "display_label": "250 mA \u00b7 Reducing demand", "timestamp": "", "status": "simulated", "requested_current_a": 0.25, "load_enabled": true, "values": {"supply_voltage_v": 5.005, "supply_current_a": 0.235, "supply_power_w": 1.176175, "load_voltage_v": 4.97158, "load_current_a": 0.249, "load_power_w": 1.237923}, "direction": "Reducing demand", "voltage_drop_mv": 33.41999999999956}, {"label": "point_14_0.225_a", "display_label": "225 mA \u00b7 Reducing demand", "timestamp": "", "status": "simulated", "requested_current_a": 0.225, "load_enabled": true, "values": {"supply_voltage_v": 5.005, "supply_current_a": 0.21, "supply_power_w": 1.05105, "load_voltage_v": 4.97358, "load_current_a": 0.224, "load_power_w": 1.114082}, "direction": "Reducing demand", "voltage_drop_mv": 31.41999999999978}, {"label": "point_15_0.2_a", "display_label": "200 mA \u00b7 Reducing demand", "timestamp": "", "status": "simulated", "requested_current_a": 0.2, "load_enabled": true, "values": {"supply_voltage_v": 5.005, "supply_current_a": 0.185, "supply_power_w": 0.925925, "load_voltage_v": 4.97558, "load_current_a": 0.199, "load_power_w": 0.99014}, "direction": "Reducing demand", "voltage_drop_mv": 29.42}, {"label": "point_16_0.175_a", "display_label": "175 mA \u00b7 Reducing demand", "timestamp": "", "status": "simulated", "requested_current_a": 0.175, "load_enabled": true, "values": {"supply_voltage_v": 5.005, "supply_current_a": 0.16, "supply_power_w": 0.8008, "load_voltage_v": 4.97758, "load_current_a": 0.174, "load_power_w": 0.866099}, "direction": "Reducing demand", "voltage_drop_mv": 27.420000000000222}, {"label": "point_17_0.15_a", "display_label": "150 mA \u00b7 Reducing demand", "timestamp": "", "status": "simulated", "requested_current_a": 0.15, "load_enabled": true, "values": {"supply_voltage_v": 5.005, "supply_current_a": 0.135, "supply_power_w": 0.675675, "load_voltage_v": 4.97958, "load_current_a": 0.149, "load_power_w": 0.741957}, "direction": "Reducing demand", "voltage_drop_mv": 25.419999999999554}, {"label": "point_18_0.125_a", "display_label": "125 mA \u00b7 Reducing demand", "timestamp": "", "status": "simulated", "requested_current_a": 0.125, "load_enabled": true, "values": {"supply_voltage_v": 5.005, "supply_current_a": 0.11, "supply_power_w": 0.55055, "load_voltage_v": 4.98158, "load_current_a": 0.124, "load_power_w": 0.617716}, "direction": "Reducing demand", "voltage_drop_mv": 23.419999999999774}, {"label": "point_19_0.1_a", "display_label": "100 mA \u00b7 Reducing demand", "timestamp": "", "status": "simulated", "requested_current_a": 0.1, "load_enabled": true, "values": {"supply_voltage_v": 5.005, "supply_current_a": 0.085, "supply_power_w": 0.425425, "load_voltage_v": 4.98358, "load_current_a": 0.099, "load_power_w": 0.493374}, "direction": "Reducing demand", "voltage_drop_mv": 21.419999999999995}, {"label": "point_20_0.075_a", "display_label": "75 mA \u00b7 Reducing demand", "timestamp": "", "status": "simulated", "requested_current_a": 0.075, "load_enabled": true, "values": {"supply_voltage_v": 5.005, "supply_current_a": 0.06, "supply_power_w": 0.3003, "load_voltage_v": 4.98558, "load_current_a": 0.074, "load_power_w": 0.368933}, "direction": "Reducing demand", "voltage_drop_mv": 19.420000000000215}, {"label": "point_21_0.05_a", "display_label": "50 mA \u00b7 Reducing demand", "timestamp": "", "status": "simulated", "requested_current_a": 0.05, "load_enabled": true, "values": {"supply_voltage_v": 5.005, "supply_current_a": 0.035, "supply_power_w": 0.175175, "load_voltage_v": 4.98758, "load_current_a": 0.049, "load_power_w": 0.244391}, "direction": "Reducing demand", "voltage_drop_mv": 17.419999999999547}]</script><script type="text/javascript">
+(() => {
+  'use strict';
+  const samples = JSON.parse(document.getElementById('report-data').textContent);
+  const simulated = document.documentElement.dataset.source === 'simulated';
+  const charts = [...document.querySelectorAll('.interactive-chart')];
+  const rows = [...document.querySelectorAll('tr[data-row]')];
+  const inspector = document.getElementById('point-inspector');
+  const range = document.getElementById('point-range');
+  let selected = 0;
+  const fmt = (n, digits = 6) => typeof n === 'number' && Number.isFinite(n)
+    ? new Intl.NumberFormat('en-US', {maximumFractionDigits: digits}).format(n) : '—';
+  const withUnit = (n, unit, digits = 6) => `${fmt(n, digits)} ${unit}`;
+  const withCurrent = n => withUnit(typeof n === 'number' ? n * 1000 : null, 'mA', 9);
+  const text = (id, value) => {document.getElementById(id).textContent = value;};
+  const plotPoints = new Map(charts.map(chart => [chart, [...chart.querySelectorAll('.data-point')]]));
+  function select(index, announce = false) {
+    if (!samples.length) return;
+    selected = Math.max(0, Math.min(samples.length - 1, index));
+    const sample = samples[selected], values = sample.values;
+    text('selected-title', sample.display_label);
+    text('point-position', `${selected + 1} / ${samples.length}`);
+    text('selected-current', withCurrent(values.load_current_a));
+    text('selected-target', sample.load_enabled === false ? '0 mA · load off' : withCurrent(sample.requested_current_a));
+    text('selected-voltage', withUnit(values.load_voltage_v, 'V'));
+    text('selected-power', withUnit(values.load_power_w, 'W'));
+    text('selected-drop', withUnit(sample.voltage_drop_mv, 'mV', 3));
+    text('selected-meta', `Point ${selected + 1} · ${sample.direction || 'Saved reading'} · ${sample.status} · ${sample.timestamp || 'Timestamp unavailable'}`);
+    range.value = String(selected);
+    range.setAttribute('aria-valuetext', `Point ${selected + 1} of ${samples.length}: ${sample.display_label}`);
+    document.getElementById('previous-point').disabled = selected === 0;
+    document.getElementById('next-point').disabled = selected === samples.length - 1;
+    rows.forEach(row => row.classList.toggle('selected', Number(row.dataset.row) === selected));
+    charts.forEach(chart => {
+      const points = plotPoints.get(chart);
+      const active = points.filter(point => Number(point.dataset.sample) === selected);
+      points.forEach(point => point.classList.toggle('is-active', active.includes(point)));
+      const cursor = chart.querySelector('.cursor-line');
+      cursor.setAttribute('visibility', active.length ? 'visible' : 'hidden');
+      if (active.length) {
+        cursor.setAttribute('x1', active[0].getAttribute('cx'));
+        cursor.setAttribute('x2', active[0].getAttribute('cx'));
+      }
+    });
+    if (announce) text('point-announcement', `Reading ${selected + 1} of ${samples.length}, ${sample.display_label}. Load ${withCurrent(values.load_current_a)}, ${withUnit(values.load_voltage_v, 'V')}, voltage drop ${withUnit(sample.voltage_drop_mv, 'mV', 3)}.`);
+  }
+  function hideTips() {document.querySelectorAll('.plot-tooltip').forEach(tip => {tip.hidden = true;});}
+  function showTip(chart, index, clientX, clientY) {
+    const sample = samples[index], card = chart.closest('.chart-card');
+    const wrap = card.querySelector('.plot-wrap'), tip = card.querySelector('.plot-tooltip');
+    const title = document.createElement('div');
+    title.className = 'tip-title';
+    title.textContent = `#${index + 1} · ${sample.display_label}`;
+    const contents = [title];
+    const values = [];
+    if (card.id !== 'demand-chart') {
+      values.push([simulated ? 'Example current' : 'Measured current', withCurrent(sample.values.load_current_a)]);
+      if (sample.requested_current_a !== null) values.push(['Requested current', withCurrent(sample.requested_current_a)]);
+    }
+    plotPoints.get(chart).filter(point => Number(point.dataset.sample) === index).forEach(point => {
+      values.push([point.dataset.series, withUnit(Number(point.dataset.value), card.dataset.unit, card.dataset.unit === 'mA' ? 9 : 6)]);
+    });
+    if (sample.load_enabled === false) values.push(['Load state', 'Switched off · 0 mA requested']);
+    if (sample.direction) values.push(['Change in demand', sample.direction]);
+    values.push(['Status', sample.status]);
+    values.forEach(([label, value]) => {
+      const line = document.createElement('div'); line.className = 'tip-row';
+      const key = document.createElement('span'), val = document.createElement('span');
+      key.textContent = label; val.textContent = value; line.append(key, val); contents.push(line);
+    });
+    tip.replaceChildren(...contents); tip.hidden = false;
+    const box = wrap.getBoundingClientRect(), tipBox = tip.getBoundingClientRect();
+    const desiredX = clientX - box.left + 16;
+    const x = desiredX + tipBox.width > box.width ? clientX - box.left - tipBox.width - 16 : desiredX;
+    tip.style.left = `${Math.max(0, Math.min(box.width - tipBox.width, x))}px`;
+    tip.style.top = `${Math.max(0, Math.min(box.height - tipBox.height, clientY - box.top - 20))}px`;
+  }
+  charts.forEach(chart => {
+    const points = plotPoints.get(chart);
+    function inspect(event) {
+      const matrix = chart.getScreenCTM(); if (!matrix) return;
+      const loc = new DOMPoint(event.clientX, event.clientY).matrixTransform(matrix.inverse());
+      if (loc.x < Number(chart.dataset.left) || loc.x > Number(chart.dataset.right) || loc.y < Number(chart.dataset.top) || loc.y > Number(chart.dataset.bottom)) {hideTips(); return;}
+      let nearest = null, best = Infinity;
+      points.forEach(point => {
+        const dx = loc.x - Number(point.getAttribute('cx')), dy = loc.y - Number(point.getAttribute('cy'));
+        const distance = dx * dx + dy * dy;
+        if (distance < best) {best = distance; nearest = point;}
+      });
+      if (!nearest) return;
+      hideTips(); select(Number(nearest.dataset.sample));
+      showTip(chart, selected, event.clientX, event.clientY);
+    }
+    chart.addEventListener('pointermove', inspect);
+    chart.addEventListener('pointerdown', inspect);
+    // A touch tap ends with pointerleave; keep its result visible after release.
+    chart.addEventListener('pointerleave', event => {
+      if (event.pointerType !== 'touch') hideTips();
+    });
+    chart.addEventListener('pointercancel', hideTips);
+    // A tap on another chart can focus it after its pointerdown showed a tip.
+    // Hiding only this chart's tip keeps the newly selected reading visible.
+    chart.addEventListener('blur', () => {
+      chart.closest('.chart-card').querySelector('.plot-tooltip').hidden = true;
+    });
+    chart.addEventListener('keydown', event => {
+      let index;
+      if (event.key === 'ArrowRight' || event.key === 'ArrowDown') index = selected + 1;
+      else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') index = selected - 1;
+      else if (event.key === 'Home') index = 0;
+      else if (event.key === 'End') index = samples.length - 1;
+      else if (event.key === 'Escape') {hideTips(); return;}
+      else return;
+      event.preventDefault(); hideTips(); select(index, true);
+      const point = points.find(item => Number(item.dataset.sample) === selected);
+      const matrix = chart.getScreenCTM();
+      if (point && matrix) {
+        const screen = new DOMPoint(Number(point.getAttribute('cx')), Number(point.getAttribute('cy'))).matrixTransform(matrix);
+        showTip(chart, selected, screen.x, screen.y);
+      }
+    });
+  });
+  if (samples.length) {
+    inspector.hidden = false;
+    range.max = String(samples.length - 1);
+    range.addEventListener('input', () => {hideTips(); select(Number(range.value), true);});
+    document.getElementById('previous-point').addEventListener('click', () => {hideTips(); select(selected - 1, true);});
+    document.getElementById('next-point').addEventListener('click', () => {hideTips(); select(selected + 1, true);});
+    document.querySelectorAll('[data-select]').forEach(button => button.addEventListener('click', () => {hideTips(); select(Number(button.dataset.select), true);}));
+    select(0);
+  }
+  const search = document.getElementById('point-search');
+  search.closest('label').hidden = false;
+  search.addEventListener('input', () => {
+    const query = search.value.trim().toLocaleLowerCase(); let count = 0;
+    rows.forEach(row => {row.hidden = !Array.from(row.cells, cell => cell.textContent).join(' ').toLocaleLowerCase().includes(query); if (!row.hidden) count++;});
+    text('table-count', `${count} of ${samples.length} points · acquisition order · CSV includes all points`);
+    document.getElementById('no-matches').hidden = count !== 0 || !samples.length;
+  });
+  const print = document.getElementById('print-report');
+  print.hidden = false; print.addEventListener('click', () => window.print());
+  document.addEventListener('pointerdown', event => {
+    if (!event.target.closest('.interactive-chart')) hideTips();
+  });
+  window.addEventListener('resize', hideTips);
+})();
+</script></body></html>

@@ -1,0 +1,25 @@
+# Copy to 08_Software/config/lab.yaml and replace both .invalid hostnames with your
+# instruments' addresses. Identify each instrument read-only, then fill in
+# both expected_serial values before using any control command or recipe.
+# The .invalid names are reserved and must never identify a live device.
+schema_version: 1
+
+devices:
+  psu_rigol_1:
+    kind: power_supply
+    driver: rigol_dp800
+    resource: "TCPIP0::supply.example.invalid::INSTR"
+    expected_serial: null  # Set to the exact *IDN? serial after identify.
+    safety_profile: demo_supply_5v
+
+  load_rigol_1:
+    kind: electronic_load
+    driver: rigol_dl3000
+    resource: "TCPIP0::load.example.invalid::INSTR"
+    expected_serial: null  # Set to the exact *IDN? serial after identify.
+    safety_profile: demo_load_5v
+
+setups:
+  main_bench:
+    supply: psu_rigol_1
+    load: load_rigol_1

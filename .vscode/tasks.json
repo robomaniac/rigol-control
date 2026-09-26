@@ -1,0 +1,74 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "benchctl: validate load sweep",
+      "type": "process",
+      "command": "${workspaceFolder}/.venv/bin/benchctl",
+      "args": [
+        "run",
+        "08_Software/recipes/load_sweep.yaml",
+        "--setup",
+        "main_bench",
+        "--config",
+        "08_Software/config/lab.example.yaml",
+        "--dry-run"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "benchctl: run load sweep (energizes CH1 and load)",
+      "type": "process",
+      "command": "${workspaceFolder}/.venv/bin/benchctl",
+      "args": [
+        "run",
+        "08_Software/recipes/load_sweep.yaml",
+        "--setup",
+        "main_bench"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "benchctl: generate latest report",
+      "type": "process",
+      "command": "${workspaceFolder}/.venv/bin/benchctl",
+      "args": [
+        "report",
+        "--latest",
+        "load_sweep"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "benchctl: preview saved report",
+      "type": "process",
+      "command": "${workspaceFolder}/.venv/bin/python",
+      "args": [
+        "-m",
+        "http.server",
+        "8081",
+        "--bind",
+        "127.0.0.1",
+        "--directory",
+        "05_Data"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    }
+  ]
+}
