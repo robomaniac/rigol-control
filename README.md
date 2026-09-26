@@ -7,11 +7,20 @@ Pi or Linux computer and inspect the results in an offline HTML report.
 
 **Status:** working bench prototype · **Python:** 3.11+ · **Verified bench:** DP821A + DL3031A
 
-[Open the real 5 V power test](https://robomaniac.github.io/rigol-control/Data/power-test-report.html) · [Measured CSV](Data/power-test-results.csv) · [Simulated example](https://robomaniac.github.io/rigol-control/Data/sweep-preview.html) ·
+## Interactive demo
+
+### [Open the interactive 5 V power test →](https://robomaniac.github.io/rigol-control/Data/power-test-report.html)
+
+Explore 22 real measurements: hover over the graphs, move through the test,
+and download the results. It opens in your browser without installing anything
+or connecting to the Pi.
+
+[Measured CSV](Data/power-test-results.csv) · [Simulated example](https://robomaniac.github.io/rigol-control/Data/sweep-preview.html) ·
 [Demo YAML](Software/recipes/load_sweep.yaml) · [Wiring](Electrical/Wiring.md)
 
 ## Table of contents
 
+- [Interactive demo](#interactive-demo)
 - [Start here](#start-here)
 - [Demo: will your circuit still receive 5 V?](#demo-will-your-circuit-still-receive-5-v)
   - [What happens during the test](#what-happens-during-the-test)
@@ -77,6 +86,8 @@ For a completely offline first check, add
 `--config Software/config/lab.example.yaml` to that command.
 
 ## Demo: will your circuit still receive 5 V?
+
+**[Open the interactive results from this test →](https://robomaniac.github.io/rigol-control/Data/power-test-report.html)**
 
 Imagine a small circuit that needs 5 V and draws between 50 and 300 mA.
 Before connecting it, we can check the supply and wires using the electronic
