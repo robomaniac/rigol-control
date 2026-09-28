@@ -129,8 +129,15 @@ def run_mock(plan: Plan, out: Path, scenario: str = "normal", real_time: bool = 
         raise ValueError("mock acquisition requires four declared electrical measurement bindings")
     if plan.bench.source.max_current_A is None:
         raise ValueError("mock source current capability is required")
-    maximum_virtual = len(plan.points) * (plan.recipe.settling.timeout_s + plan.recipe.acquisition.duration_s + 2)
-    timeout = worker_timeout_s if worker_timeout_s is not None else max(60.0, maximum_virtual + 30 if real_time else 60.0)
+    recipe = plan.recipe
+    maximum_virtual = len(plan.points) * (recipe.settling.timeout_s + recipe.acquisition.duration_s + 2)
+    # The worker fsyncs every JSONL record, so its wall time follows the record
+    # count and host I/O, not model time; a flat deadline interrupted healthy
+    # runs on a loaded SD card.
+    records = len(plan.points) * len(QUANTITIES) * math.ceil(
+        (recipe.settling.timeout_s + recipe.acquisition.duration_s) / max(recipe.acquisition.target_poll_interval_s, 1e-3))
+    io_budget = 120.0 + 0.1 * records
+    timeout = worker_timeout_s if worker_timeout_s is not None else (maximum_virtual + io_budget if real_time else io_budget)
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("worker timeout must be finite and positive")
     created = datetime.now(timezone.utc)
