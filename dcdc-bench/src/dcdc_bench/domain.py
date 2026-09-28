@@ -281,6 +281,52 @@ class ChannelCorrelation(Contract):
         return self
 
 
+MOCK_THERMAL_ADAPTER = "mock_thermal"
+TEMPERATURE_UNIT = "C"
+ANNOTATIONS_SCHEMA_VERSION = "1.0"
+_UNDOCUMENTED_INTERNAL_LABEL = r"(?i)\bU\d+\b|junction|die\b"
+
+
+class SensorPlacement(Contract):
+    """Marker on the exact original photograph, in normalized image coordinates.
+
+    Mirrors one ``markers[]`` entry of the attachment store's ``annotations.json``
+    (schema 1.0) together with its ``image_asset_sha256``; resizing the image
+    never moves the marker because coordinates are bound to the original hash.
+    """
+    image_asset_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    x_norm: float = Field(ge=0, le=1)
+    y_norm: float = Field(ge=0, le=1)
+    label: str | None = None
+
+
+class TemperatureSensor(Contract):
+    """Section 10 sensor record. Unknown fields stay 'unknown'; nothing is inferred."""
+    sensor_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+    instrument_id: str
+    channel: str
+    quantity: str
+    adapter: str
+    role: Literal["surface", "ambient"] = "surface"
+    sensor_type: str = "unknown"
+    measured_surface: str
+    attachment_method: str = "unknown"
+    ambient_reference: str | None = None
+    calibration_status: str = "unknown"
+    surface_documentation: str | None = None
+    placement: SensorPlacement | None = None
+
+    @model_validator(mode="after")
+    def surface_is_documented_accessible_location(self) -> TemperatureSensor:
+        import re
+        if re.search(_UNDOCUMENTED_INTERNAL_LABEL, self.measured_surface) and not self.surface_documentation:
+            raise ValueError("Internal component or junction labels require surface_documentation; "
+                             "an undocumented sensor measures an accessible external location only")
+        if self.role == "ambient" and self.ambient_reference is not None:
+            raise ValueError("An ambient sensor does not reference another ambient sensor")
+        return self
+
+
 class BenchProfile(Contract):
     schema_version: Literal["1.0"] = "1.0"
     bench_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
@@ -293,12 +339,36 @@ class BenchProfile(Contract):
     notes: list[str] = Field(default_factory=list)
     uncertainty_policy: UncertaintyPolicy = Field(default_factory=UncertaintyPolicy)
     readback_correlations: list[ChannelCorrelation] = Field(default_factory=list)
+    temperature_sensors: list[TemperatureSensor] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def correlations_reference_bound_channels(self) -> BenchProfile:
         for item in self.readback_correlations:
             if item.quantity_a not in self.measurements or item.quantity_b not in self.measurements:
                 raise ValueError("Readback correlations must reference bound measurement channels")
+        return self
+
+    @model_validator(mode="after")
+    def temperature_sensors_are_bound_channels(self) -> BenchProfile:
+        """A sensor is metadata for a bound channel; the synthetic provider needs a mock bench."""
+        by_id = {sensor.sensor_id: sensor for sensor in self.temperature_sensors}
+        if len(by_id) != len(self.temperature_sensors):
+            raise ValueError("Temperature sensor identifiers must be unique")
+        for sensor in self.temperature_sensors:
+            binding = self.measurements.get(sensor.quantity)
+            if binding is None:
+                raise ValueError(f"Temperature sensor {sensor.sensor_id} has no measurement binding {sensor.quantity}")
+            if binding.instrument_id != sensor.instrument_id or binding.quantity != sensor.quantity:
+                raise ValueError(f"Temperature sensor {sensor.sensor_id} disagrees with its measurement binding")
+            if binding.unit != TEMPERATURE_UNIT:
+                raise ValueError(f"Temperature binding {sensor.quantity} must use unit {TEMPERATURE_UNIT!r}")
+            if sensor.adapter == MOCK_THERMAL_ADAPTER and self.mode != "mock":
+                raise ValueError("The synthetic temperature provider cannot be bound in a real bench profile; "
+                                 "a real thermal test requires a real configured acquisition channel")
+            if sensor.ambient_reference is not None:
+                reference = by_id.get(sensor.ambient_reference)
+                if reference is None or reference.role != "ambient":
+                    raise ValueError(f"Temperature sensor {sensor.sensor_id} references an undeclared ambient sensor")
         return self
 
 
@@ -373,6 +443,33 @@ class UvloRampPolicy(Contract):
         return "indeterminate"
 
 
+class ThermalSettlingPolicy(Contract):
+    """Separate from electrical settling: slope of rise above ambient over a window.
+
+    Qualification requires electrical validity throughout, an ambient channel,
+    a minimum observation and ends at the timeout without inventing equilibrium.
+    """
+    policy: Literal["thermal_rise_slope_window"] = "thermal_rise_slope_window"
+    settings_origin: str = "draft_requires_validation_for_module_sensor_and_setup"
+    surface_quantity: str
+    ambient_quantity: str
+    slope_threshold_C_per_min: float = Field(gt=0)
+    window_s: float = Field(gt=0)
+    minimum_observation_s: float = Field(ge=0)
+    timeout_s: float = Field(gt=0)
+    minimum_samples: int = Field(default=4, ge=2)
+    poll_interval_s: float = Field(default=5, gt=0)
+    requires_electrical_validity: Literal[True] = True
+
+    @model_validator(mode="after")
+    def timeout_allows_observation(self) -> ThermalSettlingPolicy:
+        if self.surface_quantity == self.ambient_quantity:
+            raise ValueError("Surface and ambient temperature channels must differ")
+        if self.timeout_s < max(self.minimum_observation_s, self.window_s):
+            raise ValueError("Thermal settling timeout must allow the minimum observation and slope window")
+        return self
+
+
 class TestDefinition(Contract):
     id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
     type: str = "steady_state_load_sweep"
@@ -382,6 +479,7 @@ class TestDefinition(Contract):
     required_quantities: list[str] = Field(default_factory=lambda: ["Vin_V", "Iin_A", "Vout_V", "Iout_A"])
     optional_quantities: list[str] = Field(default_factory=list)
     uvlo: UvloRampPolicy | None = None
+    thermal_settling: ThermalSettlingPolicy | None = None
 
     @model_validator(mode="after")
     def finite_nonnegative_targets(self) -> TestDefinition:

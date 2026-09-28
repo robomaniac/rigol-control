@@ -1,0 +1,124 @@
+schema_version: '1.0'
+bench_id: mock-thermal-envelope
+mode: mock
+source:
+  instrument_id: synthetic-source
+  adapter: mock_source
+  physical_model: null
+  reported_identity: SYNTHETIC source with CH1 envelope
+  channel: 1
+  capabilities_confirmed: true
+  min_voltage_V: 0.0
+  max_voltage_V: 60.0
+  max_current_A: 1.0
+  max_power_W: 60.0
+  remote_sense_supported: false
+  remote_sense_required: false
+load:
+  instrument_id: synthetic-load
+  adapter: mock_load
+  physical_model: null
+  reported_identity: SYNTHETIC load; not a physical model rating
+  capabilities_confirmed: true
+  min_voltage_V: 0.15
+  max_voltage_V: 150.0
+  max_current_A: 40.0
+  max_power_W: 300.0
+  remote_sense_supported: true
+  remote_sense_required: true
+  mode: CC
+  min_current_A: 0.0
+measurements:
+  Vin_V:
+    instrument_id: synthetic-source
+    quantity: Vin_V
+    unit: V
+    location: source_terminals
+    measurement_range: null
+    resolution: null
+    accuracy: null
+    programming_accuracy: null
+  Iin_A:
+    instrument_id: synthetic-source
+    quantity: Iin_A
+    unit: A
+    location: source_output
+    measurement_range: null
+    resolution: null
+    accuracy: null
+    programming_accuracy: null
+  Vout_V:
+    instrument_id: synthetic-load
+    quantity: Vout_V
+    unit: V
+    location: dut_output_sense
+    measurement_range: null
+    resolution: null
+    accuracy: null
+    programming_accuracy: null
+  Iout_A:
+    instrument_id: synthetic-load
+    quantity: Iout_A
+    unit: A
+    location: dut_output
+    measurement_range: null
+    resolution: null
+    accuracy: null
+    programming_accuracy: null
+  Tcase_C:
+    instrument_id: synthetic-thermal
+    quantity: Tcase_C
+    unit: C
+    location: dut_case_top_external
+    measurement_range: null
+    resolution: null
+    accuracy: null
+    programming_accuracy: null
+  Tambient_C:
+    instrument_id: synthetic-thermal
+    quantity: Tambient_C
+    unit: C
+    location: ambient_air_near_dut
+    measurement_range: null
+    resolution: null
+    accuracy: null
+    programming_accuracy: null
+temperature_sensors:
+- sensor_id: Tcase
+  instrument_id: synthetic-thermal
+  channel: model:case
+  quantity: Tcase_C
+  adapter: mock_thermal
+  role: surface
+  sensor_type: synthetic first-order case model (no physical sensor)
+  measured_surface: case top, accessible external location
+  attachment_method: synthetic; no physical attachment
+  ambient_reference: Tambient
+  calibration_status: not applicable (synthetic)
+  surface_documentation: null
+  placement: null
+- sensor_id: Tambient
+  instrument_id: synthetic-thermal
+  channel: model:ambient
+  quantity: Tambient_C
+  adapter: mock_thermal
+  role: ambient
+  sensor_type: synthetic ambient model (no physical sensor)
+  measured_surface: ambient air near the DUT, shaded
+  attachment_method: synthetic; no physical attachment
+  ambient_reference: null
+  calibration_status: not applicable (synthetic)
+  surface_documentation: null
+  placement: null
+measurement_boundary: source-to-DUT-output path
+notes:
+- SYNTHETIC profiles model a coupled converter and source/load. These are not observations
+  of the physical DUT.
+- The synthetic source uses the published CH1 voltage/current envelope; the synthetic
+  load capabilities are simulation assumptions.
+- Readback uncertainty is unquantified. Programming accuracy is not substituted.
+- Source-terminal input measurements include input wiring losses in path efficiency.
+- Temperature channels come from a first-order synthetic case model driven by the plant's
+  synthetic module loss (mock_thermal adapter). They are selectable only for a mock bench;
+  a real thermal test requires real configured acquisition channels. No photograph or
+  sensor placement exists for this synthetic setup, so placement is null, not invented.

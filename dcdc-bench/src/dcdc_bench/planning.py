@@ -8,7 +8,7 @@ from typing import TypeVar
 
 import yaml
 
-from .domain import (UVLO_TEST_TYPE, BenchProfile, Contract, DutProfile, Plan, PlannedPoint, TestDefinition,
+from .domain import (MOCK_THERMAL_ADAPTER, UVLO_TEST_TYPE, BenchProfile, Contract, DutProfile, Plan, PlannedPoint, TestDefinition,
                      TestRecipe)
 
 Profile = TypeVar("Profile", bound=Contract)
@@ -113,6 +113,21 @@ def _unsupported_capabilities(dut: DutProfile, bench: BenchProfile, test: TestDe
             reasons.append(f"Measurement {quantity} has an incompatible unit")
         elif quantity in REQUIRED_MEASUREMENTS and binding.quantity != quantity:
             reasons.append(f"Measurement role {quantity} is bound to a different quantity")
+    # Section 10: a thermal test requires real configured channels with sensor
+    # metadata; a missing sensor is never replaced by a model value.
+    if test.thermal_settling is not None:
+        sensors = {sensor.quantity: sensor for sensor in bench.temperature_sensors}
+        for role, quantity in (("surface", test.thermal_settling.surface_quantity),
+                               ("ambient", test.thermal_settling.ambient_quantity)):
+            if quantity not in bench.measurements:
+                reasons.append(f"Thermal settling requires a bound {role} temperature channel {quantity}; "
+                               "none is declared and no model value is substituted")
+            elif quantity not in sensors:
+                reasons.append(f"Temperature channel {quantity} has no sensor record (surface, attachment, ambient reference)")
+            elif sensors[quantity].role != role:
+                reasons.append(f"Temperature channel {quantity} is declared as a {sensors[quantity].role} sensor, not {role}")
+        if bench.mode == "mock" and any(sensor.adapter != MOCK_THERMAL_ADAPTER for sensor in bench.temperature_sensors):
+            reasons.append("Mock execution provides only the synthetic temperature adapter; other adapters are not implemented")
     return sorted(reasons)
 
 

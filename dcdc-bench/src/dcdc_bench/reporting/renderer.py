@@ -199,6 +199,11 @@ def validate_report_model(model: dict) -> dict:
             seen.add(series["id"])
             if not set(series["point_ids"]) <= points.keys():
                 raise ValueError(f"Figure {fid} references a missing point")
+        for series in figure.get("sample_series", []):
+            if series["point_id"] not in points:
+                raise ValueError(f"Figure {fid} references a missing point")
+            if len(series["x"]) != len(series["y"]):
+                raise ValueError(f"Figure {fid} sample series lengths differ")
     for metric in model["metrics"]:
         if not set(metric.get("point_ids", [])) <= points.keys():
             raise ValueError("Metric references a missing point")
@@ -420,6 +425,15 @@ def _plot_figure(model: dict, spec: dict, number: int):
             marker={"size": 9, "color": color, "symbol": style["symbol"]}, connectgaps=False,
             legendgroup=series["id"], customdata=[p["point_id"] for p in rows],
             hovertemplate="%{customdata}<br>%{x:.6g}<br>%{y:.6g}<extra>%{fullData.name}</extra>"))
+    # Retained raw time series (e.g. thermal settling) are drawn exactly as supplied.
+    for index, series in enumerate(spec.get("sample_series", [])):
+        color = COLORS[index % len(COLORS)]
+        label = str(series.get("label", series["id"]))
+        conditions.append(label)
+        figure.add_trace(go.Scatter(x=list(series["x"]), y=list(series["y"]), name=html.escape(label),
+            mode="lines+markers", line={"width": 1.5, "color": color}, marker={"size": 5, "color": color},
+            connectgaps=False, legendgroup=series["id"],
+            hovertemplate="%{x:.6g} s<br>%{y:.6g}<extra>%{fullData.name}</extra>"))
     footer = _footer(model, spec, "; ".join(conditions) or "no qualified plotted conditions")
     # Every user supplied segment is escaped before entering Plotly rich text.
     footer = "<br>".join(html.escape(line) for line in footer.split("<br>"))
