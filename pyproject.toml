@@ -8,6 +8,21 @@ version = "0.1.0"
 description = "Run Rigol bench recipes and explore measurements in interactive offline reports."
 readme = "README.md"
 requires-python = ">=3.11"
+# No `license` field yet: the repository owner has not chosen a license (see README).
+keywords = ["rigol", "dp800", "dl3000", "scpi", "pyvisa", "power-supply", "electronic-load", "bench-automation"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering",
+    "Topic :: System :: Hardware",
+]
 dependencies = [
     "pyvisa>=1.13",
     "pyvisa-py>=0.7",
@@ -19,6 +34,13 @@ dependencies = [
 dev = [
     "pytest>=8.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/robomaniac/rigol-control"
+Repository = "https://github.com/robomaniac/rigol-control"
+Issues = "https://github.com/robomaniac/rigol-control/issues"
+"Interactive demo" = "https://robomaniac.github.io/rigol-control/"
+Documentation = "https://github.com/robomaniac/rigol-control/tree/main/Documentation"
 
 [project.scripts]
 benchctl = "benchctl.cli:main"
