@@ -1,23 +1,31 @@
 # Implementation status
 
-## Current position — 27 September 2026
+## Current position
 
-**M0/M1 are complete for the initial scope. M2 qualification remains partial.
-The bounded M3 configured real workflow is accepted: actual UI Socket.IO
-callbacks completed acquisition after client disconnect and automatic reports;
-the served reports, saved-run view and desktop/mobile forms passed browser
-review.** This assessment follows
+**Status as of 2026-09-27 (branch dcdc-bench-hardening): M0 reached; M1
+substantially reached; M2 partial (freshness, readback accuracy and uncertainty
+unquantified; enabled-no-load unqualified); an M3 workflow slice demonstrated
+(bounded three-point real job through the UI's application services) but M3
+not complete by the spec's exit criteria; M4/M5 not started.**
+
+This position follows the exit criteria in
 [Section 15 of the brief](implementation-brief.md#15-implementation-milestones)
-and was independently checked against the current code.
+and is stated identically in [acceptance.md](acceptance.md) and the
+[README](../README.md). The demonstrated M3 slice is real: the UI Start
+callback completed a three-point acquisition after client disconnect, verified
+OFF and produced HTML/PDF automatically. It does not satisfy M3 because M2
+qualification is a prerequisite and remains open. This reconciliation was
+performed by an automated agent role against the current code, not by a human
+or external reviewer.
 
 | Milestone | Status | Delivered and remaining |
 | --- | --- | --- |
 | M0 — contracts and planning | Complete | Typed DUT/bench/recipe profiles, constraint checks and feasible-point planning for the initial steady-state scope. |
-| M1 — mock run to HTML/PDF | Complete on the recorded platform | Normal, setup-limited and aborted mock runs; retained evidence, interactive reports and vector PDFs with recorded acceptance checks. |
-| M2 — supervised real point | Partial | Loaded bring-up, protection readbacks, timing, provenance and verified shutdown work in fixed and configured real procedures. Qualified enabled-no-load measurement, independent readback/freshness, uncertainty and physical load capability checks remain open. |
-| M3 — partial-power sweep and UI | Complete for the supported bounded workflow | Saved forms, hashed preview, fresh confirmations and the actual UI Start callback completed a three-point real acquisition, continued after client disconnect, verified OFF and generated HTML/PDF automatically. Desktop/mobile forms and saved reports passed browser review. Another 5 V DUT profile was exercised without Python edits using fake SCPI. The real Start used Socket.IO callbacks; a complete browser-click acquisition is not claimed. |
-| M4 — paired-run comparison and thermal tools | Not delivered | No paired-run comparison command/editor, photo/sensor annotation UI or real temperature adapter. Different input-voltage curves within one run do not complete this milestone. |
-| M5 — expanded tests and capability | Deferred | Full-power operation, qualified uncertainty improvements, UVLO and scope/dynamic procedures remain future work. |
+| M1 — mock run to HTML/PDF | Substantially reached | Normal, setup-limited and aborted mock runs; retained evidence, interactive reports and vector PDFs with recorded acceptance checks at the initial checkpoint. Open: the 13 browser/PDF-marked gates cannot run on this aarch64 Pi with the current toolchain and are re-verified on a laptop or CI; WEB-08's nonpositive-current exclusion has no browser fixture; the automated PDF-02 pagination check is not implemented. |
+| M2 — supervised real point | Partial | Loaded bring-up, protection readbacks, timing, provenance and verified shutdown work in fixed and configured real procedures. Qualified enabled-no-load measurement, independent readback/freshness, uncertainty and physical load capability checks remain open. Saved-profile approvals, a single shared protection-programming sequence and a bounded live-voltage driver step were hardened on this branch; the metrology gate itself is unchanged. |
+| M3 — partial-power sweep and UI | Workflow slice demonstrated; not complete | Saved forms, hashed preview, fresh confirmations and the actual UI Start callback completed a bounded three-point real acquisition through the application services, continued after client disconnect, verified OFF and generated HTML/PDF automatically. Desktop/mobile forms and saved reports passed browser review. Another 5 V DUT profile was exercised without Python edits using fake SCPI. RUN-02 refresh/reconnect is now covered at the mock/application-services level. Not complete by the Section 15 exit criteria: M2 qualification is a prerequisite, the sweep is bounded far below rated power, the real Start used Socket.IO callbacks so a browser-click acquisition is not claimed, and `reports/<rev>/exports/` plus the renderer's narrative literals are in progress. |
+| M4 — paired-run comparison and thermal tools | Not started | No paired-run comparison command/editor, photo/sensor annotation UI or real temperature adapter. Different input-voltage curves within one run do not complete this milestone. |
+| M5 — expanded tests and capability | Not started | Full-power operation, qualified uncertainty improvements, the approved UVLO runtime rule (RUN-09) and scope/dynamic procedures remain future work. |
 
 ### Latest measured evidence
 
@@ -36,7 +44,7 @@ and was independently checked against the current code.
   99.5 mA**. The converter first established stable output at 15 V; this does
   not establish cold-start operation at 9 V or a UVLO threshold. Source, load
   and the independent source timer were verified OFF. See the
-  [independent startup/descent results review](startup-descent-results-review.md).
+  [agent-role startup/descent results review](startup-descent-results-review.md).
 - Startup report: [interactive HTML](http://localhost:8081/Runs/12t12-startup/report.html)
   and [PDF](http://localhost:8081/Runs/12t12-startup/report.pdf), final presentation revision `r0005`,
   analysis `a-64db20585452`. These are local bench links; use the actual
@@ -51,11 +59,12 @@ and was independently checked against the current code.
   2.5 A output. The 24 V phase reached its mean input-current target; the near-36 V
   phase completed its declared grid. It did not establish a maximum output rating.
 - The separate 12 V startup attempt stopped on input-voltage collapse and current
-  near the 1 A source limit. It produced **no qualified 12 V efficiency curve**;
-  its cause remains unestablished. Both attempts retain their own raw evidence.
+  near the 1 A source limit. It produced **no qualified 12 V efficiency curve**.
+  The 12T12-4A has failed direct 12 V cold-start twice; the cause remains
+  unestablished. Both attempts retain their own raw evidence.
 - Voltage-comparison report: local `/Runs/12t12-efficiency/report.html` and `report.pdf`,
   revision `r0005`, analysis `a-e2e7cc8e0d01`. See the
-  [independent results audit](voltage-efficiency-results-review.md),
+  [agent-role results audit](voltage-efficiency-results-review.md),
   [code review](voltage-efficiency-code-review.md) and
   [UI/UX review](voltage-efficiency-ui-review.md).
 
@@ -98,31 +107,96 @@ See [terminology](engineering-figure-labels.md) and
 [style verification](engineering-style-verification.md) for the reference
 documents, checks and browser coverage.
 
-### Next implementation work
+### Next bounded task
 
-1. Continue M2 metrology qualification: establish enabled no-load measurements,
-   independent readback/freshness and uncertainty checks, and physical capability
-   limits for the ranges to be claimed.
-2. Implement M4 paired-run comparison, real temperature acquisition and
-   photo/sensor placement editing, with traceable report attachments. Existing
-   attachment references do not constitute image upload or annotation tools.
-3. Expand the physically qualified DUT/bench envelope only with reviewed
-   procedures and equipment limits. The separate warm-start experiment does
-   not add warm-start behavior to the ordinary cold-start UI sweep.
+Before any further energizing of the converter, the next bounded task is:
 
-`ui` is now implemented. The older generic CLI `run --mode real` still rejects
+1. Finish M2 qualification: measurement freshness (independent readback
+   timing, not query spans), readback accuracy at the ranges to be claimed, an
+   evaluated uncertainty budget, the physical load's capability, and a
+   qualified enabled-no-load measurement.
+2. Write the 12 V cold-start hypothesis. The converter failed direct 12 V
+   cold-start twice with the cause unestablished; a written hypothesis and test
+   plan precede another attempt.
+
+Only after that gate: complete M3 by the Section 15 exit criteria, then M4
+paired-run comparison (CMP-01/02), real temperature acquisition and
+photo/sensor placement editing with traceable attachments, and M5 including
+the approved UVLO runtime rule (RUN-09). The automated PDF pagination check
+(PDF-02) is also not implemented. Existing attachment references do not
+constitute image upload or annotation tools. The physically qualified DUT/bench
+envelope expands only with reviewed procedures and equipment limits; the
+separate warm-start experiment does not add warm-start behavior to the ordinary
+cold-start UI sweep.
+
+In progress on this branch, not done: `reports/<rev>/exports/` and replacing
+the renderer's hard-coded narrative literals.
+
+### Hardening on this branch
+
+Changes on `dcdc-bench-hardening` since the measured evidence above was
+recorded (commit subjects, not hashes):
+
+- **Add dcdc-bench: DC-DC characterization bench with mock/real runs and
+  reports** — the subproject is under version control.
+- **Make saved-profile approvals load-bearing for real hardware** —
+  `DutProfile.execution_approval.real_hardware_enabled` /
+  `.wiring_and_polarity_confirmed` and `BenchProfile.protective_controls.approved`
+  are checked by `planning.missing_approvals()`, surface as the planner's
+  `approval_blocked` reason, and are enforced in `real_backend.prepare_real_plan`
+  (preview errors), `extended._run_fixed_unlocked` and `bringup.run_bringup`.
+  The seeded UI bench profile `rigol-local-limited` ships unapproved; the DUT
+  and bench forms have approval checkboxes. Each Start still requires the fresh
+  wiring/CH1/protections/serial confirmation.
+- **Share one verified protection sequence across all real procedures** —
+  OVP/OCP, load CC limits and OTP are programmed once in `bringup.RigolPilot`
+  (`apply_source_protections`, `apply_load_cc_limits`, `enable_source_otp`);
+  fixed procedures supply values only. Drift guard:
+  `tests/test_bringup.py::test_protection_programming_scpi_lives_only_in_the_shared_adapter`.
+- **Make the section 5.2 contracts runtime-checkable and pin implementations
+  to them** — SourceAdapter, LoadAdapter, MeasurementProvider, TestProcedure,
+  RunStore, Analyzer and ReportRenderer are `@runtime_checkable` Protocols in
+  `domain.py`; `tests/test_contracts.py` checks that `MockBench`,
+  `storage.RunStore`, the `*Procedure` classes and `RigolPilot` conform.
+- **Add RUN-02 regression test: browser refresh reattaches to the single
+  worker** — `tests/test_run02_reconnect.py`.
+- **Route live input-voltage steps through a bounded driver method** — the
+  startup/descent step calls the new `benchctl` method
+  `RigolDP800.set_voltage_live(channel, V, max_step_v=1.0)` instead of writing
+  raw `:SOUR1:VOLT` around the driver's output-OFF interlock (tests in
+  `Software/tests/test_dp800.py`).
+- **Re-validate real plans at start and gate bring-up like the other
+  procedures** — `JobService.start` rebuilds the plan from the saved profiles
+  and re-runs `prepare_real_plan` instead of trusting a cached preview;
+  `bringup.run_bringup` takes the single-owner bench lease.
+
+`ui` is implemented. The older generic CLI `run --mode real` still rejects
 hardware execution; configured real jobs use `JobService` through the UI.
 `doctor` and `compare` remain reserved commands.
 
 ### Current verification record
 
+For the current test totals, see the branch's final verification record; this
+document does not carry a running count. One historical count is retained,
+labeled as such: on 2026-09-27, before this branch's work, the non-browser
+dcdc-bench suite passed 393/393 and the `Software/` (benchctl) suite 435/435.
+Earlier per-selection counts have been removed from this document because
+overlapping selections at different revisions cannot be summed.
+
+Verification platform: this Raspberry Pi is aarch64. Chrome for Testing has no
+linux-arm64 build, so the 13 `browser`/`pdf`-marked tests (WEB-*, EXP-01,
+PDF-*) are not run on the Pi in the current cycle and must run on a laptop or
+CI — the ARM limitation anticipated in brief §4.3. Quarto 1.10.18 is installed
+under `dcdc-bench/.tools/`. The historical record below used Debian's
+`chromium-headless-shell` through the renderer's browser lookup at the initial
+checkpoint.
+
 | Check | Recorded result |
 | --- | --- |
-| Ordinary regression suite | 378 passed, 13 deselected. |
-| Focused checks after review fixes | 39 passed, followed by a final overlapping selection of 57 passed in 74.38 s. |
+| Ordinary regression suite | Passed at each recorded revision; current figure in the branch's final verification record. |
 | Configured real workflow | Three qualified points; continued after UI client disconnect; source/load/timer OFF; automatic HTML/PDF succeeded. |
-| Independent configured-run audit | 67 checks passed against preserved acquisition evidence. |
-| Independent startup/descent audit | 51 checks passed against the separate seven-condition run. |
+| Agent-role configured-run audit | Recomputation from preserved acquisition evidence agreed with the official analysis; see the [results review](configured-workflow-results-review.md). |
+| Agent-role startup/descent audit | Recomputation agreed for the separate seven-condition run; see the [results review](startup-descent-results-review.md). |
 | Another DUT without Python edits | A 5 V DUT profile was exercised through fake SCPI; no second physical DUT acquisition is claimed. |
 | Final PDF pagination | The reviewed layout revisions keep the startup report at six pages and configured workflow at five. Method, complete shutdown table and note stay together; presentation revisions preserve the measurements and figures. |
 | Served Reports browser links | Actual served HTML, PDF and report-model endpoints returned HTTP 200. |
@@ -130,16 +204,14 @@ hardware execution; configured real jobs use `JobService` through the UI.
 
 The separate systemd launcher smoke also completed a pre-cancelled mock job
 without creating acquisition evidence or rendering. See the
-[independent backend code review](configured-backend-code-review.md) and
+[agent-role backend code review](configured-backend-code-review.md) and
 [bench UI verification](bench-ui-verification.md) for the scope and distinction
 between browser inspection and actual Socket.IO callback execution.
 
-Earlier voltage work recorded 59 focused test passes and a separate 122-check
-numerical/evidence audit. The full ordinary suite in
-`extended-verification.md` passed 214 tests with 10 deselected at its recorded
-revision. The current focused selections overlap one another and the ordinary
-suite. Counts from different selections or revisions must not be summed or
-treated as a rerun of the historical browser/PDF acceptance suite.
+Earlier voltage and extended work recorded their own focused selections and
+evidence audits in the linked review documents; those per-selection counts are
+not repeated here and are not a rerun of the historical browser/PDF acceptance
+suite.
 
 The converter application and its new measured reports remain local/unpublished.
 The existing parent-project public demo is a separate deliverable.
@@ -246,7 +318,7 @@ Programming accuracy is not a substitute for readback accuracy. A successful
 
 ## Initial validation record
 
-**M0 and M1 acceptance: COMPLETE on the verification platform below.**
+**M0 and M1 acceptance: COMPLETE on the verification platform below** (statement as made at the initial checkpoint; the current position above supersedes it).
 
 The implementation includes typed profiles and plans, a mock acquisition
 worker, retained raw evidence, versioned analysis, and a shared HTML/PDF report
@@ -269,12 +341,12 @@ documented; Windows instructions have not been verified.
 
 | Check | Current record |
 |---|---|
-| Full suite at this initial checkpoint, excluding browser/PDF checks | 174 passed, 10 deselected, in 60.59 s. |
+| Full suite at this initial checkpoint, excluding browser/PDF checks | Passed with browser/PDF checks deselected, in 60.59 s. Per-selection count removed; see the current verification record. |
 | Complete mock demo command | Exited 0; normal, setup-limited and aborted HTML/PDF reports generated. |
-| Bring-up and storage checks | 52 passed with fake instruments, including guarded startup and SCPI transcript integrity for future runs. |
+| Bring-up and storage checks | Passed with fake instruments, including guarded startup and SCPI transcript integrity for future runs. |
 | Supervised real pilot | One valid loaded point; load OFF and source OFF both verified. |
 | Real HTML/PDF generation | Successful revision `r0004`, sharing analysis `a-5e0e50434006`; both local HTTP endpoints returned 200. |
-| Final browser/PDF acceptance | 10 passed in 765.24 s. All three HTML files opened offline with the recorded Plotly runtime. Real hover, legend/checkbox/band synchronization, zoom/log bounds, CSV precision and actual CSV/metadata downloads, SVG/PNG exports, escaped text and fixed issued summaries passed. PDF text, vector drawing operators, shared identities and artifact hashes passed. |
+| Final browser/PDF acceptance | The browser/PDF acceptance selection passed in 765.24 s. All three HTML files opened offline with the recorded Plotly runtime. Real hover, legend/checkbox/band synchronization, zoom/log bounds, CSV precision and actual CSV/metadata downloads, SVG/PNG exports, escaped text and fixed issued summaries passed. PDF text, vector drawing operators, shared identities and artifact hashes passed. |
 | PDF visual inspection | All 15 pages of the three final mock PDFs passed inspection, five per report. The five pages of real revision `r0004` were also inspected. The three mock PDFs have selectable text and no rasterized plot images. |
 | Offline mock bundle | ZIP verified: 104 files, 7,183,437 bytes. The local index, ZIP and aborted PDF returned HTTP 200 to HEAD requests. |
 | GitHub publication | Not performed. Generated runs are local and ignored by Git. |
@@ -292,9 +364,10 @@ env DCDC_DEMO_DIR=/home/jerome/rigol-control/dcdc-bench/examples/generated \
 Rendering and browser/PDF tests run sequentially on this Pi, after acquisition
 has finished. The completed demo did not open real instruments.
 
-See [acceptance.md](acceptance.md) for the requirement mapping. The combined
-verification record is **184 passing tests**; the isolated diagnostic rerun is
-not added to that total. M2 remains incomplete: a passing mock does not qualify
+See [acceptance.md](acceptance.md) for the requirement mapping. Per-selection
+pass counts from this checkpoint have been removed; the current verification
+record above keeps the single retained historical count and the pointer to the
+branch's final record. M2 remains incomplete: a passing mock does not qualify
 the real bench or authorize a wider live test.
 
 ### Final mock artifacts

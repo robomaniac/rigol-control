@@ -1,4 +1,6 @@
-# Independent results review: 12T12-4A extended test
+# Agent-role results review: 12T12-4A extended test
+
+This review was performed by an automated agent role in the same authoring pipeline, not by a human or external reviewer.
 
 **Verdict:** the completed run supports a guarded, partial-power DC
 characterization at 24 V input and 50–500 mA requested output current. Its

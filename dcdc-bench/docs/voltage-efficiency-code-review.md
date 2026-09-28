@@ -1,4 +1,6 @@
-# Voltage-efficiency test: independent code review
+# Voltage-efficiency test: agent-role code review
+
+This review was performed by an automated agent role in the same authoring pipeline, not by a human or external reviewer.
 
 Reviewed 2026-09-27. **Pre-live verdict: the fixed 24 V / near-36 V continuation is cleared; no unresolved blocking issue was found in the reviewed source.** Acquisition results and rendered report quality require their separate reviews.
 

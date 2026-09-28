@@ -1,4 +1,6 @@
-# Independent review: start at 15 V, then reduce input without restarting
+# Agent-role review: start at 15 V, then reduce input without restarting
+
+This review was performed by an automated agent role in the same authoring pipeline, not by a human or external reviewer.
 
 Run: `20260927T212200.072951Z_real_b44da1`  
 Analysis: `a-64db20585452`  
@@ -38,7 +40,7 @@ At the lowest input condition, measured input current was **0.17907 A**, calcula
 
 The qualified output means varied by only about 0.91 mV across the descent. With unquantified measurement uncertainty and no temperature measurement, that small observed difference should not be described as a precise regulation specification or a statistically established change.
 
-## Independent evidence checks
+## Agent-role evidence checks
 
 - All finalized acquisition hashes match and remain unchanged after auditing.
 - The 424 raw readings form 106 complete four-channel cycles. Every value matches its timestamp-associated SCPI response.

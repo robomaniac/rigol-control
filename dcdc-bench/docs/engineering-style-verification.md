@@ -1,5 +1,7 @@
 # Engineering figure style verification
 
+This review was performed by an automated agent role in the same authoring pipeline, not by a human or external reviewer.
+
 Reviewed on 27 September 2026 against measured run
 `20260927T185631.575651Z_real_eb3bcd`, presentation revision **r0005**.
 

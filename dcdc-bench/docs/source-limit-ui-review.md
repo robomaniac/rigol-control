@@ -1,5 +1,7 @@
 # Source-limit report: UI and UX review
 
+This review was performed by an automated agent role in the same authoring pipeline, not by a human or external reviewer.
+
 Date: 27 September 2026.  
 Run: `20260927T173043.388477Z_real_75a478`  
 Analysis: `a-d0697ec66a0e`; report revision: `r0001`.

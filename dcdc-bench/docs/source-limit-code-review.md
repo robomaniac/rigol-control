@@ -1,10 +1,12 @@
-# Source-current-limit test: independent code review
+# Source-current-limit test: agent-role code review
+
+This review was performed by an automated agent role in the same authoring pipeline, not by a human or external reviewer.
 
 Reviewed 2026-09-27. **Verdict: no unresolved blocking issue found in the reviewed fixed procedure and report changes.** This review does not certify the converter's ratings or instrument accuracy.
 
 ## Scope
 
-Source review covered `src/dcdc_bench/source_limit.py`, its shared lifecycle in `extended.py`, associated fake-instrument tests, and the source-search changes in `analysis.py` and `reporting/renderer.py`. The reviewer did not operate hardware, run tests, or render reports during acquisition. Visual presentation and numerical results have separate independent reviews.
+Source review covered `src/dcdc_bench/source_limit.py`, its shared lifecycle in `extended.py`, associated fake-instrument tests, and the source-search changes in `analysis.py` and `reporting/renderer.py`. The reviewer did not operate hardware, run tests, or render reports during acquisition. Visual presentation and numerical results have separate agent-role reviews.
 
 ## Acquisition and shutdown
 
