@@ -89,7 +89,7 @@ source timer OFF, then automatically generated both report formats.
 
 [Interactive report](http://localhost:8081/Runs/12t12-workflow/report.html) ·
 [PDF](http://localhost:8081/Runs/12t12-workflow/report.pdf) ·
-[Independent results review](docs/configured-workflow-results-review.md) ·
+[Agent-role results review](docs/configured-workflow-results-review.md) ·
 [Interface verification](docs/bench-ui-verification.md)
 
 Report figures use standard engineering labels and consistent colors, line
@@ -291,7 +291,7 @@ changes with demand, and whether the output returns to a similar value.
 
 **[Test procedure and commands](docs/extended-test.md)** ·
 **[Actual YAML specification](profiles/recipes/12t12-4a-extended.yaml)** ·
-[Independent results review](docs/extended-results-review.md)
+[Agent-role results review](docs/extended-results-review.md)
 
 On this Pi's forwarded report server:
 **[Open the interactive converter report](http://localhost:8081/Runs/12t12-extended/report.html)** ·
@@ -323,7 +323,7 @@ The successful run is
 An earlier attempt stopped safely on host-side query timing; its evidence is
 preserved separately. The persistence ordering was corrected without widening
 the timing or electrical limits. See the [verification record](docs/extended-verification.md),
-[senior code review](docs/extended-code-review.md), and
+[agent-role code review](docs/extended-code-review.md), and
 [report UI/UX review](docs/extended-ui-review.md).
 
 ## Efficiency at different input voltages
@@ -366,7 +366,7 @@ thermal equilibrium, measurement uncertainty, or the converter's 4 A rating.
 The report has separate equipment model, serial, firmware and manufacturer
 columns, aligned DUT tables, and a clearly labeled account of the earlier
 startup stop. See the [code review](docs/voltage-efficiency-code-review.md),
-[independent results review](docs/voltage-efficiency-results-review.md), and
+[agent-role results review](docs/voltage-efficiency-results-review.md), and
 [report UI review](docs/voltage-efficiency-ui-review.md).
 
 These are **local Pi reports**, using the forwarded port shown in VS Code.
