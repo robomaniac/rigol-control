@@ -67,11 +67,18 @@ def test_coupled_plant_conserves_power_and_models_source_limit():
 
 def test_normal_spawn_run_is_deterministic_complete_and_measured(tmp_path):
     plan = small_plan((0., .05, .1))
-    first = run_mock(plan, tmp_path)
-    second = run_mock(plan, tmp_path)
+    # A virtual-clock owner never sleeps: its wall time is interpreter start-up
+    # plus one fsync per record, which tracks host I/O load rather than model
+    # time. Derive the hung-owner deadline from the plan's own record volume
+    # instead of the fixed 60 s default, which a loaded 1 GB Pi can exceed.
+    model_s = len(plan.points) * (plan.recipe.settling.timeout_s + plan.recipe.acquisition.duration_s)
+    records = 4 * model_s / plan.recipe.acquisition.target_poll_interval_s
+    deadline_s = 120. + .5 * records
+    first = run_mock(plan, tmp_path, worker_timeout_s=deadline_s)
+    second = run_mock(plan, tmp_path, worker_timeout_s=deadline_s)
     run, samples = evidence(first)
     repeated, repeated_samples = evidence(second)
-    assert run["execution_status"] == repeated["execution_status"] == "completed"
+    assert run["execution_status"] == repeated["execution_status"] == "completed", (run["errors"], repeated["errors"])
     assert all(point["qualification"] == "valid" for point in run["points"])
     assert run["model"]["seed"] == 1 and run["clock"]["mode"] == "virtual"
     assert run["software"]["dependency_lock_sha256"]

@@ -311,6 +311,22 @@ def test_prior_startup_failure_is_separate_from_current_efficiency_evidence(mode
 
 def test_missing_pdf_tools_records_failure_and_removes_stale_outputs(model, tmp_path, monkeypatch):
     (tmp_path / "report.pdf").write_bytes(b"stale report from another build")
+    # The renderer probes the browser (BROWSER_PATH, .tools/browser-path.txt,
+    # PATH) and Quarto before rendering. Stubbing only _quarto once let a live
+    # `chromium-headless-shell --version` run and exceed its 30 s budget under
+    # host load, masking the intended Quarto failure. Nothing on this path may
+    # reach a real process.
+    monkeypatch.delenv("BROWSER_PATH", raising=False)
+    monkeypatch.delenv("QUARTO_PATH", raising=False)
+    monkeypatch.setattr(renderer, "_browser_path", lambda: None)
+    monkeypatch.setattr(renderer.shutil, "which", lambda *args, **kwargs: None)
+    launched = []
+
+    def refuse_process(command, *args, **kwargs):
+        launched.append(list(command))
+        raise FileNotFoundError(f"unit test refused to launch {command[0]}")
+    monkeypatch.setattr(renderer.subprocess, "run", refuse_process)
+
     def unavailable():
         raise ReportRenderError("Quarto unavailable for regression fixture")
     monkeypatch.setattr(renderer, "_quarto", unavailable)
@@ -321,6 +337,7 @@ def test_missing_pdf_tools_records_failure_and_removes_stale_outputs(model, tmp_
     assert manifest["artifacts"]["pdf"]["status"] == "failed"
     assert caught.value.manifest == manifest
     assert not (tmp_path / "report.pdf").exists()
+    assert launched == [], "renderer reached a subprocess on the missing-Quarto path"
 
 
 def test_unknown_format_is_not_silently_ignored(model, tmp_path):
