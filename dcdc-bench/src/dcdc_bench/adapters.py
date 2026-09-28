@@ -62,6 +62,7 @@ class MockBench:
         self.changed_at = 0.0
         self.sense_enabled = False
         self.closed = False
+        self.thermal = None  # optional synthetic temperature provider (mock_thermal.MockThermalProvider.attach)
 
     def identify(self) -> dict:
         return {"source": "synthetic-source", "load": "synthetic-load",
@@ -145,6 +146,8 @@ class MockBench:
                           mode, current == 0 or voltage >= self.minimum_load_voltage)
 
     def read(self, quantity: str, now: float, *, force_limit: bool = False) -> tuple[float, PlantState]:
+        if self.thermal is not None and quantity in self.thermal.quantities:
+            return self.thermal.read(quantity, now)
         state = self.state(now, force_limit=force_limit)
         physical, offset, noise = {
             "Vin_V": (state.source_voltage_V, 0.003, 0.0004),

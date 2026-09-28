@@ -33,7 +33,7 @@
   const fail = error => { errorBox.textContent = 'Report interaction failed: ' + String(error.message ?? error); console.error(error); };
   const quantityLabels = {Iout_A: 'Measured output current (A)', Pout_W: 'Measured output power (W)',
     Vin_V: 'Measured input voltage (V)', elapsed_s: 'Time since first accepted query (s)'};
-  function xKey(spec) { return state.x_key === 'default' ? spec.x_key : state.x_key; }
+  function xKey(spec) { return state.x_key === 'default' || spec.sample_series?.length ? spec.x_key : state.x_key; }
   function isLog(spec) { return state.log_current && /current|Iout_A|Iin_A/.test(xKey(spec)); }
   function plottedValue(spec, point) {
     return point.qualification === 'valid' && finite(point[xKey(spec)]) && finite(point[spec.y_key]) &&
@@ -126,6 +126,14 @@
         text:rows.map(p => hoverText(spec, p)),customdata:rows.map(p => p.point_id),
         hovertemplate:'%{text}<extra></extra>'});
     }
+    // Retained raw time series (thermal settling) are plotted exactly as supplied.
+    (spec.sample_series ?? []).forEach((series, index) => {
+      const color = payload.colors[index % payload.colors.length];
+      result.push({x: series.x, y: series.y, type: 'scatter', mode: 'lines+markers', name: safe(series.label),
+        line: {color, width: 1.5}, marker: {color, size: 5}, connectgaps: false,
+        meta: {conditionKey: null, sampleSeriesId: series.id},
+        hovertemplate: safe(series.label) + '<br>%{x:.6g} s<br>%{y:.6g}<extra></extra>'});
+    });
     return result;
   }
   function layout(spec) {
@@ -148,7 +156,7 @@
         line:{color:'#6b7280',width:1.2,dash:'dash'},layer:'below'}]:[],
       annotations:reference?[{xref:'paper',x:1,yref:'y',y:reference.value,text:safe(reference.label),
         xanchor:'right',yanchor:'bottom',showarrow:false,font:{size:11,color:'#59636e'},bgcolor:'rgba(255,255,255,0.85)'}]:[],
-      xaxis:{title:{text:safe(quantityLabels[state.x_key] ?? spec.x_label)}, type:isLog(spec)?'log':'linear',
+      xaxis:{title:{text:safe(spec.sample_series?.length ? spec.x_label : quantityLabels[state.x_key] ?? spec.x_label)}, type:isLog(spec)?'log':'linear',
         gridcolor:'#e6edf1',zeroline:false,range:axisRange,autorange:!axisRange,tickformat:'~g',nticks:7},
       yaxis:{title:{text:safe(spec.y_label)},gridcolor:'#e6edf1',zeroline:false,
         range:ranges.y??reference?.y_range,autorange:!(ranges.y??reference?.y_range),tickformat:'~g',nticks:6},
@@ -397,10 +405,10 @@
     await draw();
     for (const spec of specs) {
       const graph=graphs.get(spec.id);document.getElementById(spec.id).classList.add('chart-ready');
-      graph.on('plotly_legendclick',event=>{if(updating)return false;const key=graph.data[event.curveNumber].meta.conditionKey;
+      graph.on('plotly_legendclick',event=>{if(updating)return false;const key=graph.data[event.curveNumber].meta.conditionKey;if(key==null)return false;
         const selected=state.selected_series.includes(key)?state.selected_series.filter(item=>item!==key):[...state.selected_series,key];
         setView({selected_series:selected}).catch(fail);return false;});
-      graph.on('plotly_legenddoubleclick',event=>{const key=graph.data[event.curveNumber].meta.conditionKey;
+      graph.on('plotly_legenddoubleclick',event=>{const key=graph.data[event.curveNumber].meta.conditionKey;if(key==null)return false;
         setView({selected_series:state.selected_series.length===1&&state.selected_series[0]===key?[...conditions.keys()]:[key]}).catch(fail);return false;});
       graph.on('plotly_click',event=>{const pid=event.points?.find(point=>point.customdata)?.customdata;if(pid)showPoint(pid);});
       graph.on('plotly_relayout',event=>{

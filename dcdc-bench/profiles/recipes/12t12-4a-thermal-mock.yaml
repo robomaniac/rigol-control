@@ -1,0 +1,60 @@
+schema_version: '1.0'
+recipe_id: 12t12-4a-thermal-mock
+dut_profile_id: 12t12-4a
+execution_mode: mock
+tests:
+- id: thermal-steady-load
+  type: steady_state_load_sweep
+  input_voltage_targets_V:
+  - 24.0
+  output_current_targets_A:
+  - 0.25
+  - 0.5
+  derived_results:
+  - efficiency
+  - power_loss
+  - surface_temperature_absolute
+  - surface_rise_above_time_aligned_ambient
+  required_quantities:
+  - Vin_V
+  - Iin_A
+  - Vout_V
+  - Iout_A
+  - Tcase_C
+  - Tambient_C
+  optional_quantities: []
+  thermal_settling:
+    policy: thermal_rise_slope_window
+    settings_origin: draft_requires_validation_for_module_sensor_and_setup
+    surface_quantity: Tcase_C
+    ambient_quantity: Tambient_C
+    slope_threshold_C_per_min: 0.5
+    window_s: 60.0
+    minimum_observation_s: 60.0
+    timeout_s: 900.0
+    minimum_samples: 4
+    poll_interval_s: 5.0
+    requires_electrical_validity: true
+planning:
+  efficiency_estimate_fraction: 0.8
+  source_current_budget_fraction: 0.9
+  infeasible_point_policy: record_and_skip
+  assumption_status: planning_only_not_measured
+settling:
+  policy: electrical
+  settings_origin: draft_requires_bench_validation
+  minimum_dwell_s: 5.0
+  window_s: 5.0
+  minimum_fresh_samples: 5
+  maximum_vout_span_V: 0.05
+  timeout_s: 30.0
+acquisition:
+  duration_s: 5.0
+  target_poll_interval_s: 0.5
+  minimum_complete_cycles: 5
+  maximum_interchannel_skew_s: 0.5
+  settings_origin: draft_requires_driver_timing_validation
+authorization:
+  require_operator_arming: true
+  allow_unattended: false
+  protective_policy_id: null

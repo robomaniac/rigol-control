@@ -22,7 +22,9 @@ from filelock import FileLock
 
 from .adapters import MODEL_PARAMETERS, MODEL_VERSION, MockBench
 from .domain import Plan, RawSample
+from .mock_thermal import MockThermalProvider
 from .storage import PersistenceError, RunStore, atomic_json
+from .thermal import THERMAL_PHASE, evaluate_thermal_window, thermal_policy_for
 
 SCENARIOS = {"normal", "setup-limited", "aborted", "timeout", "stale", "overrange",
              "malformed", "diskfailure", "crash", "unsettled", "shutdown-failure"}
@@ -130,12 +132,19 @@ def run_mock(plan: Plan, out: Path, scenario: str = "normal", real_time: bool = 
     if plan.bench.source.max_current_A is None:
         raise ValueError("mock source current capability is required")
     recipe = plan.recipe
-    maximum_virtual = len(plan.points) * (recipe.settling.timeout_s + recipe.acquisition.duration_s + 2)
+    thermal_timeout = max((t.thermal_settling.timeout_s for t in recipe.tests if t.thermal_settling), default=0.)
+    maximum_virtual = len(plan.points) * (recipe.settling.timeout_s + thermal_timeout + recipe.acquisition.duration_s + 2)
     # The worker fsyncs every JSONL record, so its wall time follows the record
     # count and host I/O, not model time; a flat deadline interrupted healthy
     # runs on a loaded SD card.
     records = len(plan.points) * len(QUANTITIES) * math.ceil(
         (recipe.settling.timeout_s + recipe.acquisition.duration_s) / max(recipe.acquisition.target_poll_interval_s, 1e-3))
+    thermal_polls = max((math.ceil(t.thermal_settling.timeout_s / t.thermal_settling.poll_interval_s)
+                         for t in recipe.tests if t.thermal_settling), default=0)
+    channels = len(plan.bench.temperature_sensors)
+    records += len(plan.points) * (channels * math.ceil((recipe.settling.timeout_s + recipe.acquisition.duration_s)
+                                   / max(recipe.acquisition.target_poll_interval_s, 1e-3))
+                                   + (len(QUANTITIES) + channels) * thermal_polls)
     io_budget = 120.0 + 0.1 * records
     timeout = worker_timeout_s if worker_timeout_s is not None else (maximum_virtual + io_budget if real_time else io_budget)
     if not math.isfinite(timeout) or timeout <= 0:
@@ -198,6 +207,11 @@ def _worker(snapshot: dict, directory: str, scenario: str, real_time: bool, seed
     bench = MockBench(plan.dut.ratings.output_voltage_nominal_V,
                       plan.bench.protective_controls.source_current_limit_A or plan.bench.source.max_current_A,
                       plan.bench.load.min_voltage_V, seed)
+    # Synthetic temperature channels exist only for a mock bench profile; the
+    # provider is attached to the plant so bench.read serves every bound role.
+    thermal = MockThermalProvider.attach(plan.bench, bench, seed) if plan.bench.temperature_sensors else None
+    if thermal is not None:
+        run["thermal_model"] = thermal.identify()
     serial = 0
     cycle_serial = 0
     persisted_samples = 0
@@ -284,6 +298,37 @@ def _worker(snapshot: dict, directory: str, scenario: str, real_time: bool, seed
             os._exit(76)
         return cycle_id, readings, source_mode, skew
 
+    def read_thermal(point, phase: str) -> list[dict]:
+        """Log every bound temperature channel; thermal cycles carry their own ids."""
+        nonlocal serial, cycle_serial, persisted_samples
+        if thermal is None:
+            return []
+        cycle_serial += 1
+        cycle_id = f"t{cycle_serial:07d}"
+        readings = []
+        for quantity in thermal.quantities:
+            serial += 1
+            started = clock.now()
+            clock.wait(0.002)
+            value, state = bench.read(quantity, clock.now())
+            binding = plan.bench.measurements[quantity]
+            sample = RawSample(
+                sample_id=f"s{serial:08d}", run_id=run["run_id"], test_id=point.test_id,
+                point_id=point.point_id, channel_id=binding.instrument_id + ":" + quantity,
+                instrument_id=binding.instrument_id, quantity=quantity, value=value,
+                unit=binding.unit, location=binding.location, query_start_utc=clock.utc(started),
+                query_end_utc=clock.utc(), query_start_monotonic_s=started,
+                query_end_monotonic_s=clock.now(), device_timestamp=clock.utc(),
+                measurement_range=binding.measurement_range, resolution=binding.resolution,
+                acquisition_settings={"data_source": state.data_source, "thermal_model": state.model_version,
+                                      "sensor_id": state.sensor_id, "sensor_role": state.role},
+                raw_response=repr(value), status="ok", quality_flags=[], acquisition_cycle_id=cycle_id, phase=phase,
+            ).model_dump(mode="json")
+            store.append("samples", sample)
+            persisted_samples += 1
+            readings.append(sample)
+        return readings
+
     locks = ExitStack()
     try:
         transition("PLAN_READY")
@@ -293,7 +338,7 @@ def _worker(snapshot: dict, directory: str, scenario: str, real_time: bool, seed
             locks.enter_context(FileLock(str(path), timeout=0.1))
         owned = True
         transition("CONNECTING")
-        event("identified", identities=bench.identify())
+        event("identified", identities={**bench.identify(), **({"thermal": thermal.identify()} if thermal else {})})
         transition("PREFLIGHT")
         event("preflight", source_output="OFF", load_input="OFF", mode="mock")
         run["shutdown"] = {role: {"state": "OFF", "verified": True} for role in ("source", "load")}
@@ -336,6 +381,7 @@ def _worker(snapshot: dict, directory: str, scenario: str, real_time: bool, seed
                 if cancel.is_set():
                     break
                 cycle, readings, mode, skew = read_cycle(point, "settling", fault)
+                read_thermal(point, "settling")
                 max_skew = max(max_skew, skew)
                 limiting |= mode == "CC"
                 sample_flags.update(flag for r in readings for flag in r["quality_flags"])
@@ -357,15 +403,63 @@ def _worker(snapshot: dict, directory: str, scenario: str, real_time: bool, seed
                 if limiting:
                     break
                 clock.wait(plan.recipe.acquisition.target_poll_interval_s)
+            electrical_settled_at = clock.now()
+            # Thermal settling (brief section 10) is separate from the electrical
+            # criterion above: it starts only after electrical validity, needs the
+            # ambient channel, and a timeout never becomes an assumed equilibrium.
+            thermal_policy = thermal_policy_for(plan, point.test_id)
+            thermal_outcome: dict | None = None
+            if settled and not limiting and not cancel.is_set() and thermal_policy is not None and thermal is not None:
+                event("point_phase", point_id=point.point_id, phase=THERMAL_PHASE)
+                thermal_started = clock.now()
+                rise_window: deque[tuple[float, float]] = deque()
+                verdict = None
+                while clock.now() - thermal_started <= thermal_policy.timeout_s:
+                    if cancel.is_set():
+                        break
+                    cycle, readings, mode, skew = read_cycle(point, THERMAL_PHASE, fault)
+                    max_skew = max(max_skew, skew)
+                    limiting |= mode == "CC"
+                    sample_flags.update(flag for r in readings for flag in r["quality_flags"])
+                    temperatures = {r["quantity"]: r for r in read_thermal(point, THERMAL_PHASE)}
+                    surface = temperatures.get(thermal_policy.surface_quantity)
+                    ambient = temperatures.get(thermal_policy.ambient_quantity)
+                    electrically_valid = (all(r["status"] == "ok" for r in readings)
+                                          and skew <= plan.recipe.acquisition.maximum_interchannel_skew_s)
+                    if (electrically_valid and surface and ambient and surface["status"] == "ok" and ambient["status"] == "ok"
+                            and surface["value"] is not None and ambient["value"] is not None):
+                        rise_window.append((surface["query_end_monotonic_s"], surface["value"] - ambient["value"]))
+                    else:
+                        rise_window.clear()
+                    while rise_window and clock.now() - rise_window[0][0] > thermal_policy.window_s + thermal_policy.poll_interval_s:
+                        rise_window.popleft()
+                    verdict = evaluate_thermal_window(list(rise_window), thermal_policy, clock.now() - thermal_started)
+                    if verdict.met or limiting:
+                        break
+                    clock.wait(thermal_policy.poll_interval_s)
+                thermal_outcome = {"policy": thermal_policy.policy, "surface_quantity": thermal_policy.surface_quantity,
+                                   "ambient_quantity": thermal_policy.ambient_quantity,
+                                   "status": "met" if verdict is not None and verdict.met else "timeout",
+                                   "elapsed_s": clock.now() - thermal_started,
+                                   "final_slope_C_per_min": verdict.slope_C_per_min if verdict else None,
+                                   "window_span_s": verdict.window_span_s if verdict else 0.0,
+                                   "window_samples": verdict.samples if verdict else 0,
+                                   "reason": verdict.reason if verdict else "no thermal observation cycle completed"}
+                if cancel.is_set():
+                    thermal_outcome["status"] = "cancelled"
+                elif limiting:
+                    thermal_outcome["status"] = "setup-limited"
+            thermally_qualified = thermal_policy is None or (thermal_outcome is not None and thermal_outcome["status"] == "met")
             accepted = []
             acquisition_start = clock.now()
-            if settled and not cancel.is_set():
+            if settled and thermally_qualified and not cancel.is_set():
                 event("point_phase", point_id=point.point_id, phase="acquiring")
                 acquisition_voltages = []
                 while clock.now() - acquisition_start < plan.recipe.acquisition.duration_s:
                     if cancel.is_set():
                         break
                     cycle, readings, mode, skew = read_cycle(point, "acquiring", fault)
+                    read_thermal(point, "acquiring")
                     max_skew = max(max_skew, skew)
                     limiting |= mode == "CC"
                     sample_flags.update(flag for r in readings for flag in r["quality_flags"])
@@ -385,15 +479,22 @@ def _worker(snapshot: dict, directory: str, scenario: str, real_time: bool, seed
                 accepted = []
             elif not settled:
                 qualification, reason = "inconclusive", "no complete fresh stable settling window before timeout"
+            elif not thermally_qualified:
+                qualification, reason = "inconclusive", ("thermal settling slope criterion not met before timeout; electrical "
+                                                         "acquisition not performed; temperature time series retained")
             elif len(accepted) < plan.recipe.acquisition.minimum_complete_cycles:
                 qualification, reason = "inconclusive", "insufficient qualified complete acquisition cycles"
             else:
                 qualification, reason = "valid", "fresh complete cycles acquired after electrical settling"
             result.update(qualification=qualification, reason=reason, acquisition_cycle_ids=accepted,
-                          settled=settled, settling_elapsed_s=acquisition_start-started,
+                          settled=settled, settling_elapsed_s=electrical_settled_at-started,
                           acquisition_elapsed_s=clock.now()-acquisition_start, maximum_interchannel_skew_s=max_skew,
                           complete_acquisition_cycles=len(accepted), quality_flags=sorted(sample_flags),
                           settling_vout_span_V=span)
+            if thermal_policy is not None:
+                result["thermal_settling"] = thermal_outcome or {
+                    "policy": thermal_policy.policy, "status": "not-started",
+                    "reason": "electrical settling did not qualify, so thermal observation was not started"}
             store.append("points", {**result, "event": "point_finalized", "monotonic_s": clock.now()})
             checkpoint()
             if state == "aborted":

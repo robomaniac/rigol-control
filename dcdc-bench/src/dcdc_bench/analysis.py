@@ -20,6 +20,7 @@ from pydantic import Field, model_validator
 
 from .domain import AcquisitionPolicy, Contract, Plan, RawSample, SettlingPolicy
 from .storage import atomic_json, verify_integrity
+from .thermal import annotate_thermal_points, thermal_report_contribution
 
 FORMULA_VERSION = "settled-dc-1.1"
 QUANTITIES = ("Vin_V", "Iin_A", "Vout_V", "Iout_A")
@@ -59,6 +60,25 @@ class FigureSeries(Contract):
     connect_points: bool = True
 
 
+class SampleSeries(Contract):
+    """Retained raw time series for one point and channel, plotted exactly as supplied."""
+    id: str
+    label: str
+    point_id: str
+    quantity: str
+    sensor_id: str | None = None
+    x: list[float] = Field(min_length=2)
+    y: list[float] = Field(min_length=2)
+
+    @model_validator(mode="after")
+    def aligned(self) -> SampleSeries:
+        if len(self.x) != len(self.y):
+            raise ValueError("Sample series x and y lengths differ")
+        if any(later < earlier for earlier, later in zip(self.x, self.x[1:])):
+            raise ValueError("Sample series time must not decrease")
+        return self
+
+
 class FigureSpec(Contract):
     id: str
     title: str
@@ -68,6 +88,7 @@ class FigureSpec(Contract):
     y_label: str
     caption: str
     series: list[FigureSeries]
+    sample_series: list[SampleSeries] = Field(default_factory=list)
 
 
 class TableSpec(Contract):
@@ -127,6 +148,7 @@ class ReportModel(Contract):
     limitations: list[str]
     raw_samples: dict[str, list[dict[str, Any]]]
     provenance: dict[str, Any]
+    thermal: dict[str, Any] | None = None
 
     @model_validator(mode="after")
     def references_exist(self) -> ReportModel:
@@ -147,6 +169,9 @@ class ReportModel(Contract):
                         raise ValueError("Figure condition does not match referenced point")
                     if series.iout_target_A is not None and points[pid]["iout_target_A"] != series.iout_target_A:
                         raise ValueError("Figure load condition does not match referenced point")
+            for sample_series in figure.sample_series:
+                if sample_series.point_id not in points:
+                    raise ValueError(f"Missing figure point {sample_series.point_id}")
         samples = {s["sample_id"] for rows in self.raw_samples.values() for s in rows}
         for item in [*self.metrics, *self.tables, *self.evidence]:
             if not set(item.point_ids) <= points.keys():
@@ -349,6 +374,7 @@ def analyze_evidence(plan: Plan, run: dict, samples: list[dict], *, version: str
                        "accepted_cycle_count": len(by_cycle),
                        "accepted_sample_ids": [s["sample_id"] for s in accepted],
                        "acquisition_cycle_ids": sorted(cycles)})
+    annotate_thermal_points(plan, run, grouped, points)
     return {"schema_version": "1.0", "formula_version": version,
             "aggregation": "Metrics from qualified channel means over accepted complete acquisition cycles",
             "sign_convention": "Positive power enters input boundary and leaves output boundary; no absolute-value correction",
@@ -850,6 +876,10 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
                            + f"; {limit:g} A supply setting",
                 selector={"point_id": endpoint["point_id"]}, point_ids=[endpoint["point_id"]],
                 figure_ids=["fig-source-current"]))
+    # Bound temperature channels contribute separate figures (no secondary axes).
+    thermal_section = thermal_report_contribution(plan, run, points, raw_samples, series, evidence_label, boundary)
+    figures.extend(thermal_section["figures"])
+    metrics.extend(thermal_section["metrics"])
     for metric in metrics:
         metric.qualification = f"{observation} observation"
     summary = [f"{len(valid)} of {len(points)} requested operating points produced qualified {observation} DC results."]
@@ -951,6 +981,10 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
         summary.append(f"During the sustained-load observation, output voltage changed by {hold_drift.value:+.3f} mV "
                        f"between the first and last qualified bin means ({hold_drift.conditions}). "
                        "This is an observed change, with measurement uncertainty unquantified; it is not proof of thermal equilibrium.")
+    for paragraph, metric_ids in thermal_section["summary"]:
+        if metric_ids:
+            summary_evidence.append(SummaryEvidence(paragraph_index=len(summary), metric_ids=metric_ids))
+        summary.append(paragraph)
     summary.append("Acceptance requirements are evaluated only where explicitly supplied; unset requirements are not evaluated.")
     returned = next((m for m in metrics if m.id == "return-voltage-change"), None)
     if returned:
@@ -970,7 +1004,8 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
         f"Measurement locations — {locations}. The declared boundary is {boundary}; path loss is not solely module heat.",
         "Uncertainty is unquantified. No validated uncertainty bands or difference-resolution claims are provided.",
         "Topology, controller, isolation, calibration and protection behavior are unknown.",
-        "No schematic, board photograph or temperature channels were supplied.",
+        ("No schematic or board photograph was supplied; bound temperature channels are described below."
+         if plan.bench.temperature_sensors else "No schematic, board photograph or temperature channels were supplied."),
         f"This DC grid does not by itself qualify the claimed {plan.dut.ratings.output_power_rated_W:g} W rating, ripple, transient or thermal behavior.",
         ("At qualified no-load points, input consumption is reported; output power, path loss and efficiency are not evaluated because load-off current readback can contain an offset."
          if any(p["qualification"] == "valid" and p["iout_target_A"] == 0 for p in points) else
@@ -995,6 +1030,7 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
             limitations.append("Virtual-clock timestamps represent simulated model time, not hardware acquisition times.")
     for note in run.get("metrology_limitations", []):
         limitations.append(str(note))
+    limitations.extend(thermal_section["limitations"])
     return ReportModel(run_id=run["run_id"], analysis_id=analysis["analysis_id"], report_revision=revision,
         title=f"{plan.dut.identity.model} · DC–DC characterization", boundary=boundary,
         evidence_label=evidence_label,
@@ -1012,7 +1048,8 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
         summary=summary, summary_evidence=summary_evidence,
         method=_report_method(plan, run, analysis, raw_samples),
         prose=[analysis["aggregation"], analysis["sign_convention"]],
-        limitations=limitations, raw_samples=dict(grouped), provenance=provenance)
+        limitations=limitations, raw_samples=dict(grouped), provenance=provenance,
+        thermal=thermal_section["model"])
 
 
 def analyze_run(run_dir: Path, *, version: str = FORMULA_VERSION) -> Path:
