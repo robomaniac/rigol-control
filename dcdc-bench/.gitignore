@@ -8,3 +8,4 @@ examples/generated/
 test-artifacts/
 *.local.yaml
 workspace/
+diagnostics/

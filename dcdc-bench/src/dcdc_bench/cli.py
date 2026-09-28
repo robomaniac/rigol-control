@@ -61,8 +61,18 @@ def parser() -> argparse.ArgumentParser:
     command.add_argument("--interpolate", action="store_true", help="Add labeled INTERPOLATED rows; off by default")
     command.add_argument("--covariance", type=Path, help="JSON covariance model between runs A and B")
     command.add_argument("--overwrite", action="store_true", help="Replace an existing comparison folder")
-    for name in ("doctor",):
-        sub.add_parser(name, help="Reserved for a later milestone").add_argument("arguments", nargs=argparse.REMAINDER)
+    command = sub.add_parser("doctor", help="Read-only bench diagnosis; never writes to an instrument")
+    command.add_argument("--bench", required=True, type=Path)
+    command.add_argument("--inventory", required=True, type=Path, help="Private benchctl instrument inventory")
+    command.add_argument("--out", type=Path, help="Diagnosis JSON path (default: diagnostics/doctor-<utc>.json)")
+    command.add_argument("--readback-cadence", action="store_true", help="Outputs-OFF readback cadence probe")
+    command.add_argument("--seconds", type=float, default=10.)
+    command.add_argument("--poll-interval", type=float, default=.05)
+    command = sub.add_parser("publish", help="Approval-gated redacted static copy of one issued report revision")
+    command.add_argument("run_dir", type=Path)
+    command.add_argument("--revision", required=True)
+    command.add_argument("--out", required=True, type=Path)
+    command.add_argument("--approval", required=True, type=Path)
     return root
 
 
@@ -114,6 +124,18 @@ def main(argv: list[str] | None = None) -> int:
             print(compare_runs([args.run_a, args.run_b], args.out, analysis_ids=[args.analysis_a, args.analysis_b],
                                requested_input_tolerance_V=args.tolerance_vin, requested_load_tolerance_A=args.tolerance_iout,
                                interpolate=args.interpolate, covariance_path=args.covariance, overwrite=args.overwrite))
+            return 0
+        if args.command == "doctor":
+            from .doctor import run_doctor
+            path, diagnosis = run_doctor(args.bench, args.inventory, out=args.out, cadence=args.readback_cadence,
+                                         seconds=args.seconds, poll_interval=args.poll_interval)
+            print(json.dumps({"diagnosis": str(path), "exit_code": diagnosis["exit_code"],
+                              "summary": diagnosis["summary"], "cadence": (diagnosis["cadence"] or {}).get("status"),
+                              "findings": [f["message"] for f in diagnosis["findings"]]}, indent=2))
+            return diagnosis["exit_code"]
+        if args.command == "publish":
+            from .publish import publish_run
+            print(publish_run(args.run_dir, args.revision, args.out, args.approval))
             return 0
         raise ValueError(f"{args.command} is deferred; this increment provides the mock CLI and offline reports")
     except ImportError as exc:
