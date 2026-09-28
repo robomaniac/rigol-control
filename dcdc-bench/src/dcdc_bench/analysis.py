@@ -358,6 +358,47 @@ def analyze_evidence(plan: Plan, run: dict, samples: list[dict], *, version: str
             "uncertainty": {"status": "unquantified", "reason": "No applicable complete readback uncertainty budget evaluated", "bands": None}}
 
 
+def _finite_number(value: Any) -> float | None:
+    """Return a finite float, or None for missing, boolean or non-numeric values."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return None
+    return float(value)
+
+
+def _condition_phrase(nominal: float, programmed: float | None) -> str:
+    """Name a recorded input condition: '24 V', or 'near 36 V' when its setpoint was reduced."""
+    return f"near {nominal:g} V" if programmed is not None and programmed != nominal else f"{nominal:g} V"
+
+
+def _join_phrases(phrases: list[str]) -> str:
+    """'12 V, 24 V and near 36 V' from a recorded condition list; '' when empty."""
+    if not phrases:
+        return ""
+    if len(phrases) == 1:
+        return phrases[0]
+    return ", ".join(phrases[:-1]) + " and " + phrases[-1]
+
+
+def _recorded_conditions(method: dict) -> list[tuple[float, float | None]]:
+    """(nominal, programmed) pairs from a recorded method; programmed is None when not recorded."""
+    nominals = method.get("nominal_input_voltages_V") or []
+    programmed = method.get("programmed_input_voltages_V") or []
+    pairs = []
+    for index, nominal in enumerate(nominals):
+        value = _finite_number(nominal)
+        if value is None:
+            continue
+        setpoint = _finite_number(programmed[index]) if index < len(programmed) else None
+        pairs.append((value, setpoint))
+    return pairs
+
+
+def _reduced_setpoints(method: dict) -> list[tuple[float, float]]:
+    """Recorded conditions whose programmed setpoint differs from the nominal condition."""
+    return [(nominal, setpoint) for nominal, setpoint in _recorded_conditions(method)
+            if setpoint is not None and setpoint != nominal]
+
+
 def _report_method(plan: Plan, run: dict, analysis: dict, raw_samples: list[dict]) -> ReportMethod:
     """Keep declared policy separate from recorded durations and query timing.
 
@@ -407,28 +448,74 @@ def _report_method(plan: Plan, run: dict, analysis: dict, raw_samples: list[dict
         settings = "; ".join(f"{nominal:g} V nominal → {programmed:g} V programmed"
             for nominal, programmed in zip(sweep["nominal_input_voltages_V"], sweep["programmed_input_voltages_V"])
             if nominal in current_inputs)
-        notes.append("Input conditions in this run: " + settings + ". "
-                     "The supply current setting remains 1.000 A. Source and load are verified OFF between input conditions.")
+        limit = sweep.get("input_current_limit_A")
+        limit_text = f" The supply current setting remains {limit:.3f} A." if isinstance(limit, (int, float)) else ""
+        notes.append("Input conditions in this run: " + settings + "." + limit_text
+                     + " Source and load are verified OFF between input conditions.")
         notes.append("The policy requires a settling interval and at least an eight-second acquisition with five complete "
                      "reading cycles for a qualified load window. Increasing load stops for that input condition near the source-current boundary; "
                      "hard faults stop the whole run. These short DC observations do not establish thermal equilibrium.")
-        notes.append("The upper condition is near 36 V, not an exact 36.000 V test. Its reduced setpoint leaves margin for "
-                     "the source's specified DC programming error. Sampled voltage checks and the OVP setting do not "
-                     "establish a certified transient clamp. Actual input-voltage readings are retained for every result.")
+        for nominal, programmed in zip(sweep["nominal_input_voltages_V"], sweep["programmed_input_voltages_V"]):
+            if programmed != nominal:
+                notes.append(f"The {nominal:g} V condition is near {nominal:g} V ({programmed:g} V programmed), not an exact "
+                             f"{nominal:.3f} V test. Its reduced setpoint leaves margin for the source's specified DC programming "
+                             "error. Sampled voltage checks and the OVP setting do not establish a certified transient clamp. "
+                             "Actual input-voltage readings are retained for every result.")
         if prior := sweep.get("prior_input_attempt"):
-            notes.append(f"The 12 V startup attempt is preserved separately as run {prior['run_id']} "
-                         f"(integrity manifest SHA-256 {prior['integrity_sha256']}). It produced no qualified efficiency window. "
-                         "This continuation starts at 24 V; earlier readings are not combined with its results.")
+            prior_nominal = _finite_number(prior.get("nominal_input_V"))
+            if prior_nominal is None:
+                prior_nominal = _finite_number(next((p.get("nominal_input_V") for p in sweep.get("phases", [])
+                                                     if p.get("status") == "previous-attempt-unqualified"), None))
+            attempt = f"The {prior_nominal:g} V startup attempt" if prior_nominal is not None else "The earlier startup attempt"
+            first = min(current_inputs) if current_inputs else None
+            starts = f" This continuation starts at {first:g} V;" if first is not None else " This continuation"
+            notes.append(f"{attempt} is preserved separately as run {prior['run_id']} "
+                         f"(integrity manifest SHA-256 {prior['integrity_sha256']}). It produced no qualified efficiency window."
+                         f"{starts} earlier readings are not combined with its results.")
     if recorded_method.get("source_limit_search"):
-        notes.append("Adaptive source-limit test: the supply is set to 24 V / 1.000 A. "
-                     "Output demand increases in 100 mA steps, then 25 mA steps after measured input current reaches 0.90 A. "
-                     "The target is approximately 0.98 A input; 0.995 A or loss of source voltage regulation ends escalation.")
-        notes.append("Candidate acquisition windows last at least 10 s. If the initial window reaches the input-current target, "
-                     "that uninterrupted observation extends to 30 s. The final mean can differ from its trigger mean. "
-                     "A separate 100 mA return observation is planned if safe; shutdown takes priority after a hard fault. "
-                     "This is not a thermal-equilibrium test.")
-        notes.append("The planning efficiency of 100% defines an ideal-power ceiling only. "
-                     "Measured current controls advancement; it is not an assumed converter efficiency. "
+        search = recorded_method["source_limit_search"]
+        inputs = sorted({point.vin_target_V for point in plan.points})
+        limit = _finite_number(search.get("input_current_limit_A", recorded_method.get("source_current_limit_A")))
+        supply = " / ".join(text for text in (
+            _join_phrases([f"{value:g} V" for value in inputs]),
+            f"{limit:.3f} A" if limit is not None else "") if text)
+        sentence = "Adaptive source-limit test" + (f": the supply is set to {supply}." if supply else ".")
+        coarse = _finite_number(recorded_method.get("coarse_output_step_A"))
+        fine = _finite_number(recorded_method.get("fine_output_step_A"))
+        threshold = _finite_number(recorded_method.get("fine_step_threshold_input_current_A"))
+        if coarse is not None:
+            sentence += f" Output demand increases in {coarse * 1000:g} mA steps"
+            if fine is not None and threshold is not None:
+                sentence += f", then {fine * 1000:g} mA steps after measured input current reaches {threshold:.2f} A"
+            sentence += "."
+        target = _finite_number(search.get("target_input_current_A"))
+        stop = _finite_number(recorded_method.get("headroom_stop_input_current_A"))
+        if target is not None:
+            sentence += (f" The target is approximately {target:.2f} A input;"
+                         + (f" {stop:.3f} A or" if stop is not None else "")
+                         + " loss of source voltage regulation ends escalation.")
+        notes.append(sentence)
+        window = _finite_number(recorded_method.get("candidate_window_s"))
+        endpoint = _finite_number(recorded_method.get("endpoint_window_s"))
+        return_load = _finite_number(recorded_method.get("return_load_A"))
+        parts = []
+        if window is not None:
+            parts.append(f"Candidate acquisition windows last at least {window:g} s.")
+        if endpoint is not None:
+            parts.append("If the initial window reaches the input-current target, that uninterrupted observation "
+                         f"extends to {endpoint:g} s. The final mean can differ from its trigger mean.")
+        if return_load is not None:
+            parts.append(f"A separate {return_load * 1000:g} mA return observation is planned if safe; "
+                         "shutdown takes priority after a hard fault.")
+        parts.append("This is not a thermal-equilibrium test.")
+        notes.append(" ".join(parts))
+        planning_pct = plan.recipe.planning.efficiency_estimate_fraction * 100
+        if planning_pct == 100:
+            assumption = "The planning efficiency of 100% defines an ideal-power ceiling only."
+        else:
+            assumption = (f"The planning efficiency estimate of {planning_pct:g}% only bounds the conditional candidates; "
+                          "it is a planning assumption, not a measured value.")
+        notes.append(assumption + " Measured current controls advancement; it is not an assumed converter efficiency. "
                      "Conditional candidates not commanded by the adaptive search are not failed measurements.")
     if recorded_method.get("hold_settling"):
         notes.append(str(recorded_method["hold_settling"]) + f". The {plan.recipe.settling.minimum_dwell_s:g} s settling dwell applies to sweep steps; continuous hold bins do not restart it.")
@@ -639,15 +726,23 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
                 selection_key=f"{test.id}-v{index}" if sequence else None,
                 connect_points=test.id != "sustained-load" if sequence else True,
                                        point_ids=[p["point_id"] for p in rows]))
+    startup_phrase = load_phrase = start_text = descent_load_A = None
     if startup_descent:
+        recorded = _recorded_conditions(startup_descent)
+        start_V = recorded[0][0] if recorded else None
+        descent_load_A = _finite_number(startup_descent.get("load_current_A"))
+        start_text = f"{start_V:g} V" if start_V is not None else "the recorded startup voltage"
+        startup_phrase = f"after {start_text} startup"
+        load_phrase = f"{descent_load_A * 1000:g} mA load" if descent_load_A is not None else "recorded load"
         outcomes = {p["point_id"]: p for p in run["points"]}
         for point in points:
             programmed = outcomes[point["point_id"]].get("programmed_input_V")
             point["programmed_input_V"] = programmed
-            point["input_condition_label"] = (f"{programmed:g} V set input after 15 V startup"
+            point["input_condition_label"] = (f"{programmed:g} V set input {startup_phrase}"
                                                if programmed is not None else f"{point['vin_target_V']:g} V planned input")
-        series = [FigureSeries(id="energized-descent", label="100 mA load · after 15 V startup",
-            vin_target_V=None, iout_target_A=.1, selection_key="energized-descent", point_ids=[p["point_id"] for p in points])]
+        series = [FigureSeries(id="energized-descent", label=f"{load_phrase} · {startup_phrase}",
+            vin_target_V=None, iout_target_A=descent_load_A, selection_key="energized-descent",
+            point_ids=[p["point_id"] for p in points])]
     figures = []
     covered_inputs = sorted({p["vin_target_V"] for p in valid})
     if len(covered_inputs) == 1:
@@ -657,7 +752,12 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
     else:
         input_caption = " No requested input target produced a qualified point."
     if voltage_sweep:
-        input_caption += " Colors identify input conditions; nominal 36 V was programmed to 35.8 V. Each curve ends at its acquired load range under the same 1 A supply setting."
+        reduced = "; ".join(f"nominal {nominal:g} V was programmed to {setpoint:g} V"
+                            for nominal, setpoint in _reduced_setpoints(voltage_sweep))
+        sweep_limit = _finite_number(voltage_sweep.get("input_current_limit_A"))
+        input_caption += " Colors identify input conditions" + (f"; {reduced}." if reduced else ".")
+        input_caption += (f" Each curve ends at its acquired load range under the same {sweep_limit:g} A supply setting."
+                          if sweep_limit is not None else " Each curve ends at its acquired load range.")
     metric_captions = {
         "efficiency_pct": "Efficiency = 100 × Pout/Pin across the declared boundary; powers use DC channel means. No-load efficiency is not evaluated.",
         "Vout_V": "Absolute output voltage at the load terminals versus output current shows load regulation. Percent deviation from nominal is reported separately; no dropout threshold was measured.",
@@ -674,10 +774,12 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
     if startup_descent:
         for figure in figures:
             figure.x_key, figure.x_label = "Vin_V", "Input Voltage (V)"
-            figure.caption = (f"{evidence_label}. {boundary}. Stepped input reduction after unloaded 15 V startup "
-                "at a 100 mA load. Markers are qualified DC means; startup and transition readings are excluded. "
-                "The horizontal axis uses measured input; the nominal 9 V endpoint was programmed to 9.1 V. "
-                "No dropout, cold-start, or UVLO threshold was established.")
+            reduced = "; ".join(f"nominal {nominal:g} V was programmed to {setpoint:g} V"
+                                for nominal, setpoint in _reduced_setpoints(startup_descent))
+            figure.caption = (f"{evidence_label}. {boundary}. Stepped input reduction after unloaded {start_text} startup "
+                f"at a {load_phrase}. Markers are qualified DC means; startup and transition readings are excluded. "
+                "The horizontal axis uses measured input" + (f"; {reduced}." if reduced else ".")
+                + " No dropout, cold-start, or UVLO threshold was established.")
         figures[0], figures[1] = figures[1], figures[0]
         figures[0].title = "Output Voltage vs Input Voltage (Line Regulation)"
         figures[0].caption += " Absolute output voltage shows line regulation over the acquired input range at fixed load."
@@ -723,7 +825,7 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
                     point_ids=[p["point_id"] for p in rows], figure_ids=["fig-voltage"]))
                 if startup_descent:
                     metrics[-1].conditions = (f"{current:g} A requested load; measured input "
-                        f"{min(p['Vin_V'] for p in rows):.3f}–{max(p['Vin_V'] for p in rows):.3f} V after 15 V startup")
+                        f"{min(p['Vin_V'] for p in rows):.3f}–{max(p['Vin_V'] for p in rows):.3f} V {startup_phrase}")
     if sequence:
         sequence_figures, sequence_metrics = _sequence_results(points, series, evidence_label, boundary)
         figures = sequence_figures[:1] + figures + sequence_figures[1:]
@@ -753,11 +855,11 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
     summary = [f"{len(valid)} of {len(points)} requested operating points produced qualified {observation} DC results."]
     summary_evidence = []
     if startup_descent:
-        summary.append("This run checks continued operation after starting at 15 V: the source is kept on while "
-                       "input voltage decreases in steps, with a 100 mA output load. It does not repeat the earlier cold 12 V startup.")
+        summary.append(f"This run checks continued operation after starting at {start_text}: the source is kept on while "
+                       f"input voltage decreases in steps, with a {load_phrase}. It does not test cold start at the lower input voltages.")
         if startup_descent.get("startup_status") == "stable-before-load":
             summary.append(f"Before the load was enabled, output passed the five-reading stability gate "
-                           f"after {startup_descent['startup_elapsed_s']:.1f} s of observation at 15 V input. "
+                           f"after {startup_descent['startup_elapsed_s']:.1f} s of observation at {start_text} input. "
                            "That observation time includes the stability check; it is not a measured startup delay.")
         else:
             summary.append("The recorded unloaded startup did not complete the stability gate; later conditions may remain untested.")
@@ -784,7 +886,8 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
         summary.append(f"The supply was configured for {search['input_current_limit_A']:g} A at the requested input voltage. "
                        f"The load increased toward {search['target_input_current_A']:g} A measured input current, "
                        f"with an output-request cap of {search['output_current_cap_A']:g} A. "
-                       "A source-limited endpoint describes this bench's capability, not the converter's 4 A rating.")
+                       "A source-limited endpoint describes this bench's capability, not the converter's "
+                       f"{plan.dut.ratings.output_current_rated_A:g} A rating.")
         if search.get("stop_reason"):
             summary.append("Ramp stop reason recorded by the worker: " + str(search["stop_reason"]) + ".")
         source_metric = next((m for m in metrics if m.id == "highest-qualified-input-current"), None)
@@ -795,18 +898,42 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
         attempted = len(executed) if executed is not None else len({s["point_id"] for s in raw_samples})
         summary[0] = (f"{len(valid)} qualified {observation} load windows from {attempted} attempted windows "
                       f"in a {len(points)}-point input-voltage comparison.")
+        recorded = _recorded_conditions(voltage_sweep)
+        phrases = {nominal: _condition_phrase(nominal, setpoint) for nominal, setpoint in recorded}
+        requested = _join_phrases(list(phrases.values()))
+        current_inputs = {point.vin_target_V for point in plan.points}
+        sweep_limit = _finite_number(voltage_sweep.get("input_current_limit_A"))
         if prior := voltage_sweep.get("prior_input_attempt"):
-            observed = prior["last_startup_cycle"]
-            summary.append("The requested comparison covers 12 V, 24 V and near 36 V. "
-                           "The separate 12 V startup attempt stopped without a qualified efficiency result: "
-                           f"its last recorded cycle showed {observed['Vin_V']:.3f} V input at {observed['Iin_A']:.4f} A "
-                           f"and {observed['Vout_V']:.3f} V output. The cause is not established. "
-                           "The curves below contain the qualified results from the 24 V / near-36 V continuation.")
+            observed = prior.get("last_startup_cycle") or {}
+            prior_nominal = _finite_number(prior.get("nominal_input_V"))
+            if prior_nominal is None:
+                prior_nominal = _finite_number(next((p.get("nominal_input_V") for p in voltage_sweep.get("phases", [])
+                                                     if p.get("status") == "previous-attempt-unqualified"), None))
+            attempt = (f"The separate {prior_nominal:g} V startup attempt" if prior_nominal is not None
+                       else "The separate earlier startup attempt")
+            cycle = ""
+            if all(_finite_number(observed.get(key)) is not None for key in ("Vin_V", "Iin_A", "Vout_V")):
+                cycle = (f": its last recorded cycle showed {observed['Vin_V']:.3f} V input at {observed['Iin_A']:.4f} A "
+                         f"and {observed['Vout_V']:.3f} V output")
+            continued = _join_phrases([phrase for nominal, phrase in phrases.items() if nominal in current_inputs])
+            summary.append((f"The requested comparison covers {requested}. " if requested else "")
+                           + f"{attempt} stopped without a qualified efficiency result{cycle}. The cause is not established. "
+                           + (f"The curves below contain the qualified results from the {continued} continuation."
+                              if continued else "The curves below contain the qualified results from the continuation."))
         else:
-            summary.append("This test compares efficiency as output load increases at 12 V, 24 V and near 36 V input.")
-        summary.append("The common load points allow like-for-like comparisons; heavier loads are attempted where the same 1 A supply limit allows them.")
-        summary.append("The upper input condition is labeled 36 V nominal and programmed to 35.8 V to leave margin below the stated operating limit. "
-                       "The report uses actual measured input voltage in every power and efficiency calculation.")
+            summary.append(f"This test compares efficiency as output load increases at {requested} input." if requested
+                           else "This test compares efficiency as output load increases at each recorded input condition.")
+        summary.append("The common load points allow like-for-like comparisons; heavier loads are attempted where the same "
+                       + (f"{sweep_limit:g} A supply limit allows them." if sweep_limit is not None else "supply limit allows them."))
+        reduced_pairs = _reduced_setpoints(voltage_sweep)
+        for nominal, setpoint in reduced_pairs:
+            margin = ("below the stated operating limit" if setpoint < nominal and nominal >= plan.dut.ratings.input_voltage_max_V
+                      else "for the source's specified programming error")
+            summary.append(f"The {nominal:g} V input condition is labeled {nominal:g} V nominal and programmed to {setpoint:g} V "
+                           f"to leave margin {margin}. The report uses actual measured input voltage in every power and "
+                           "efficiency calculation.")
+        if not reduced_pairs:
+            summary.append("The report uses actual measured input voltage in every power and efficiency calculation.")
         summary.append("Short windows show settled DC behavior. Differences between voltage curves are observed differences; "
                        "their statistical significance and temperature dependence have not been established.")
     if metrics and metrics[0].id == "highest-observed-efficiency":

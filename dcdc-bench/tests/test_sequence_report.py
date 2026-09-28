@@ -100,9 +100,21 @@ def _adaptive_sequence(sequence):
     analysis["points"] = [p for p in analysis["points"] if p["point_id"] in ids]
     samples = [s for s in samples if s["point_id"] in ids]
     run["executed_point_ids"] = [p.point_id for p in plan.points]
+    # The adaptive procedure plans with an ideal 100% envelope (source_limit.py); mirror that here.
+    plan.recipe.planning.efficiency_estimate_fraction = 1.
     run["method"] = {"source_limit_search": {"input_current_limit_A": 1.,
         "target_input_current_A": .98, "output_current_cap_A": 2., "stop_reason": "fixture boundary"}}
     return plan, run, analysis, samples
+
+
+def test_adaptive_note_states_the_plans_own_efficiency_assumption(sequence):
+    """The planning-efficiency sentence comes from the plan, not a literal; 80% is not called an ideal ceiling."""
+    plan, run, analysis, samples = _adaptive_sequence(sequence)
+    plan.recipe.planning.efficiency_estimate_fraction = .8
+    notes = " ".join(build_report_model(plan, run, analysis, samples).method.procedure_notes)
+    assert "planning efficiency estimate of 80%" in notes
+    assert "ideal-power ceiling" not in notes
+    assert "not a measured value" in notes
 
 
 def test_adaptive_report_shows_source_current_and_no_invented_hold(sequence):

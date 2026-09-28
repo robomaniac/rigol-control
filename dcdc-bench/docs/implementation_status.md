@@ -23,7 +23,7 @@ or external reviewer.
 | M0 — contracts and planning | Complete | Typed DUT/bench/recipe profiles, constraint checks and feasible-point planning for the initial steady-state scope. |
 | M1 — mock run to HTML/PDF | Substantially reached | Normal, setup-limited and aborted mock runs; retained evidence, interactive reports and vector PDFs with recorded acceptance checks at the initial checkpoint. Open: the 13 browser/PDF-marked gates cannot run on this aarch64 Pi with the current toolchain and are re-verified on a laptop or CI; WEB-08's nonpositive-current exclusion has no browser fixture; the automated PDF-02 pagination check is not implemented. |
 | M2 — supervised real point | Partial | Loaded bring-up, protection readbacks, timing, provenance and verified shutdown work in fixed and configured real procedures. Qualified enabled-no-load measurement, independent readback/freshness, uncertainty and physical load capability checks remain open. Saved-profile approvals, a single shared protection-programming sequence and a bounded live-voltage driver step were hardened on this branch; the metrology gate itself is unchanged. |
-| M3 — partial-power sweep and UI | Workflow slice demonstrated; not complete | Saved forms, hashed preview, fresh confirmations and the actual UI Start callback completed a bounded three-point real acquisition through the application services, continued after client disconnect, verified OFF and generated HTML/PDF automatically. Desktop/mobile forms and saved reports passed browser review. Another 5 V DUT profile was exercised without Python edits using fake SCPI. RUN-02 refresh/reconnect is now covered at the mock/application-services level. Not complete by the Section 15 exit criteria: M2 qualification is a prerequisite, the sweep is bounded far below rated power, the real Start used Socket.IO callbacks so a browser-click acquisition is not claimed, and `reports/<rev>/exports/` plus the renderer's narrative literals are in progress. |
+| M3 — partial-power sweep and UI | Workflow slice demonstrated; not complete | Saved forms, hashed preview, fresh confirmations and the actual UI Start callback completed a bounded three-point real acquisition through the application services, continued after client disconnect, verified OFF and generated HTML/PDF automatically. Desktop/mobile forms and saved reports passed browser review. Another 5 V DUT profile was exercised without Python edits using fake SCPI. RUN-02 refresh/reconnect is now covered at the mock/application-services level. Not complete by the Section 15 exit criteria: M2 qualification is a prerequisite, the sweep is bounded far below rated power, and the real Start used Socket.IO callbacks so a browser-click acquisition is not claimed. `reports/<rev>/exports/` and the model-driven narrative are complete on this branch. |
 | M4 — paired-run comparison and thermal tools | Not started | No paired-run comparison command/editor, photo/sensor annotation UI or real temperature adapter. Different input-voltage curves within one run do not complete this milestone. |
 | M5 — expanded tests and capability | Not started | Full-power operation, qualified uncertainty improvements, the approved UVLO runtime rule (RUN-09) and scope/dynamic procedures remain future work. |
 
@@ -129,8 +129,13 @@ envelope expands only with reviewed procedures and equipment limits; the
 separate warm-start experiment does not add warm-start behavior to the ordinary
 cold-start UI sweep.
 
-In progress on this branch, not done: `reports/<rev>/exports/` and replacing
-the renderer's hard-coded narrative literals.
+Completed on this branch on 2026-09-27: `reports/<rev>/exports/` (issued
+`points.csv` and `points.meta.json`, written atomically) and the model-driven
+narrative. The analysis and renderer no longer contain hard-coded voltage,
+current, step, window or DUT-rating literals; procedure notes, summary
+sentences, captions and series labels read the recorded `method` record, the
+plan and the DUT profile, and omit a clause when an older record lacks the
+field rather than inventing it.
 
 ### Hardening on this branch
 
@@ -169,6 +174,14 @@ recorded (commit subjects, not hashes):
   procedures** — `JobService.start` rebuilds the plan from the saved profiles
   and re-runs `prepare_real_plan` instead of trusting a cached preview;
   `bringup.run_bringup` takes the single-owner bench lease.
+- **Derive the remaining analysis narrative from recorded methods** — the
+  source-limit, voltage-sweep and startup-descent notes, summary sentences,
+  figure captions and series labels take their input conditions, reduced
+  setpoints, supply limit, step sizes, window durations, return load, planning
+  efficiency and the DUT's rated current from `run.json` `method` records and
+  the plan. Rebuilding the latest issued report model of each of the three real
+  runs reproduced every number; only deliberately reworded sentences differ.
+  Regression: `tests/test_sequence_report.py::test_adaptive_note_states_the_plans_own_efficiency_assumption`.
 
 `ui` is implemented. The older generic CLI `run --mode real` still rejects
 hardware execution; configured real jobs use `JobService` through the UI.

@@ -499,9 +499,11 @@ uncertainty budget and the physical load's capabilities — and to write the
 
 The NiceGUI bench workflow is implemented for the supported steady-state
 procedure, with saved-profile approvals now load-bearing and refresh/reconnect
-(RUN-02) covered at the mock/application-services level. In progress on this
-branch, not done: `reports/<rev>/exports/` and replacing the renderer's
-hard-coded narrative literals. Not implemented: the approved UVLO runtime rule
+(RUN-02) covered at the mock/application-services level. Also completed on
+this branch: `reports/<rev>/exports/` (issued CSV plus a metadata sidecar) and
+a model-driven narrative, so no voltage, current, step, window or DUT-rating
+literal remains in the analysis or renderer prose; each sentence reads the
+recorded method, plan and DUT profile. Not implemented: the approved UVLO runtime rule
 (RUN-09), cross-run comparison (CMP-01/02) and the automated PDF pagination
 check (PDF-02). Automatic publication, temperature acquisition and an
 image/annotation editor remain future work. For current test totals see the
