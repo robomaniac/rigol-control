@@ -35,8 +35,9 @@ so the swap was **left active** at that time.
 
 The host restarted at about 21:28 PDT the same day (see below), which ended the
 temporary activation. At about 22:15 PDT, `swapon --show` listed only
-`/dev/zram0`, and the inactive swap file was removed. Only the original zram
-swap remains enabled.
+`/dev/zram0`, and the inactive swap file was removed. It was recreated for the
+evening's multi-agent window and removed again after the 01:07 restart on
+28 September (see below). Only the original zram swap remains enabled.
 
 If a future render needs the same headroom, create the file again for that
 session only. Do not delete an active swap file; after use, run:
@@ -45,6 +46,19 @@ session only. Do not delete an active swap file; after use, run:
 sudo swapoff /home/jerome/rigol-control/dcdc-bench/test-artifacts/report-render.swap && \
   rm /home/jerome/rigol-control/dcdc-bench/test-artifacts/report-render.swap
 ```
+
+## Restart on 28 September at 01:07
+
+A third unclean restart followed at about 01:07 PDT on 28 September while nine
+coding agents, the VS Code server and Claude Code shared the host. Just before
+it, `free -m` showed 24 MiB available with the 905 MiB zram device and the
+768 MiB temporary disk swap both nearly full; the largest residents were the
+VS Code server (about 530 MiB resident plus swapped) and Claude Code (about
+440 MiB). No bench job was running and no instrument was energized. The
+temporary swap file was removed after the reboot, at 07:50 PDT, once
+`swapon --show` listed only `/dev/zram0`. Lesson recorded in the coordinator's
+notes: on this host run at most two or three agents at once and never render
+reports while agents run.
 
 ## Restarts observed later on 27 September
 
