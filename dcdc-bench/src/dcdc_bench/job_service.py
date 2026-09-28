@@ -302,8 +302,12 @@ class JobService:
             self._launch(directory)
             return {"job_id": job_id, "state": "queued"}
 
-    def retry_report(self, job_id):
-        """New report revision from existing evidence; never starts acquisition."""
+    def retry_report(self, job_id, annotations=None):
+        """New report revision from existing evidence; never starts acquisition.
+
+        Optional sensor placement annotations are bound to a stored original's
+        hash now and written into the new revision by the report-only worker.
+        """
         with self.lock:
             job, state = self._job(job_id), self.status(job_id)
             if state["state"] in ACTIVE or any(j["state"] in ACTIVE for j in self.list_jobs()):
@@ -312,6 +316,12 @@ class JobService:
                 raise ValueError("No finalized acquisition exists")
             path = _inside(job, state["run_dir"])
             _verified_off(path)
+            request = job / "annotations.request.json"
+            if annotations is not None:
+                from .annotations import bind_annotations
+                atomic_json(request, bind_annotations(path, annotations)[0])
+            else:
+                request.unlink(missing_ok=True)
             from .activity import bench_activity
             with bench_activity("report"):
                 pass
@@ -320,6 +330,26 @@ class JobService:
             atomic_json(job / "job.json", state)
             self._launch(job, report_only=True)
             return {"job_id": job_id, "state": "queued"}
+
+    def add_attachment(self, job_id, filename, data, *, caption="", owner="operator"):
+        """Store one validated documentation asset for a finalized run.
+
+        The original is content-addressed and listed in a new documentation
+        revision manifest; integrity.json and the acquisition manifest are
+        verified unchanged afterwards. No worker or instrument is involved.
+        """
+        from .attachments import AssetStore
+        with self.lock:
+            job, state = self._job(job_id), self.status(job_id)
+            if state["state"] in ACTIVE:
+                raise ValueError("Wait for the job to finish before attaching documentation")
+            if not state.get("run_dir"):
+                raise ValueError("No finalized acquisition exists")
+            path = _inside(job, state["run_dir"])
+            verify_integrity(path)
+            entry = AssetStore(path).add(data, filename, caption=caption, owner=owner)
+            verify_integrity(path)
+            return entry
 
     def status(self, job_id):
         job = self._job(job_id)
@@ -411,9 +441,11 @@ def _verified_off(path):
     return run
 
 
-def _render_process(path):
-    child = subprocess.Popen([sys.executable, "-m", "dcdc_bench", "report", str(path), "--formats", "html,pdf"],
-        stdin=subprocess.DEVNULL, start_new_session=True)
+def _render_process(path, annotations=None):
+    command = [sys.executable, "-m", "dcdc_bench", "report", str(path), "--formats", "html,pdf"]
+    if annotations is not None:
+        command += ["--annotations", str(annotations)]
+    child = subprocess.Popen(command, stdin=subprocess.DEVNULL, start_new_session=True)
     try:
         return child.wait(timeout=1800)
     except BaseException:
@@ -473,7 +505,8 @@ def worker(directory: Path, *, report_only=False):
         cancelled_acquisition = (directory / "cancel.request").exists()
         save(state="reporting")
         # A separate process owns all optional/heavy reporting dependencies.
-        returncode = _render_process(path)
+        request = directory / "annotations.request.json"
+        returncode = _render_process(path, request) if report_only and request.is_file() else _render_process(path)
         reports = sorted((path / "reports").glob("r*"))
         report = reports[-1] if reports else None
         manifest = _read(report / "build_manifest.json") if report and (report / "build_manifest.json").exists() else {}

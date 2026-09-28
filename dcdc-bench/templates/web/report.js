@@ -441,7 +441,73 @@
     }
     document.documentElement.dataset.reportReady='true';
   }
+  // Sensor placement: each marker carries normalized coordinates bound to the
+  // original image hash. Pixel positions are recomputed from the image as it
+  // is displayed, so a resized window keeps every marker on the same physical
+  // location (WEB-11). Markers are buttons: focusable, arrow-key navigable.
+  function sensorMarkerPosition(xNorm, yNorm, width, height) {
+    const x = Math.min(1, Math.max(0, Number(xNorm))), y = Math.min(1, Math.max(0, Number(yNorm)));
+    if (![x, y, width, height].every(finite) || width <= 0 || height <= 0) return null;
+    return {left: (x * width).toFixed(2) + 'px', top: (y * height).toFixed(2) + 'px'};
+  }
+  function initSensorPlacement() {
+    const blocks = [...document.querySelectorAll('.sensor-placement-block')];
+    const placers = [], clearers = [];
+    const prompt = 'Select a marker (click, or Tab and Enter) to read its sensor identifier and location note.';
+    for (const block of blocks) {
+      const image = block.querySelector('img.sensor-image');
+      const markers = [...block.querySelectorAll('.sensor-marker')];
+      const detail = block.querySelector('.sensor-marker-detail');
+      const rows = [...block.querySelectorAll('.sensor-marker-table tbody tr')];
+      if (!image) continue;
+      const place = () => {
+        const width = image.clientWidth, height = image.clientHeight;
+        if (!width || !height) return false;
+        for (const marker of markers) {
+          const position = sensorMarkerPosition(marker.dataset.xNorm, marker.dataset.yNorm, width, height);
+          if (position) { marker.style.left = position.left; marker.style.top = position.top; }
+        }
+        block.dataset.sensorReady = 'true';
+        return true;
+      };
+      const clear = () => {
+        for (const marker of markers) marker.setAttribute('aria-pressed', 'false');
+        for (const row of rows) row.classList.remove('selected');
+        if (detail) detail.textContent = prompt;
+      };
+      const select = marker => {
+        clear();
+        marker.setAttribute('aria-pressed', 'true');
+        for (const row of rows) if (row.dataset.sensorId === marker.dataset.sensorId) row.classList.add('selected');
+        if (detail) detail.textContent = marker.getAttribute('aria-label') + ' Normalized position x=' +
+          Number(marker.dataset.xNorm).toFixed(4) + ', y=' + Number(marker.dataset.yNorm).toFixed(4) + '.';
+      };
+      markers.forEach((marker, index) => {
+        marker.addEventListener('click', () => select(marker));
+        marker.addEventListener('keydown', event => {
+          const steps = {ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1, Home: -index, End: markers.length - 1 - index};
+          if (!(event.key in steps)) return;
+          event.preventDefault();
+          const next = markers[(index + steps[event.key] + markers.length) % markers.length];
+          next.focus();
+          select(next);
+        });
+      });
+      image.addEventListener('load', place);
+      if (image.complete) place();
+      if (typeof ResizeObserver === 'function') new ResizeObserver(place).observe(image);
+      else window.addEventListener('resize', place);
+      placers.push(place);
+      clearers.push(clear);
+    }
+    // Restore default view also drops sensor highlighting (brief 12.4 item 5).
+    document.getElementById('restore-view')?.addEventListener('click', () => clearers.forEach(clear => clear()));
+    return {blocks: blocks.length, place: () => placers.map(place => place()), clear: () => clearers.forEach(clear => clear())};
+  }
+  let sensorPlacement = {blocks: 0};
+  try { sensorPlacement = initSensorPlacement(); } catch (error) { console.error(error); }
   window.dcdcReport={model,get state(){return clone(state);},setView,resetZoom,restoreDefaults,getSelectedPoints,
     exportCSV,exportFigure,saveView,showPoint,whenIdle:()=>pending,graphs};
+  window.dcdcReport.sensorPlacement=sensorPlacement;
   window.dcdcReport.readyPromise=initialize().catch(error=>{fail(error);throw error;});
 })();

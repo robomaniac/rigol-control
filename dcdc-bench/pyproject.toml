@@ -10,7 +10,8 @@ requires-python = ">=3.11"
 dependencies = ["pydantic==2.13.4", "PyYAML==6.0.3", "filelock==4.0.4"]
 
 [project.optional-dependencies]
-ui = ["nicegui==3.17.1"]
+# The editor validates uploaded photographs and PDF pages by content (Pillow, pypdf).
+ui = ["nicegui==3.17.1", "pillow==12.3.0", "pypdf==6.19.0"]
 report = ["plotly==7.1.0", "kaleido==1.4.0"]
 # The real-hardware path wraps the owner's driver package from the repository
 # root (`pip install -e .` there provides `benchctl`); mock runs never need it.

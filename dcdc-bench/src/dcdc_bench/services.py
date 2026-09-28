@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 
 from .analysis import analyze_run, build_report_model
+from .annotations import annotations_file
 from .domain import BenchProfile, DutProfile, Plan, ReportProfile, TestRecipe
 from .planning import build_plan, load_profile
 from .storage import atomic_json, verify_integrity
@@ -94,7 +95,8 @@ def _validate_analysis_identity(run_dir: Path, plan: Plan, run: dict,
 
 
 def report_run(run_dir: Path, *, formats: tuple[str, ...] | None = None,
-               profile: ReportProfile | None = None, analysis_dir: Path | None = None) -> Path:
+               profile: ReportProfile | None = None, analysis_dir: Path | None = None,
+               annotations: dict | None = None) -> Path:
     from .reporting import render_report
     profile = profile or ReportProfile()
     formats = formats or tuple(profile.formats)
@@ -109,6 +111,8 @@ def report_run(run_dir: Path, *, formats: tuple[str, ...] | None = None,
     run = json.loads((run_dir / "run.json").read_text())
     samples = [json.loads(line) for line in (run_dir / "raw/samples.jsonl").read_text().splitlines() if line]
     _validate_analysis_identity(run_dir, plan, run, analysis, samples)
+    # Sensor markers are bound to a stored original's hash before any revision directory exists.
+    annotation_content = annotations_file(run_dir, annotations)
     reports = run_dir / "reports"
     reports.mkdir(exist_ok=True)
     index = 1
@@ -124,7 +128,7 @@ def report_run(run_dir: Path, *, formats: tuple[str, ...] | None = None,
     model.title = profile.title + " · " + plan.dut.identity.model
     atomic_json(directory / "report_profile.json", profile.model_dump())
     atomic_json(directory / "report_model.json", model.model_dump())
-    atomic_json(directory / "annotations.json", {"schema_version": "1.0", "author_interpretation": [], "assets": []})
+    atomic_json(directory / "annotations.json", annotation_content)
     render_report(model.model_dump(), directory, formats=formats)
     return directory
 

@@ -26,6 +26,7 @@ from typing import Any
 
 # The issued CSV export guards text cells exactly as the analysis export does.
 from ..analysis import _safe_cell
+from .sensor_placement import with_sensor_placement
 
 PROJECT = Path(__file__).resolve().parents[3]
 TEMPLATES = PROJECT / "templates"
@@ -1332,7 +1333,7 @@ def _render_report(report_model: dict, out_dir: Path, formats=("html", "pdf")) -
         source = (TEMPLATES / "characterization.qmd").read_text(encoding="utf-8")
         source = source.replace("__TITLE__", json.dumps(_md(model.get("title", f"{_identity(model)} characterization"))))
         source = source.replace("__SUBTITLE__", json.dumps(_md(identity + " · " + model["analysis_id"])))
-        source = source.replace("__BODY__", _body(model))
+        source = source.replace("__BODY__", with_sensor_placement(_body(model), out, _md))
         (out / "report.qmd").write_text(source, encoding="utf-8")
         for fmt in requested:
             print(f"Building {fmt.upper()} document…", file=sys.stderr, flush=True)

@@ -122,6 +122,10 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                 raise HTTPException(status_code=404, detail='Published file not available') from None
             return file_response(path)
 
+    # Photo/sensor-marker documentation editor: report-only revisions, no acquisition path.
+    from .annotation_editor import register_annotation_editor
+    register_annotation_editor(ui, run, service, STYLE)
+
     @ui.page('/', response_timeout=30.0)
     async def bench_page():
         ui.add_css(STYLE)
@@ -683,6 +687,7 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                     ui.button('Refresh saved runs', on_click=refresh_reports, icon='refresh').props('flat no-caps aria-label="Refresh saved runs"')
                     panels['reports'] = ui.column().classes('w-full gap-4')
             ui.label('Local bench control · Data stays in your workspace · Closing this tab does not restart or cancel acquisition.').classes('bench-muted')
+            ui.link('Sensor placement editor — add photographs and sensor markers to a finished run', '/annotations').classes('bench-artifact')
         await refresh_reports()
         active = next((job for job in state['jobs'] if job.get('state') in
                        ('queued', 'starting', 'running', 'acquiring', 'stopping', 'cancel_requested', 'analyzing', 'rendering', 'reporting')), None)
