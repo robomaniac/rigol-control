@@ -329,42 +329,138 @@ class RawSample(Contract):
         return self
 
 
+# ---------------------------------------------------------------------------
+# Extension contracts (implementation brief, section 5.2).
+#
+# Every Protocol below is runtime-checkable so ``isinstance(obj, SourceAdapter)``
+# verifies the structural boundary, and tests/test_contracts.py pins the in-tree
+# implementations to it. Method names follow the implementations the acquisition
+# loops are tested against (adapters.MockBench, storage.RunStore, the *Procedure
+# classes, analysis.analyze_evidence, reporting.render_report); the brief's table
+# is the responsibility guide. These imports sit beside the contracts they type so
+# the profile schemas above can be edited independently; hoist them to the module
+# header when that section is quiet.
+# ---------------------------------------------------------------------------
+from collections.abc import Sequence  # noqa: E402
+from pathlib import Path  # noqa: E402
+from typing import runtime_checkable  # noqa: E402
+
+
+@runtime_checkable
 class SourceAdapter(Protocol):
-    def identify(self) -> str: ...
-    def capabilities(self) -> SourceCapabilities: ...
-    def configure(self, voltage_V: float, current_limit_A: float) -> None: ...
-    def output(self, enabled: bool) -> None: ...
+    """Input-source role: identity, declared envelope, setpoints, output control, status, close.
+
+    One object may serve both the source and load roles (``MockBench`` does).
+    ``configure`` is accepted only while outputs are OFF; ``now`` is the
+    acquisition clock in seconds. ``close`` returns within the adapter's own
+    transport timeout and never re-enables an output.
+    Must not: report generation or DUT-specific analysis.
+    """
+
+    def identify(self) -> dict[str, Any]: ...
+    def source_capabilities(self) -> SourceCapabilities: ...
+    def configure(self, vin: float, iout: float, now: float) -> None: ...
+    def source_on(self) -> None: ...
+    def source_off(self) -> None: ...
     def status(self) -> dict[str, Any]: ...
-    def close(self, timeout_s: float) -> None: ...
+    def close(self) -> None: ...
 
 
+@runtime_checkable
 class LoadAdapter(Protocol):
-    def identify(self) -> str: ...
-    def capabilities(self) -> LoadCapabilities: ...
-    def configure(self, mode: str, current_A: float, remote_sense: bool) -> None: ...
-    def input(self, enabled: bool) -> None: ...
+    """Electronic-load role: identity, declared envelope, CC setpoint, input control, status, close.
+
+    The sense arrangement is reported through ``status()["remote_sense_verified"]``;
+    ``load_on`` is refused until the source is on and sense is verified.
+    Must not: assume all loads share the same ranges or response.
+    """
+
+    def identify(self) -> dict[str, Any]: ...
+    def load_capabilities(self) -> LoadCapabilities: ...
+    def configure(self, vin: float, iout: float, now: float) -> None: ...
+    def load_on(self) -> None: ...
+    def load_off(self) -> None: ...
     def status(self) -> dict[str, Any]: ...
-    def close(self, timeout_s: float) -> None: ...
+    def close(self) -> None: ...
 
 
+@runtime_checkable
 class MeasurementProvider(Protocol):
-    def read(self, quantity: str, timeout_s: float) -> RawSample: ...
+    """Return one raw reading for a bound quantity (``Vin_V``, ``Iin_A``, ``Vout_V``, ``Iout_A``).
+
+    Returns ``(value, instrument_state)``. The acquisition loop wraps the value
+    in ``RawSample`` using the bench ``MeasurementBinding`` (unit, location,
+    range) and its own query timestamps; a failed reading becomes ``None`` plus
+    a quality flag there.
+    Must not: implicitly replace a missing measurement with a setpoint.
+    """
+
+    def read(self, quantity: str, now: float) -> tuple[float, Any]: ...
 
 
+@runtime_checkable
 class TestProcedure(Protocol):
-    def required_quantities(self) -> list[str]: ...
-    def expected_states(self) -> list[str]: ...
-    def result_type(self) -> str: ...
+    """Executable half of a defined test, driven by the shared real-bench lifecycle.
+
+    Declared quantities and result type live on the recipe's ``TestDefinition``
+    (``required_quantities``, ``type``, ``derived_results``). The procedure
+    supplies the resolved ``plan()``, the ``adapter`` class that owns every
+    instrument command, run ``metadata()``, per-observation ``guard`` limits,
+    ``record_attempt`` bookkeeping and ``execute(ctx)``.
+    Must not: direct model-specific SCPI strings.
+    """
+
+    adapter: type
+    stage: str
+
+    def plan(self) -> Plan: ...
+    def metadata(self) -> dict[str, Any]: ...
+    def record_attempt(self, run: dict[str, Any], point: dict[str, Any]) -> None: ...
+    def guard(self, values: dict[str, float], requested: float, *, loaded: bool = ...,
+              startup: bool = ..., mode_before: str = ..., mode_after: str = ...) -> None: ...
+    def execute(self, ctx: Any) -> None: ...
 
 
+@runtime_checkable
 class RunStore(Protocol):
-    def append(self, stream: str, record: dict[str, Any]) -> None: ...
-    def finalize(self, manifest: dict[str, Any]) -> None: ...
+    """Persist acquisition evidence durably and hash the finalized artifacts.
+
+    ``storage.RunStore`` is the JSONL/JSON implementation and
+    ``storage.verify_integrity`` re-checks a finalized directory. This Protocol
+    keeps the brief's name; refer to it as ``domain.RunStore`` so it does not
+    shadow the storage class.
+    Must not: numerical or scientific conclusions.
+    """
+
+    path: Path
+
+    def initialize(self, request: dict[str, Any], plan: dict[str, Any], run: dict[str, Any]) -> None: ...
+    def append(self, stream: str, value: dict[str, Any]) -> None: ...
+    def finalize(self, run: dict[str, Any]) -> None: ...
 
 
+@runtime_checkable
 class Analyzer(Protocol):
-    def analyze(self, evidence: dict[str, Any]) -> dict[str, Any]: ...
+    """Callable turning preserved evidence into versioned, deterministic metrics.
+
+    ``analysis.analyze_evidence`` is the implementation. ``isinstance`` against
+    a ``__call__`` Protocol only proves the object is callable, so
+    tests/test_contracts.py compares the signature instead.
+    Must not: hardware or UI imports.
+    """
+
+    def __call__(self, plan: Plan, run: dict[str, Any], samples: list[dict[str, Any]], *,
+                 version: str = ...) -> dict[str, Any]: ...
 
 
+@runtime_checkable
 class ReportRenderer(Protocol):
-    def render(self, report_model: dict[str, Any], output_directory: str) -> dict[str, Any]: ...
+    """Callable rendering an already-validated report model into the requested formats.
+
+    ``reporting.render_report`` is the implementation; it formats supplied
+    results only.
+    Must not: recompute independent efficiency or regulation formulas.
+    """
+
+    def __call__(self, report_model: dict[str, Any], out_dir: Path,
+                 formats: Sequence[str] = ...) -> dict[str, Any]: ...
