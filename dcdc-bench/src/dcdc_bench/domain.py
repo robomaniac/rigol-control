@@ -165,6 +165,77 @@ class BenchProfile(Contract):
     notes: list[str] = Field(default_factory=list)
 
 
+UVLO_TEST_TYPE = "uvlo_input_ramp"
+
+
+def uvlo_ramp_phases(targets: list[float]) -> list[str]:
+    """Classify each declared UVLO step as ``down`` or ``up``; reject anything but one V-shaped ramp.
+
+    The ramp descends strictly from its first step to a unique minimum (the
+    turnaround), then ascends strictly. The minimum step belongs to the
+    descending phase; the ascending phase starts with the next step.
+    """
+    if len(targets) < 3:
+        raise ValueError("A UVLO ramp declares at least three steps: start, turnaround and return")
+    turnaround = targets.index(min(targets))
+    if turnaround in (0, len(targets) - 1):
+        raise ValueError("A UVLO ramp must descend to a turnaround and then ascend")
+    descending, ascending = targets[:turnaround + 1], targets[turnaround:]
+    if any(b >= a for a, b in zip(descending, descending[1:])):
+        raise ValueError("UVLO ramp steps must descend strictly to the turnaround")
+    if any(b <= a for a, b in zip(ascending, ascending[1:])):
+        raise ValueError("UVLO ramp steps must ascend strictly after the turnaround")
+    return ["down"] * (turnaround + 1) + ["up"] * (len(targets) - turnaround - 1)
+
+
+class UvloRampPolicy(Contract):
+    """Declared conventions for an approved UVLO input ramp (brief section 7.5).
+
+    ``floor_V`` is the lowest input the recipe may request; the planner refuses
+    lower steps without clipping. ``startup_interval_s`` is the bounded unloaded
+    startup phase before the first minimum-output check (brief 7.3); each later
+    step waits the recipe's ``settling.minimum_dwell_s`` before acquisition.
+    Output state per step is classified from the
+    accepted Vout mean: at/above ``output_on_minimum_V`` is ``on``, at/below
+    ``output_off_maximum_V`` is ``off``, between them is ``indeterminate``.
+    Output-off is an expected (recorded, not faulted) state only for descending
+    steps below ``expected_off_below_V`` and ascending steps below
+    ``expected_on_above_V``; elsewhere the normal minimum-Vout rule applies.
+    Absolute protective limits are never scoped by this policy.
+    """
+    floor_V: float = Field(gt=0)
+    startup_interval_s: float = Field(gt=0)
+    output_on_minimum_V: float = Field(gt=0)
+    output_off_maximum_V: float = Field(ge=0)
+    expected_off_below_V: float = Field(gt=0)
+    expected_on_above_V: float = Field(gt=0)
+
+    @model_validator(mode="after")
+    def consistent_conventions(self) -> UvloRampPolicy:
+        if self.output_off_maximum_V >= self.output_on_minimum_V:
+            raise ValueError("The output-off ceiling must lie below the output-on floor")
+        if self.expected_on_above_V < self.expected_off_below_V:
+            raise ValueError("The ascending expected-on boundary cannot lie below the descending expected-off boundary")
+        if self.floor_V > self.expected_off_below_V:
+            raise ValueError("The declared floor must not exceed the expected-off boundary")
+        return self
+
+    def off_expected(self, vin_target_V: float, ramp_phase: str) -> bool:
+        """Whether output-off is an expected (recorded, not faulted) state at this declared step."""
+        boundary = self.expected_off_below_V if ramp_phase == "down" else self.expected_on_above_V
+        return vin_target_V < boundary
+
+    def classify_output(self, vout_V: float | None) -> str | None:
+        """Declared three-state convention for an accepted Vout mean; None when no mean exists."""
+        if vout_V is None:
+            return None
+        if vout_V >= self.output_on_minimum_V:
+            return "on"
+        if vout_V <= self.output_off_maximum_V:
+            return "off"
+        return "indeterminate"
+
+
 class TestDefinition(Contract):
     id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
     type: str = "steady_state_load_sweep"
@@ -173,6 +244,7 @@ class TestDefinition(Contract):
     derived_results: list[str] = Field(default_factory=list)
     required_quantities: list[str] = Field(default_factory=lambda: ["Vin_V", "Iin_A", "Vout_V", "Iout_A"])
     optional_quantities: list[str] = Field(default_factory=list)
+    uvlo: UvloRampPolicy | None = None
 
     @model_validator(mode="after")
     def finite_nonnegative_targets(self) -> TestDefinition:
@@ -180,6 +252,14 @@ class TestDefinition(Contract):
             raise ValueError("Requested input voltages must be positive")
         if any(i < 0 for i in self.output_current_targets_A):
             raise ValueError("Requested output current cannot be negative")
+        if self.type == UVLO_TEST_TYPE:
+            if self.uvlo is None:
+                raise ValueError("uvlo_input_ramp requires a declared uvlo block")
+            if len(self.output_current_targets_A) != 1:
+                raise ValueError("uvlo_input_ramp holds one fixed light load")
+            uvlo_ramp_phases(self.input_voltage_targets_V)
+        elif self.uvlo is not None:
+            raise ValueError("A uvlo block is only valid for the uvlo_input_ramp test type")
         return self
 
 
@@ -220,6 +300,10 @@ class AuthorizationPolicy(Contract):
     require_operator_arming: bool = True
     allow_unattended: bool = False
     protective_policy_id: str | None = None
+    # Explicit UVLO approval block (brief 7.5): the input ramp below the normal
+    # range is refused unless this is true and protective_policy_id names the
+    # bench's reviewed protective policy. It is not a global ignore_safety flag.
+    uvlo_approved: bool = False
 
 
 class TestRecipe(Contract):

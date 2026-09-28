@@ -8,10 +8,13 @@ from typing import TypeVar
 
 import yaml
 
-from .domain import BenchProfile, Contract, DutProfile, Plan, PlannedPoint, TestDefinition, TestRecipe
+from .domain import (UVLO_TEST_TYPE, BenchProfile, Contract, DutProfile, Plan, PlannedPoint, TestDefinition,
+                     TestRecipe)
 
 Profile = TypeVar("Profile", bound=Contract)
 REQUIRED_MEASUREMENTS = {"Vin_V": "V", "Iin_A": "A", "Vout_V": "V", "Iout_A": "A"}
+# Procedure types with an implemented executor. Any other type fails planning.
+IMPLEMENTED_TEST_TYPES = ("steady_state_load_sweep", UVLO_TEST_TYPE)
 
 
 def load_profile(path: str | Path, model: type[Profile]) -> Profile:
@@ -47,10 +50,50 @@ def missing_approvals(dut: DutProfile, bench: BenchProfile) -> list[str]:
     return missing
 
 
+def uvlo_approval_gaps(bench: BenchProfile, recipe: TestRecipe) -> list[str]:
+    """Policy gaps that block a UVLO input ramp in either execution mode.
+
+    The ramp is refused unless the recipe carries the explicit approval block
+    and names the bench's protective policy, and the bench declares the
+    absolute limits the phase-scoped guard enforces at every step. Real
+    execution additionally needs ``missing_approvals`` to be empty.
+    """
+    gaps = []
+    authorization, controls = recipe.authorization, bench.protective_controls
+    if not authorization.uvlo_approved:
+        gaps.append("recipe authorization.uvlo_approved is false")
+    if authorization.protective_policy_id is None:
+        gaps.append("recipe authorization.protective_policy_id is not declared")
+    elif controls.policy_id != authorization.protective_policy_id:
+        gaps.append("bench protective_controls.policy_id does not name the recipe's protective policy")
+    for field in ("source_current_limit_A", "dut_output_overvoltage_V", "output_overcurrent_A"):
+        if getattr(controls, field) is None:
+            gaps.append(f"bench protective_controls.{field} must be declared for the absolute UVLO guard")
+    return gaps
+
+
+def uvlo_step_reasons(dut: DutProfile, test: TestDefinition, vin: float) -> list[str]:
+    """Refuse (never clip) UVLO steps below the declared floor, above the DUT rating, or a start outside it.
+
+    Steps between the floor and the DUT minimum are the authorized excursion the
+    approval block exists for; the generic DUT-range rule is replaced here.
+    """
+    ratings, policy = dut.ratings, test.uvlo
+    reasons = []
+    if policy is not None and vin < policy.floor_V:
+        reasons.append(f"Requested input voltage {vin:g} V is below the declared UVLO floor {policy.floor_V:g} V; "
+                       "request retained without clipping")
+    if vin > ratings.input_voltage_max_V:
+        reasons.append("Requested input voltage is above the DUT maximum input rating")
+    if vin == test.input_voltage_targets_V[0] and not ratings.input_voltage_min_V <= vin <= ratings.input_voltage_max_V:
+        reasons.append("A UVLO ramp must start inside the DUT's stated input range")
+    return reasons
+
+
 def _unsupported_capabilities(dut: DutProfile, bench: BenchProfile, test: TestDefinition) -> list[str]:
     reasons: list[str] = []
-    if test.type != "steady_state_load_sweep":
-        reasons.append(f"Test type {test.type!r} is not implemented in M1")
+    if test.type not in IMPLEMENTED_TEST_TYPES:
+        reasons.append(f"Test type {test.type!r} is not an implemented procedure")
     for name, instrument in (("Source", bench.source), ("Load", bench.load)):
         if not instrument.capabilities_confirmed:
             reasons.append(f"{name} capabilities have not been confirmed for this profile")
@@ -94,7 +137,9 @@ def _point(dut: DutProfile, bench: BenchProfile, recipe: TestRecipe, test: TestD
     else:
         reasons.append("Planning input voltage after wiring allowance must be positive, and source capabilities must be known")
     pout = ratings.output_voltage_nominal_V * iout
-    if not ratings.input_voltage_min_V <= vin <= ratings.input_voltage_max_V:
+    if test.type == UVLO_TEST_TYPE:
+        reasons.extend(uvlo_step_reasons(dut, test, vin))
+    elif not ratings.input_voltage_min_V <= vin <= ratings.input_voltage_max_V:
         reasons.append("Requested input voltage is outside the DUT operating rating")
     if iout > ratings.output_current_rated_A + 1e-12 or pout > ratings.output_power_rated_W + 1e-12:
         reasons.append("Requested nominal output exceeds the DUT current or power rating")
@@ -136,6 +181,10 @@ def _point(dut: DutProfile, bench: BenchProfile, recipe: TestRecipe, test: TestD
         reason = (f"Requested load exceeds the planning budget ({planning_limit:.6g} A output at "
                   f"assumed efficiency {policy.efficiency_estimate_fraction:.0%} and source-current budget "
                   f"{policy.source_current_budget_fraction:.0%}); request retained without clipping")
+    elif test.type == UVLO_TEST_TYPE and (gaps := uvlo_approval_gaps(bench, recipe)):
+        status = "approval_blocked"
+        missing = gaps + (missing_approvals(dut, bench) if recipe.execution_mode == "real" else [])
+        reason = "UVLO input ramp is blocked by approvals: " + "; ".join(missing)
     elif recipe.execution_mode == "real":
         status = "approval_blocked"
         missing = missing_approvals(dut, bench)
@@ -146,6 +195,9 @@ def _point(dut: DutProfile, bench: BenchProfile, recipe: TestRecipe, test: TestD
         reason = "Executable with the synthetic bench; feasibility remains a planning assumption"
         if iout == 0:
             reason += "; no-load input draw is unknown, not zero"
+        if test.type == UVLO_TEST_TYPE and vin < ratings.input_voltage_min_V:
+            reason += ("; below the DUT's stated minimum input, inside the declared UVLO floor: "
+                       "output-off is a recorded state here, not a fault")
     return PlannedPoint(point_id=point_id, test_id=test.id, vin_target_V=vin, iout_target_A=iout,
                         status=status, reason=reason, estimated_input_current_A=estimated_iin,
                         physical_input_power_limit_W=physical_power, planning_output_current_limit_A=planning_limit)
