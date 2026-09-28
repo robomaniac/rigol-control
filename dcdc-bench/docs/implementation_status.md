@@ -2,11 +2,7 @@
 
 ## Current position
 
-**Status as of 2026-09-27 (branch dcdc-bench-hardening): M0 reached; M1
-substantially reached; M2 partial (freshness, readback accuracy and uncertainty
-unquantified; enabled-no-load unqualified); an M3 workflow slice demonstrated
-(bounded three-point real job through the UI's application services) but M3
-not complete by the spec's exit criteria; M4/M5 not started.**
+**Status as of 2026-09-28 (branch dcdc-bench-hardening): M0 reached; M1 substantially reached; M2 partial (software side implemented: structured uncertainty budget, read-only `doctor`, outputs-OFF readback-cadence probe; the real bench's freshness, readback accuracy and uncertainty stay unquantified until datasheet/calibration terms are entered and qualified on the bench; enabled-no-load unqualified); an M3 workflow slice demonstrated but M3 not complete by the spec's exit criteria; M4 software implemented on mock and stored data (paired-run comparison, sensor-placement editor with attachment hygiene, synthetic thermal channel with thermal settling) but M4 exit not met (no real temperature adapter; no comparison document rendered); M5 partial (UVLO input-ramp procedure on the synthetic plant only; full-power source, scope tests and public examples not started).**
 
 This position follows the exit criteria in
 [Section 15 of the brief](implementation-brief.md#15-implementation-milestones)
@@ -22,10 +18,10 @@ or external reviewer.
 | --- | --- | --- |
 | M0 — contracts and planning | Complete | Typed DUT/bench/recipe profiles, constraint checks and feasible-point planning for the initial steady-state scope. |
 | M1 — mock run to HTML/PDF | Substantially reached | Normal, setup-limited and aborted mock runs; retained evidence, interactive reports and vector PDFs with recorded acceptance checks at the initial checkpoint. Open: the 13 browser/PDF-marked gates cannot run on this aarch64 Pi with the current toolchain and are re-verified on a laptop or CI; WEB-08's nonpositive-current exclusion has no browser fixture; the automated PDF-02 pagination check is not implemented. |
-| M2 — supervised real point | Partial | Loaded bring-up, protection readbacks, timing, provenance and verified shutdown work in fixed and configured real procedures. Qualified enabled-no-load measurement, independent readback/freshness, uncertainty and physical load capability checks remain open. Saved-profile approvals, a single shared protection-programming sequence and a bounded live-voltage driver step were hardened on this branch; the metrology gate itself is unchanged. |
+| M2 — supervised real point | Partial | Loaded bring-up, protection readbacks, timing, provenance and verified shutdown work in fixed and configured real procedures. Software side added on this branch: the structured readback uncertainty budget (`uncertainty.py`; real profiles carry `status: unknown` until datasheet/calibration terms are entered), the read-only `doctor` command and the outputs-OFF readback-cadence probe (fake-SCPI tested only), the written [M2 qualification plan](m2-qualification-plan.md) and the [12 V cold-start hypothesis](cold-start-hypothesis.md). Still open on the bench: measurement freshness under load, readback accuracy at the claimed ranges, the physical load's capability and a qualified enabled-no-load measurement. |
 | M3 — partial-power sweep and UI | Workflow slice demonstrated; not complete | Saved forms, hashed preview, fresh confirmations and the actual UI Start callback completed a bounded three-point real acquisition through the application services, continued after client disconnect, verified OFF and generated HTML/PDF automatically. Desktop/mobile forms and saved reports passed browser review. Another 5 V DUT profile was exercised without Python edits using fake SCPI. RUN-02 refresh/reconnect is now covered at the mock/application-services level. Not complete by the Section 15 exit criteria: M2 qualification is a prerequisite, the sweep is bounded far below rated power, and the real Start used Socket.IO callbacks so a browser-click acquisition is not claimed. `reports/<rev>/exports/` and the model-driven narrative are complete on this branch. |
-| M4 — paired-run comparison and thermal tools | Not started | No paired-run comparison command/editor, photo/sensor annotation UI or real temperature adapter. Different input-voltage curves within one run do not complete this milestone. |
-| M5 — expanded tests and capability | Not started | Full-power operation, qualified uncertainty improvements, the approved UVLO runtime rule (RUN-09) and scope/dynamic procedures remain future work. |
+| M4 — paired-run comparison and thermal tools | Software implemented on mock and stored data; exit not met | `dcdc-bench compare` pairs stored analyses by qualified conditions (CMP-01/02; demonstrated read-only on two real 24 V runs), the attachment store with import hygiene and the `/annotations` sensor-placement editor produce new report revisions (WEB-11/WEB-12), and a synthetic thermal channel with a separate thermal-settling policy exercises RUN-07 on the mock plant. Not met: no real temperature adapter or validated thermal criteria, no comparison HTML/PDF rendered, browser-marked WEB-11 check not executed on the Pi. |
+| M5 — expanded tests and capability | Partial (mock only) | The approved UVLO input-ramp procedure with a phase-scoped guard policy runs on the synthetic plant (RUN-09, DATA-04 brackets) and ships an unapproved example recipe. Full-power operation, scope/dynamic procedures, qualified uncertainty improvements on the real bench and approved public examples remain future work. |
 
 ### Latest measured evidence
 
@@ -60,8 +56,7 @@ or external reviewer.
   phase completed its declared grid. It did not establish a maximum output rating.
 - The separate 12 V startup attempt stopped on input-voltage collapse and current
   near the 1 A source limit. It produced **no qualified 12 V efficiency curve**.
-  The 12T12-4A has failed direct 12 V cold-start twice; the cause remains
-  unestablished. Both attempts retain their own raw evidence.
+  The retained evidence holds **one** automated 12 V cold-start attempt (run `…_e0fab9`); an earlier statement of two failures is not supported by recorded evidence. In that attempt the load was enabled at about 7.98 V output and, one second later, the input collapsed to 2.661 V with input current at the 1 A setting; the source read CV before and after. The cause is unestablished; see the [cold-start hypothesis](cold-start-hypothesis.md).
 - Voltage-comparison report: local `/Runs/12t12-efficiency/report.html` and `report.pdf`,
   revision `r0005`, analysis `a-e2e7cc8e0d01`. See the
   [agent-role results audit](voltage-efficiency-results-review.md),
@@ -109,25 +104,29 @@ documents, checks and browser coverage.
 
 ### Next bounded task
 
-Before any further energizing of the converter, the next bounded task is:
+The two documents the previous gate asked for now exist and await the owner's
+review: the [12 V cold-start hypothesis and supervised test proposal](cold-start-hypothesis.md)
+and the [M2 qualification plan](m2-qualification-plan.md). Neither authorizes
+energizing the converter. Before any further real run, the next bounded task is:
 
-1. Finish M2 qualification: measurement freshness (independent readback
-   timing, not query spans), readback accuracy at the ranges to be claimed, an
-   evaluated uncertainty budget, the physical load's capability, and a
-   qualified enabled-no-load measurement.
-2. Write the 12 V cold-start hypothesis. The converter failed direct 12 V
-   cold-start twice with the cause unestablished; a written hypothesis and test
-   plan precede another attempt.
+1. Owner review of both documents, including the bench-time items they name:
+   measurement freshness under load (the outputs-OFF cadence probe is not that),
+   readback accuracy at the ranges to be claimed (transcribe R1/R4 readback
+   terms and calibration status into the bench profile so the budget can
+   evaluate), the physical load's capability, and a qualified enabled-no-load
+   window at 24 V.
+2. If the owner approves, the load-disabled cold-start bracketing 15 → 12 V
+   proposed in the hypothesis document, as a reviewed recipe with protective
+   limits, not the ordinary sweep.
 
-Only after that gate: complete M3 by the Section 15 exit criteria, then M4
-paired-run comparison (CMP-01/02), real temperature acquisition and
-photo/sensor placement editing with traceable attachments, and M5 including
-the approved UVLO runtime rule (RUN-09). The automated PDF pagination check
-(PDF-02) is also not implemented. Existing attachment references do not
-constitute image upload or annotation tools. The physically qualified DUT/bench
-envelope expands only with reviewed procedures and equipment limits; the
-separate warm-start experiment does not add warm-start behavior to the ordinary
-cold-start UI sweep.
+Only after that gate: complete M3 by the Section 15 exit criteria. M4 and M5
+software is present on mock and stored data (comparison, sensor placement,
+synthetic thermal channel, UVLO procedure); what remains there is real
+temperature acquisition, a real UVLO run under a reviewed policy, a rendered
+comparison document and the browser-marked gates on a laptop or CI. The
+physically qualified DUT/bench envelope expands only with reviewed procedures
+and equipment limits; the separate warm-start experiment does not add
+warm-start behavior to the ordinary cold-start UI sweep.
 
 Completed on this branch on 2026-09-27: `reports/<rev>/exports/` (issued
 `points.csv` and `points.meta.json`, written atomically) and the model-driven
@@ -183,9 +182,20 @@ recorded (commit subjects, not hashes):
   runs reproduced every number; only deliberately reworded sentences differ.
   Regression: `tests/test_sequence_report.py::test_adaptive_note_states_the_plans_own_efficiency_assumption`.
 
+- **Add the structured readback uncertainty budget with not_evaluated reasons for unknown terms** — `uncertainty.py` builds a schema-versioned `uncertainty.json` per analysis revision from typed `readback_specification` terms (a/√3 rectangular limits, resolution, optional temperature term, Type A repeatability recorded separately, declared covariance, U = k·u_c with k stated and not called a 95 % interval, efficiency in percentage points, loss propagated separately in watts, near-zero-current flag, unknown terms → `not_evaluated` with reasons). Reports show bands/± only when evaluated. The mock profile carries a labeled synthetic example; `rigol.example.yaml` and the seeded real benches carry `status: unknown` with the R1/R4 datasheet URLs, so **the real bench remains unquantified until the owner transcribes readback (not programming) terms and calibration status** (`docs/uncertainty-budget.md`). Formula version `settled-dc-1.2`. Tests: `tests/test_uncertainty.py`.
+- **Add the approved UVLO input-ramp procedure with a phase-scoped guard policy** — RUN-09 on mock hardware only: `uvlo.py` (`UvloInputRampProcedure`, `run_uvlo_mock`) and `mock_uvlo.py` (synthetic latching UVLO on a `MockBench` subclass); the `uvlo_input_ramp` test type with a declared `uvlo` block and `authorization.uvlo_approved`; planner refusal/approval gating and floor/range refusals; `run_mock` refuses non-steady-state types; DATA-04 brackets and a UVLO figure/summary in `analysis.py`; `profiles/recipes/12t12-4a-uvlo.example.yaml` ships unapproved (17/17 approval_blocked). Plans serialized before this commit no longer pass `verify_plan_hash` (new fields), which is the intended fresh-approval behavior. Tests: `tests/test_uvlo.py`.
+- **Add paired-run comparison from stored analyses (M4: CMP-01, CMP-02, UNC-03)** — `dcdc-bench compare <runA> <runB> --out <dir> [--analysis-a/-b ID] [--tolerance-vin V] [--tolerance-iout A] [--interpolate] [--covariance JSON] [--overwrite]` in `comparison.py` + `reporting/comparison.py` (renderer.py only dispatches `kind == "comparison"`); pairs by qualified conditions/IDs never by index, lists unpaired points per run, `delta_eta_pp = eta_B − eta_A` plus Δloss/ΔVout, difference plots with a zero line, resolvability via `u_delta² = u_A² + u_B² − 2·cov` only with evaluated budgets, otherwise "not evaluated"; writes model JSON, Markdown body, CSV exports + metadata, Plotly figure JSON and a manifest; sources stay read-only. Real read-only demo at `examples/generated/comparison-real-24v/` (extended vs source-limit at 24 V: 6 pairs, largest Δη −0.47 pp at 0.1 A, uncertainty not evaluated, same DUT model on different days). Tests: `tests/test_comparison.py`.
+- **Add read-only doctor, the outputs-OFF readback-cadence probe and the approval-gated publish command** — `doctor.py` runs the real drivers through a `ReadOnlyTransport` whose `write()` raises and whose `query()` allows only an explicit list (identities, output/input states, protections, sense, timers, `*STB?`; never `SYST:ERR?`, which would pop the fault evidence); `--readback-cadence` refuses unless both outputs read OFF and saves an idle readback-path observation under `diagnostics/` that is explicitly not a loaded-freshness qualification. `publish.py` produces an approval-record-gated redacted copy with `publication_manifest.json`, keeps `noindex` unless `public: true`, and uses no git or network. Verified with fake SCPI only (`tests/test_doctor.py`, `tests/test_publish.py`); `docs/doctor-and-publication.md`.
+- **Add the synthetic thermal channel and thermal settling (M4, mock only)** — sensor metadata (`TemperatureSensor`, `SensorPlacement` compatible with `annotations.json` 1.0), the first-order `mock_thermal` provider attached to the mock plant only, a separate `ThermalSettlingPolicy` in the runner (timeout → `inconclusive`, time series retained, no fabricated equilibrium), per-point absolute temperature and rise above time-aligned ambient (no ambient → not evaluated), separate temperature / rise-vs-loss / settling figures, `profiles/bench/mock-thermal.yaml` and `recipes/12t12-4a-thermal-mock.yaml`. No real temperature adapter; criteria are drafts. Tests: `tests/test_thermal.py`.
+- **Add the attachment store, import hygiene and the sensor-placement editor (M4, WEB-11/WEB-12)** — content-addressed `attachments/originals/<sha256>.<ext>` with content-sniffed type/size/dimension/SVG/PDF checks (`attachments.py`); post-finalization assets go to `attachments/revisions/<n>.json`, never into `integrity.json`; exact-schema `annotations.json` bound to the image hash and saved only as a new report revision (`report_run(annotations=)`, `dcdc-bench report --annotations`, `JobService.retry_report(job_id, annotations)`); a "Sensor placement" report section (markers positioned by report.js from normalized coordinates, a static SVG overlay for the PDF, everything escaped); the NiceGUI `/annotations` editor. Tests: `tests/test_attachments.py`, `tests/test_annotations.py`, `tests/test_annotation_editor.py`; the browser-marked WEB-11 test and a Quarto/Typst build of the new section are not yet executed on the Pi.
+- **Add the automated PDF pagination check and the WEB-08 nonpositive-current fixtures** — `reporting/pdf_check.py` runs after every PDF build and is recorded in `build_manifest.json`; an error finding marks the document `failed-validation` while keeping it. Re-checking the issued PDFs read-only confirmed the recorded page counts and the earlier table fixes, and found one defect the manual reviews missed: the voltage-sweep report (r0002–r0007) leaves the last regulation-metrics row alone on page 7 (a presentation revision is pending). WEB-08 has a browser fixture with 0 A and negative-current points plus a Node check of the shipped script. `dcdc-bench pdf-check <report.pdf>`. Tests: `tests/test_pdf_check.py`.
+- **Harden the job and report process model for the 1 GB Pi** — the acquisition worker exits at `report-queued` after verified OFF so drivers leave RAM; the UI's 2 s dispatcher launches one report-only worker only when no job is active, the bench lease is free and the memory gate passes (`DCDC_RENDER_MIN_AVAILABLE_MIB` = 150, `DCDC_RENDER_MIN_AVAILABLE_PLUS_SWAP_FREE_MIB` = 600; both 0 disables), with the deferral reason visible in the job; `retry_report` queues instead of refusing; Quarto runs in its own session with the same timeout and its group is swept; the report child's session is swept on every exit path and the Chromium tree is stopped if Kaleido's close times out; per-task RSS/MemAvailable/swap/duration telemetry goes to `resource-log.jsonl`, `resources.jsonl` and `build_manifest.json` (`docs/pi-process-model.md`). Acquisition timing and electrical limits are unchanged. Tests: `tests/test_resources.py`, `tests/test_report_queue.py`; the RUN-02 integration test now covers acquisition → report-queued → dispatch → completed with a real detached worker.
+- **Write the 12 V cold-start hypothesis and the M2 qualification plan** — from stored evidence only, no hardware: `docs/cold-start-hypothesis.md` (ranked hypotheses; the single recorded 12 V attempt enabled the load at ~7.98 V output 1.0 s before the collapse) and `docs/m2-qualification-plan.md`. The documents also corrected two statements in the status docs: only one automated 12 V attempt exists, and the earlier narrative omitted the load enable.
+- **Integrate the nine parallel increments and settle their seams** — merged in sequence with conflicts resolved by keeping both sides; the retry path binds annotations and then queues; job status treats a launch younger than five seconds whose process is alive as starting, closing a fork/exec race that could flash "worker exited unexpectedly".
+
 `ui` is implemented. The older generic CLI `run --mode real` still rejects
 hardware execution; configured real jobs use `JobService` through the UI.
-`doctor` and `compare` remain reserved commands.
+`doctor`, `compare`, `publish` and `pdf-check` are implemented; `doctor` and its cadence probe have run only against fake SCPI.
 
 ### Current verification record
 

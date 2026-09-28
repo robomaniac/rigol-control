@@ -3,11 +3,7 @@
 Configure a converter test, preserve the readings, and produce an interactive
 engineering report and a matching vector PDF.
 
-**Status as of 2026-09-27 (branch dcdc-bench-hardening): M0 reached; M1
-substantially reached; M2 partial (freshness, readback accuracy and uncertainty
-unquantified; enabled-no-load unqualified); an M3 workflow slice demonstrated
-(bounded three-point real job through the UI's application services) but M3
-not complete by the spec's exit criteria; M4/M5 not started.** The first
+**Status as of 2026-09-28 (branch dcdc-bench-hardening): M0 reached; M1 substantially reached; M2 partial (software side implemented: structured uncertainty budget, read-only `doctor`, outputs-OFF readback-cadence probe; the real bench's freshness, readback accuracy and uncertainty stay unquantified until datasheet/calibration terms are entered and qualified on the bench; enabled-no-load unqualified); an M3 workflow slice demonstrated but M3 not complete by the spec's exit criteria; M4 software implemented on mock and stored data (paired-run comparison, sensor-placement editor with attachment hygiene, synthetic thermal channel with thermal settling) but M4 exit not met (no real temperature adapter; no comparison document rendered); M5 partial (UVLO input-ramp procedure on the synthetic plant only; full-power source, scope tests and public examples not started).** The first
 profile describes your **12T12-4A: 9–36 V input, 12 V / 4 A output**, with ratings
 marked as user supplied. The normal demonstration uses simulated instruments.
 A separate, explicitly armed pilot measured the connected converter at
@@ -16,8 +12,7 @@ sweep, a three-minute hold, and a return sweep at 24 V.
 The latest [input-voltage comparison](#efficiency-at-different-input-voltages)
 measured 27 load points at 24 V and near 36 V, reaching 2.5 A output.
 The separately preserved 12 V startup attempt stopped without a valid efficiency
-result; the converter has failed direct 12 V cold-start twice and the cause is
-unestablished. The local bench interface runs bounded real recipes for the
+result; the retained evidence holds one automated attempt, in which the load was enabled at about 8 V output one second before the input collapsed, and the cause is unestablished (see the [cold-start hypothesis](docs/cold-start-hypothesis.md)). The local bench interface runs bounded real recipes for the
 reviewed DP821A CH1 / DL3031A setup, with automatic HTML/PDF reports. A bounded
 three-point real job completed through the UI's application services and
 continued after the client disconnected; a browser-click acquisition is not
@@ -39,6 +34,7 @@ current test totals see the branch's final verification record.
 - [Longer real converter test](#longer-real-converter-test)
 - [Test near the supply limit](#test-near-the-supply-limit)
 - [Efficiency at different input voltages](#efficiency-at-different-input-voltages)
+- [More commands](#more-commands)
 - [Profiles and planning](#profiles-and-planning)
 - [Evidence and reports](#evidence-and-reports)
 - [Architecture and verification](#architecture-and-verification)
@@ -351,11 +347,7 @@ input was **24.006 V and 35.797 V** at the comparison points; calculations use
 those readings. At its highest tested load, the upper-voltage condition delivered
 **29.75 W** at **11.904 V**, drawing **0.966 A** from the supply.
 
-The earlier 12 V startup produced about 8 V output with the load disabled, then
-stopped when input voltage collapsed to **2.661 V** and input current reached
-**1.0005 A**. It produced no qualified efficiency window. Its cause is not
-established, and these results do not verify the full stated 9–36 V range.
-The continuation did not repeat that startup; both original runs are in the ZIP.
+The earlier 12 V startup produced about 8 V output during its unloaded startup window; the load was then enabled at that output voltage and, one second later, the input collapsed to **2.661 V** with input current at **1.0005 A**. It produced no qualified efficiency window. Its cause is not established (see the [cold-start hypothesis](docs/cold-start-hypothesis.md)), and these results do not verify the full stated 9–36 V range. The continuation did not repeat that startup; both original runs are in the ZIP.
 
 The continuation completed **27 qualified windows and 204 accepted reading
 cycles in 428 seconds**, with a **1.000 A supply setting**. Both outputs and the
@@ -372,6 +364,31 @@ startup stop. See the [code review](docs/voltage-efficiency-code-review.md),
 These are **local Pi reports**, using the forwarded port shown in VS Code.
 Download and extract the ZIP to read without SSH. They are not yet published
 GitHub Pages examples.
+
+## More commands
+
+All of these run without instruments except `doctor`, which connects read-only
+and never writes to an instrument. None of them energize the converter.
+
+```sh
+dcdc-bench compare <runA> <runB> --out <dir>        # pair stored analyses by condition; CMP-01/02
+dcdc-bench doctor --bench <bench.yaml> --inventory Software/config/lab.yaml   # read-only identities, states, protections
+dcdc-bench doctor --bench <bench.yaml> --inventory ... --readback-cadence --seconds 20  # outputs-OFF readback cadence
+dcdc-bench pdf-check <report.pdf>                   # PDF-02 pagination check of an issued document
+dcdc-bench publish <run> --revision r0001 --out <dir> --approval approval.yaml  # redacted copy, approval required
+dcdc-bench report <run> --annotations annotations.json   # new revision with sensor placement markers
+```
+
+The bench UI adds an `/annotations` page for uploading a photograph and placing
+sensor markers; saving creates a new report revision and never touches the
+acquisition evidence. Mock-only procedures added on this branch are the UVLO
+input ramp (`profiles/recipes/12t12-4a-uvlo.example.yaml`, shipped unapproved)
+and the thermal recipe (`profiles/recipes/12t12-4a-thermal-mock.yaml`). See
+[doctor and publication](docs/doctor-and-publication.md),
+[the uncertainty budget](docs/uncertainty-budget.md),
+[the Pi process model](docs/pi-process-model.md),
+[the cold-start hypothesis](docs/cold-start-hypothesis.md) and
+[the M2 qualification plan](docs/m2-qualification-plan.md).
 
 ## Profiles and planning
 
@@ -488,14 +505,12 @@ platform, acceptance coverage and limitations. The complete
 
 ## What comes next
 
-Status as of 2026-09-27 (branch dcdc-bench-hardening): M0 reached; M1
-substantially reached; M2 partial; an M3 workflow slice demonstrated but M3 not
-complete by the brief's Section 15 exit criteria; M4/M5 not started.
+Status as of 2026-09-28 (branch dcdc-bench-hardening): M0 reached; M1 substantially reached; M2 partial (software side implemented: structured uncertainty budget, read-only `doctor`, outputs-OFF readback-cadence probe; the real bench's freshness, readback accuracy and uncertainty stay unquantified until datasheet/calibration terms are entered and qualified on the bench; enabled-no-load unqualified); an M3 workflow slice demonstrated but M3 not complete by the spec's exit criteria; M4 software implemented on mock and stored data (paired-run comparison, sensor-placement editor with attachment hygiene, synthetic thermal channel with thermal settling) but M4 exit not met (no real temperature adapter; no comparison document rendered); M5 partial (UVLO input-ramp procedure on the synthetic plant only; full-power source, scope tests and public examples not started).
 
 The next bounded task, before any further energizing, is to finish M2
 qualification — measurement freshness, useful readback accuracy, an evaluated
 uncertainty budget and the physical load's capabilities — and to write the
-12 V cold-start hypothesis for the two unexplained 12T12-4A failures.
+act on the written [12 V cold-start hypothesis](docs/cold-start-hypothesis.md) and [M2 qualification plan](docs/m2-qualification-plan.md), which await the owner's review.
 
 The NiceGUI bench workflow is implemented for the supported steady-state
 procedure, with saved-profile approvals now load-bearing and refresh/reconnect
@@ -503,10 +518,7 @@ procedure, with saved-profile approvals now load-bearing and refresh/reconnect
 this branch: `reports/<rev>/exports/` (issued CSV plus a metadata sidecar) and
 a model-driven narrative, so no voltage, current, step, window or DUT-rating
 literal remains in the analysis or renderer prose; each sentence reads the
-recorded method, plan and DUT profile. Not implemented: the approved UVLO runtime rule
-(RUN-09), cross-run comparison (CMP-01/02) and the automated PDF pagination
-check (PDF-02). Automatic publication, temperature acquisition and an
-image/annotation editor remain future work. For current test totals see the
+recorded method, plan and DUT profile. Also on this branch, on mock or stored data only: the UVLO input-ramp procedure (RUN-09), paired-run comparison (`compare`, CMP-01/02), the automated PDF pagination check (PDF-02), a synthetic thermal channel, the attachment store with the `/annotations` sensor-placement editor, the read-only `doctor` command, the approval-gated `publish` command and a memory-safe job/report process model for the Pi. Real temperature acquisition, a real UVLO run and a rendered comparison document remain future work. For current test totals see the
 branch's final verification record. No repository push or report publication
 has been performed for this increment. The original project's license has not
 been changed or extended by this subproject.
