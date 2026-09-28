@@ -68,6 +68,38 @@ def execute(fake):
     return path,json.loads((path/"run.json").read_text())
 
 
+def test_driver_refusing_the_live_step_aborts_without_a_raw_voltage_write(tmp_path, monkeypatch):
+    fake = bench(tmp_path, monkeypatch)
+
+    def refuse(self, channel, voltage_v, *, max_step_v):
+        raise ValueError(f"CH{channel} live voltage step refused for the test")
+
+    monkeypatch.setattr("benchctl.drivers.rigol_dp800.RigolDP800.set_voltage_live", refuse)
+    path, run = execute(fake)
+    assert run["execution_status"] == "aborted"
+    assert any("refused by the driver" in error for error in run["errors"])
+    assert not any(command.startswith(":SOUR1:VOLT ") and command != f":SOUR1:VOLT {PROGRAMMED_INPUTS[0]}"
+                   for command in writes(fake, "source"))
+    assert all(state["state"] == "OFF" and state["verified"] for state in run["shutdown"].values()
+               if isinstance(state, dict) and "verified" in state)
+    verify_integrity(path)
+
+
+def test_instrument_fault_during_the_live_step_keeps_its_own_error_status(tmp_path, monkeypatch):
+    from benchctl.interfaces import ScpiError
+    fake = bench(tmp_path, monkeypatch)
+
+    def fault(self, channel, voltage_v, *, max_step_v):
+        raise ScpiError("-222,Data out of range")
+
+    monkeypatch.setattr("benchctl.drivers.rigol_dp800.RigolDP800.set_voltage_live", fault)
+    path, run = execute(fake)
+    assert run["execution_status"] == "error"
+    assert any("Data out of range" in error for error in run["errors"])
+    assert not any("refused by the driver" in error for error in run["errors"])
+    verify_integrity(path)
+
+
 def samples(path):
     return [json.loads(line) for line in (path/"raw/samples.jsonl").read_text().splitlines()]
 
