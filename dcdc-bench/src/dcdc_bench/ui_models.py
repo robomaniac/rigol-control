@@ -89,6 +89,7 @@ def state_label(snapshot: dict) -> str:
     labels = {'queued': 'Waiting to start', 'running': 'Acquiring measurements', 'acquiring': 'Acquiring measurements',
               'starting': 'Checking the bench', 'rendering': 'Preparing HTML and PDF',
               'reporting': 'Preparing HTML and PDF',
+              'report-queued': 'Measurements saved — report queued',
               'analyzing': 'Analyzing saved measurements', 'completed': 'Complete',
               'cancel_requested': 'Stop requested — waiting for shutdown',
               'stopping': 'Stop requested — waiting for shutdown', 'cancelled': 'Stopped',

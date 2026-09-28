@@ -98,6 +98,8 @@ def report_run(run_dir: Path, *, formats: tuple[str, ...] | None = None,
                profile: ReportProfile | None = None, analysis_dir: Path | None = None,
                annotations: dict | None = None) -> Path:
     from .reporting import render_report
+    from .reporting.renderer import ReportRenderError
+    from .resources import ENV_MIN_AVAILABLE_MIB, ENV_MIN_AVAILABLE_PLUS_SWAP_FREE_MIB, MemoryGate
     profile = profile or ReportProfile()
     formats = formats or tuple(profile.formats)
     if profile.selected_sections != ReportProfile().selected_sections or profile.default_metric != "efficiency_pct":
@@ -105,6 +107,15 @@ def report_run(run_dir: Path, *, formats: tuple[str, ...] | None = None,
     run_dir = Path(run_dir)
     # An explicit analysis selection must not bypass acquisition verification.
     verify_integrity(run_dir)
+    # Refuse before anything is written: a render that starts short of memory
+    # can take the 1 GB host down with it, and no placeholder report may appear.
+    gate = MemoryGate()
+    gate_ok, gate_reason, gate_snapshot = gate.check()
+    if not gate_ok:
+        raise ReportRenderError(
+            f"Not enough free memory to render safely ({gate_reason}); nothing was rendered. "
+            f"Thresholds: {json.dumps(gate.thresholds(), sort_keys=True)}. Snapshot: {json.dumps(gate_snapshot, sort_keys=True)}. "
+            f"Override with {ENV_MIN_AVAILABLE_MIB} and {ENV_MIN_AVAILABLE_PLUS_SWAP_FREE_MIB} (both 0 disables the gate).")
     analysis_dir = Path(analysis_dir) if analysis_dir is not None else analyze_run(run_dir)
     analysis = json.loads((analysis_dir / "analysis.json").read_text())
     plan = Plan.model_validate_json((run_dir / "plan.json").read_text())
@@ -129,6 +140,9 @@ def report_run(run_dir: Path, *, formats: tuple[str, ...] | None = None,
     atomic_json(directory / "report_profile.json", profile.model_dump())
     atomic_json(directory / "report_model.json", model.model_dump())
     atomic_json(directory / "annotations.json", annotation_content)
+    # The renderer copies this verdict into build_manifest.json.
+    atomic_json(directory / "memory_gate.json", {"ok": gate_ok, "reason": gate_reason,
+                                                 "thresholds": gate.thresholds(), "snapshot": gate_snapshot})
     render_report(model.model_dump(), directory, formats=formats)
     return directory
 

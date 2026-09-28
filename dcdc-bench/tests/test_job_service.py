@@ -77,7 +77,10 @@ def test_report_retry_never_calls_acquisition_and_requires_off(service, monkeypa
     atomic_json(job / "job.json", state)
     launched = []
     monkeypatch.setattr(service, "_launch", lambda directory, **kwargs: launched.append(kwargs))
-    service.retry_report(job_id)
+    # A retry only queues; the UI's dispatcher launches the report-only worker.
+    assert service.retry_report(job_id) == {"job_id": job_id, "state": "report-queued"}
+    assert launched == [] and service.status(job_id)["state"] == "report-queued"
+    service.dispatch_reports()
     assert launched == [{"report_only": True}]
     monkeypatch.setattr("dcdc_bench.runner.run_mock", lambda *a, **k: pytest.fail("retry must not acquire"))
     monkeypatch.setattr("dcdc_bench.job_service._render_process", lambda path: 1)

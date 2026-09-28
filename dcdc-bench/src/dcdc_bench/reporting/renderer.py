@@ -17,16 +17,20 @@ import math
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 # The issued CSV export guards text cells exactly as the analysis export does.
 from ..analysis import _safe_cell
 from .sensor_placement import with_sensor_placement
+from ..resources import children_peak_rss_mib, session_survivors, terminate_group, try_log_event
 
 PROJECT = Path(__file__).resolve().parents[3]
 TEMPLATES = PROJECT / "templates"
@@ -1148,7 +1152,81 @@ def _browser_path() -> str | None:
             or shutil.which("google-chrome"))
 
 
-async def _write_static_figures(model: dict, figures_dir: Path) -> None:
+def _stop_group(child: subprocess.Popen) -> None:
+    """SIGTERM then SIGKILL the child's own session; the child led it (start_new_session)."""
+    for sig, wait_s in ((signal.SIGTERM, 10), (signal.SIGKILL, 10)):
+        try:
+            os.killpg(child.pid, sig)
+        except ProcessLookupError:
+            pass
+        try:
+            child.wait(timeout=wait_s)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+
+
+def _run_tool(command: list[str], *, cwd: Path, timeout_s: float, log_path: Path | None = None, task: str = "tool"):
+    """Run one document tool in its own session; on timeout stop the whole group.
+
+    ``subprocess.run(timeout=...)`` kills only the direct child, which can leave
+    Pandoc/Typst grandchildren running. Every exit path sweeps the session and
+    records peak child RSS so build_manifest.json shows what the tool cost.
+    """
+    started = time.monotonic()
+    usage: dict = {"command": command[:1] + [str(part) for part in command[1:]], "pid": None, "duration_s": None,
+                   "peak_child_rss_mib": None, "survivors": [], "survivors_remaining": [], "timed_out": False, "returncode": None}
+    try_log_event(log_path, task, "start")
+    child = subprocess.Popen(command, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True, start_new_session=True)
+    usage["pid"] = child.pid
+    stdout = stderr = ""
+    try:
+        try:
+            stdout, stderr = child.communicate(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            usage["timed_out"] = True
+            _stop_group(child)
+            try:
+                stdout, stderr = child.communicate(timeout=15)
+            except subprocess.TimeoutExpired:
+                # A grandchild outside the group still holds the pipes: sweep the session.
+                terminate_group(child.pid, grace_s=5.)
+                stdout, stderr = child.communicate(timeout=15)
+    finally:
+        usage["returncode"] = child.returncode
+        usage["duration_s"] = round(time.monotonic() - started, 3)
+        usage["survivors"] = session_survivors(child.pid)
+        if usage["survivors"]:
+            usage["survivors_remaining"] = terminate_group(child.pid, grace_s=5.)["remaining"]
+        usage["peak_child_rss_mib"] = children_peak_rss_mib()
+        try_log_event(log_path, task, "survivors", child_pid=child.pid, count=len(usage["survivors"]), processes=usage["survivors"])
+        try_log_event(log_path, task, "end", child_pid=child.pid, duration_s=usage["duration_s"], returncode=child.returncode,
+                      child_peak_rss_mib=usage["peak_child_rss_mib"], timed_out=usage["timed_out"])
+    return SimpleNamespace(stdout=stdout or "", stderr=stderr or "", returncode=child.returncode, usage=usage)
+
+
+def _browser_pid(browser) -> int | None:
+    """Chromium's group leader. Kaleido subclasses choreographer's ``Browser``, whose
+    ``subprocess`` attribute is the Popen of the browser wrapper started with
+    ``start_new_session=True``; Chromium and its renderers share that group."""
+    pid = getattr(getattr(browser, "subprocess", None), "pid", None)
+    return pid if isinstance(pid, int) and pid > 1 else None
+
+
+def _stop_browser_tree(browser, log_path: Path | None) -> dict | None:
+    pid = _browser_pid(browser)
+    if pid is None:
+        try_log_event(log_path, "static-figures", "survivors", count=None,
+                      note="browser close timed out; pid unavailable, the parent's session sweep applies")
+        return None
+    outcome = terminate_group(pid, grace_s=5.)
+    try_log_event(log_path, "static-figures", "survivors", child_pid=pid, count=len(outcome["found"]),
+                  processes=outcome["found"], remaining=outcome["remaining"], note="browser close timed out")
+    return outcome
+
+
+async def _write_static_figures(model: dict, figures_dir: Path, log_path: Path | None = None) -> None:
     """Use one offline browser/tab and render one image at a time.
 
     Kaleido's batch wrapper schedules every image up front. Avoid that extra
@@ -1191,7 +1269,12 @@ async def _write_static_figures(model: dict, figures_dir: Path) -> None:
                     raise ReportRenderError(f"Static figure renderer produced no output: {path.name}")
             del figure
     finally:
-        await asyncio.wait_for(browser.close(), timeout=STATIC_CLOSE_TIMEOUT_S)
+        try:
+            await asyncio.wait_for(browser.close(), timeout=STATIC_CLOSE_TIMEOUT_S)
+        except TimeoutError:
+            # Kaleido's own kill did not finish: make sure the Chromium tree is gone.
+            _stop_browser_tree(browser, log_path or figures_dir.parent / "resources.jsonl")
+            raise
 
 
 def _static_figures(model: dict, figures_dir: Path, tool_versions: dict | None = None) -> dict:
@@ -1267,6 +1350,10 @@ def _render_report(report_model: dict, out_dir: Path, formats=("html", "pdf")) -
             "report.css": _sha(TEMPLATES / "theme/report.css"),
             "report.js": _sha(TEMPLATES / "web/report.js"),
         }}
+    gate_record = out / "memory_gate.json"
+    if gate_record.is_file():
+        manifest["memory_gate"] = json.loads(gate_record.read_text(encoding="utf-8"))
+    resources_log = out / "resources.jsonl"
     for fmt in requested:
         (out / f"report.{fmt}").unlink(missing_ok=True)
     # A killed render leaves a visible incomplete build instead of an
@@ -1300,7 +1387,13 @@ def _render_report(report_model: dict, out_dir: Path, formats=("html", "pdf")) -
             "startup_timeout_s": STATIC_START_TIMEOUT_S,
             "image_timeout_s": STATIC_IMAGE_TIMEOUT_S,
             "close_timeout_s": STATIC_CLOSE_TIMEOUT_S}
-        manifest["static_cache"] = _static_figures(model, figures_dir, manifest["versions"])
+        static_started = time.monotonic()
+        try_log_event(resources_log, "static-figures", "start")
+        try:
+            manifest["static_cache"] = _static_figures(model, figures_dir, manifest["versions"])
+        finally:
+            try_log_event(resources_log, "static-figures", "end", duration_s=round(time.monotonic() - static_started, 3),
+                          reused=manifest.get("static_cache", {}).get("reused"), child_peak_rss_mib=children_peak_rss_mib())
         for i,spec in enumerate(model["figures"], 1):
             manifest["figures"].append({"id": spec["id"], "number": i,
                 "svg_sha256": _sha(figures_dir / f"{spec['id']}.svg"),
@@ -1339,9 +1432,12 @@ def _render_report(report_model: dict, out_dir: Path, formats=("html", "pdf")) -
             print(f"Building {fmt.upper()} document…", file=sys.stderr, flush=True)
             artifact = out / f"report.{fmt}"
             try:
-                result = subprocess.run([quarto, "render", "report.qmd", "--to", "typst" if fmt == "pdf" else "html"],
-                    cwd=out, capture_output=True, text=True, timeout=DOCUMENT_TIMEOUT_S)
+                result = _run_tool([quarto, "render", "report.qmd", "--to", "typst" if fmt == "pdf" else "html"],
+                    cwd=out, timeout_s=DOCUMENT_TIMEOUT_S, log_path=resources_log, task=f"quarto-{fmt}")
+                manifest.setdefault("resource_usage", {})[fmt] = result.usage
                 (out / f"render-{fmt}.log").write_text(result.stdout + result.stderr, encoding="utf-8")
+                if result.usage.get("timed_out"):
+                    raise subprocess.TimeoutExpired(result.usage.get("command", [quarto]), DOCUMENT_TIMEOUT_S)
                 if result.returncode or not artifact.is_file() or artifact.stat().st_size == 0:
                     raise ReportRenderError((result.stderr or result.stdout)[-3500:] or "No document produced")
                 if fmt == "html":

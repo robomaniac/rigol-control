@@ -49,23 +49,30 @@ def test_html_timeout_still_builds_pdf_and_never_claims_html_success(tmp_path, m
     monkeypatch.setattr(renderer, "_browser_path", lambda: None)
     monkeypatch.setattr(renderer, "_static_figures", lambda *args: {"reused": False})
 
-    def compile(command, **kwargs):
-        if command[-1] == "--version":
-            return SimpleNamespace(stdout="fixture", stderr="", returncode=0)
+    def version(command, **kwargs):
+        assert command[-1] == "--version"
+        return SimpleNamespace(stdout="fixture", stderr="", returncode=0)
+
+    def compile(command, *, cwd, timeout_s, log_path, task):
         fmt = command[-1]
         calls.append(fmt)
         if fmt == "html":
-            (Path(kwargs["cwd"]) / "report.html").write_text("incomplete")
-            raise subprocess.TimeoutExpired(command, 1)
-        (Path(kwargs["cwd"]) / "report.pdf").write_bytes(b"PDF fixture only")
-        return SimpleNamespace(stdout="fixture", stderr="", returncode=0)
+            (Path(cwd) / "report.html").write_text("incomplete")
+            return SimpleNamespace(stdout="", stderr="killed after timeout", returncode=-9,
+                                   usage={"timed_out": True, "survivors": [], "command": command})
+        (Path(cwd) / "report.pdf").write_bytes(b"PDF fixture only")
+        return SimpleNamespace(stdout="fixture", stderr="", returncode=0, usage={"timed_out": False, "survivors": []})
 
-    monkeypatch.setattr(renderer.subprocess, "run", compile)
+    monkeypatch.setattr(renderer.subprocess, "run", version)
+    monkeypatch.setattr(renderer, "_run_tool", compile)
     with pytest.raises(renderer.ReportRenderError, match="html"):
         renderer.render_report(model, tmp_path)
     manifest = json.loads((tmp_path / "build_manifest.json").read_text())
     assert calls == ["html", "typst"]
     assert manifest["artifacts"]["html"]["status"] == "failed"
+    assert "TimeoutExpired" in manifest["artifacts"]["html"]["error"]
     assert manifest["artifacts"]["pdf"]["status"] == "success"
+    assert manifest["resource_usage"]["html"]["timed_out"] is True
+    assert manifest["resource_usage"]["pdf"]["timed_out"] is False
     assert not (tmp_path / "report.html").exists()
     assert (tmp_path / "report.pdf").is_file()

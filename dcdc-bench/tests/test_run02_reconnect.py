@@ -247,9 +247,18 @@ def test_run02_refresh_while_running_reattaches_to_the_single_worker(service, mo
     states, authorized = lifecycle(run_dir)
     assert states[:5] == ARMING_SEQUENCE and len(states) >= events_before and authorized == 1
 
-    # The untouched sequence then finishes on its own, with a single arming.
+    # The untouched sequence then finishes on its own, with a single arming. The
+    # acquisition worker exits with the report queued (drivers leave RAM first);
+    # the UI's periodic dispatcher, called directly here, launches a fresh
+    # report-only worker once nothing is active.
     wait_until(lambda: service.status(job_id)["state"] not in ACTIVE, 60,
                lambda: f"job did not finish: {service.status(job_id)}\n{worker_log()}")
+    queued = JobService(service.root).status(job_id)
+    assert queued["state"] == "report-queued" and queued["pid"] is None and queued["run_dir"] == str(run_dir), queued
+    wait_until(lambda: not worker_pids(job), 10, lambda: f"acquisition worker outlived its queued job: {worker_pids(job)}")
+    assert service.dispatch_reports() == {"job_id": job_id, "state": "queued"}
+    wait_until(lambda: service.status(job_id)["state"] not in ACTIVE, 60,
+               lambda: f"report did not finish: {service.status(job_id)}\n{worker_log()}")
     final = JobService(service.root).status(job_id)
     assert final["state"] == "completed", (final, worker_log())
     assert final["execution_status"] == "completed" and final["run_dir"] == str(run_dir)
@@ -275,7 +284,12 @@ def test_run02_opening_an_old_completed_job_starts_nothing_and_changes_nothing(s
         job_id = service.start(preview["plan_hash"], confirmation={"plan_hash": preview["plan_hash"]})["job_id"]
     job = service._job(job_id)
     monkeypatch.setattr("dcdc_bench.job_service._render_process", lambda path: (write_stub_report(path), 0)[1])
-    worker(job)  # in-process, virtual clock: a finished job on disk without a detached process
+    worker(job)  # in-process, virtual clock: acquisition ends with the report queued, no process left
+    assert service.status(job_id)["state"] == "report-queued"
+    with pytest.MonkeyPatch.context() as launch:  # the dispatcher's launch is replaced by the in-process worker below
+        launch.setattr(service, "_launch", lambda directory, **kwargs: None)
+        assert service.dispatch_reports() == {"job_id": job_id, "state": "queued"}
+    worker(job, report_only=True)  # a finished job on disk without a detached process
     completed = service.status(job_id)
     assert completed["state"] == "completed" and completed["execution_status"] == "completed", completed
     run_dir = Path(completed["run_dir"])
