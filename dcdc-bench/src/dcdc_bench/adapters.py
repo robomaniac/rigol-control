@@ -6,6 +6,8 @@ import math
 import random
 from dataclasses import dataclass
 
+from .domain import LoadCapabilities, SourceCapabilities
+
 MODEL_VERSION = "coupled-dc-1.0"
 MODEL_PARAMETERS = {
     "input_lead_resistance_ohm": 0.2,
@@ -64,6 +66,29 @@ class MockBench:
     def identify(self) -> dict:
         return {"source": "synthetic-source", "load": "synthetic-load",
                 "model_version": MODEL_VERSION, "data_source": "simulated"}
+
+    def source_capabilities(self) -> SourceCapabilities:
+        """The plant's own source limits, labelled synthetic; never a hardware claim."""
+        return SourceCapabilities(
+            instrument_id="synthetic-source", adapter="mock_source",
+            reported_identity=f"synthetic-source {MODEL_VERSION}", capabilities_confirmed=True,
+            max_current_A=float(self.current_limit))
+
+    def load_capabilities(self) -> LoadCapabilities:
+        return LoadCapabilities(
+            instrument_id="synthetic-load", adapter="mock_load",
+            reported_identity=f"synthetic-load {MODEL_VERSION}", capabilities_confirmed=True,
+            mode="CC", min_current_A=0.0, min_voltage_V=float(self.minimum_load_voltage),
+            remote_sense_supported=True)
+
+    def status(self) -> dict:
+        """Switch states and setpoints as last commanded; no plant solution here."""
+        return {"source_output": "ON" if self.source_enabled else "OFF",
+                "load_input": "ON" if self.load_enabled else "OFF",
+                "remote_sense_verified": self.sense_enabled,
+                "source_voltage_setpoint_V": self.source_voltage,
+                "load_current_setpoint_A": self.target_current,
+                "closed": self.closed}
 
     def configure(self, vin: float, iout: float, now: float) -> None:
         if self.source_enabled or self.load_enabled:
