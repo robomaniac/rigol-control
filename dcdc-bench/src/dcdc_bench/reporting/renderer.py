@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import copy
 import asyncio
+import csv
 import hashlib
 import html
 import importlib.metadata
+import io
 import json
 import math
 import os
@@ -18,8 +20,12 @@ import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
+
+# The issued CSV export guards text cells exactly as the analysis export does.
+from ..analysis import _safe_cell
 
 PROJECT = Path(__file__).resolve().parents[3]
 TEMPLATES = PROJECT / "templates"
@@ -78,6 +84,88 @@ def _number(value: Any) -> str:
     if isinstance(value, (float, int)) and not isinstance(value, bool):
         return f"{value:.6g}"
     return str(value)
+
+
+def _finite(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _positive(value: Any) -> float | None:
+    return float(value) if _finite(value) and value > 0 else None
+
+
+def _count_word(count: int) -> str:
+    words = ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine")
+    return words[count] if 0 <= count < len(words) else str(count)
+
+
+def _join(items: list[str]) -> str:
+    if not items:
+        return ""
+    if len(items) == 1:
+        return items[0]
+    return ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def _condition_phrase(condition: dict) -> str:
+    """'24 V' for a condition programmed as requested; 'nominal 36 V' otherwise."""
+    nominal, programmed = condition["nominal_input_V"], condition.get("programmed_input_V")
+    if not _finite(programmed) or programmed == nominal:
+        return f"{nominal:g} V"
+    return f"nominal {nominal:g} V"
+
+
+def _input_conditions(model: dict) -> list[dict]:
+    """Recorded input conditions in the order the analysis compared them.
+
+    Values come from the analysis comparison rows or, failing that, from the
+    sweep's recorded nominal/programmed setpoints. A row without a finite
+    nominal voltage is not described; no condition is assumed from a recipe.
+    """
+    execution = model.get("execution", {})
+    rows = execution.get("voltage_comparison") or []
+    conditions = [{"nominal_input_V": float(row["nominal_input_V"]),
+                   "programmed_input_V": row.get("programmed_input_V"),
+                   "phase_status": row.get("phase_status")}
+                  for row in rows if isinstance(row, dict) and _finite(row.get("nominal_input_V"))]
+    if conditions:
+        return conditions
+    sweep = execution.get("voltage_efficiency_sweep") or {}
+    nominals, programmed = sweep.get("nominal_input_voltages_V"), sweep.get("programmed_input_voltages_V")
+    if isinstance(nominals, list) and nominals and all(_finite(value) for value in nominals):
+        if not (isinstance(programmed, list) and len(programmed) == len(nominals)):
+            programmed = [None] * len(nominals)
+        phases = {phase.get("nominal_input_V"): phase for phase in sweep.get("phases", []) if isinstance(phase, dict)}
+        return [{"nominal_input_V": float(nominal), "programmed_input_V": setpoint,
+                 "phase_status": phases.get(nominal, {}).get("status")}
+                for nominal, setpoint in zip(nominals, programmed)]
+    return []
+
+
+def _source_current_limit(model: dict, method: dict | None) -> float | None:
+    """The recorded supply current setting, or None when no evidence records one."""
+    limit = _positive((method or {}).get("input_current_limit_A"))
+    if limit is None:
+        controls = model.get("bench", {}).get("protective_controls")
+        limit = _positive(controls.get("source_current_limit_A")) if isinstance(controls, dict) else None
+    return limit
+
+
+def _temperature_note(model: dict) -> str | None:
+    """State that temperature was not acquired only when the bindings show none.
+
+    An empty or missing binding table is unknown, not evidence of absence.
+    """
+    bindings = model.get("bench", {}).get("measurements")
+    if not isinstance(bindings, dict) or not bindings:
+        return None
+    for name, binding in bindings.items():
+        unit = str(binding.get("unit", "")) if isinstance(binding, dict) else ""
+        quantity = str(binding.get("quantity", name)) if isinstance(binding, dict) else str(name)
+        if unit.strip().lstrip("°") in ("C", "K") or re.search(r"(?i)temp|_C$", quantity):
+            return None
+    return ("No temperature measurement channel is bound in this bench profile, "
+            "so temperature was not acquired.")
 
 
 def validate_report_model(model: dict) -> dict:
@@ -446,19 +534,42 @@ def _body(model: dict) -> str:
         # Quarto cross-references; numbering follows the issued figure order.
         reference = " See " + ", ".join("@" + fid for fid in figure_ids) + "." if figure_ids else ""
         out += [_md(text) + reference, ""]
+    # Narrative conditions are read from the model; a value the evidence does
+    # not record leaves its sentence out rather than falling back to a recipe.
+    conditions = _input_conditions(model) if voltage_sweep else []
+    prior_conditions = [c for c in conditions if c.get("phase_status") == "previous-attempt-unqualified"]
+    continued_conditions = [c for c in conditions if c.get("phase_status") != "previous-attempt-unqualified"]
+    if prior_input_attempt and not prior_conditions and _finite(prior_input_attempt.get("nominal_input_V")):
+        prior_conditions = [{"nominal_input_V": float(prior_input_attempt["nominal_input_V"]),
+                             "programmed_input_V": None}]
+    prior_phrase = _join([_condition_phrase(c) for c in prior_conditions]) or None
+    continued_phrase = _join([_condition_phrase(c) for c in continued_conditions]) or None
+    source_limit = _source_current_limit(model, voltage_sweep) if voltage_sweep else None
     if voltage_sweep and voltage_comparison:
-        out += ["### Efficiency at each input voltage", "",
-            "Compare the curves at the same 0.5 A requested output load. Each curve can reach a different "
-            "maximum load because the supply is limited to 1 A at its output.", "",
-            _rows_table(["Input condition", "Measured input at 0.5 A", "Efficiency at 0.5 A",
+        loads = {float(row["reference_load_A"]) for row in voltage_comparison
+                 if isinstance(row, dict) and _finite(row.get("reference_load_A"))}
+        reference_load = loads.pop() if len(loads) == 1 else None
+        at_reference = f"at {reference_load:g} A" if reference_load is not None else "at the common load"
+        intro = []
+        if reference_load is not None:
+            intro.append(f"Compare the curves at the same {reference_load:g} A requested output load.")
+        if source_limit is not None:
+            intro.append("Each curve can reach a different maximum load because the supply is limited to "
+                         f"{source_limit:g} A at its output.")
+        out += ["### Efficiency at each input voltage", "", *([" ".join(intro), ""] if intro else []),
+            _rows_table(["Input condition", f"Measured input {at_reference}", f"Efficiency {at_reference}",
                          "Highest qualified load", "Best observed efficiency"],
                         _voltage_comparison_rows(voltage_comparison), layout="voltage-comparison"), "",
             "Only qualified measurements are shown. Best observed efficiency describes the measured grid; "
             "it is not an interpolated optimum. " + ("See @fig-efficiency." if "fig-efficiency" in figure_registry else ""), ""]
         if prior_input_attempt:
-            out += ["The 12 V condition was attempted in an earlier run and produced no qualified efficiency result. "
-                    "It therefore has no efficiency curve. This run continues with 24 V and nominal 36 V. "
-                    "See the [earlier startup observations](#prior-input-attempt).", ""]
+            plural = len(prior_conditions) > 1
+            out += [(f"The {prior_phrase} condition{'s were' if plural else ' was'} attempted in an earlier run "
+                     "and produced no qualified efficiency result. " if prior_phrase else
+                     "An earlier run attempted an input condition and produced no qualified efficiency result. ")
+                    + f"{'They' if plural else 'It'} therefore {'have' if plural else 'has'} no efficiency curve. "
+                    + (f"This run continues with {continued_phrase}. " if continued_phrase else "")
+                    + "See the [earlier startup observations](#prior-input-attempt).", ""]
     if metrics and not (voltage_sweep and voltage_comparison):
         # References below are renderer-owned and target the validated figure registry.
         out += ["| Result | Value | Conditions and evidence |", "| --- | ---: | --- |"]
@@ -555,21 +666,45 @@ def _body(model: dict) -> str:
               "not evaluated"] for name, row in bindings.items()]), ""]
     method = model.get("method")
     if voltage_sweep:
-        out += ["### What this test does", "",
-            ("The comparison covers the requested 12 V, 24 V and nominal 36 V conditions. "
-             "The earlier 12 V startup attempt produced no qualified efficiency result. "
-             "This acquisition continues at 24 V and nominal 36 V. " if prior_input_attempt else
-             "The supply powers the converter input at three conditions: 12 V, 24 V and nominal 36 V. ")
-            + "At each tested input, the electronic load gradually draws more current from the converter's 12 V output. "
-            "Input and output power are measured to show how much reaches the load as useful output power. "
-            "Each input condition has its own color throughout the report.", "",
-            "The supply current limit is 1 A, so the available input power and the maximum reachable output load "
-            "differ between input conditions. A curve stops at the recorded source or measurement boundary. "
-            "Both outputs are switched OFF before changing the input-voltage setting.", "",
-            "The nominal 36 V condition is programmed at 35.8 V to leave margin below the stated 36 V input ceiling. "
-            "The measured input voltage is retained with every point; this is not an exact 36.000 V endpoint test. "
-            "The stated 9–36 V operating range is not fully verified by these three conditions. "
-            "No temperature probe was present.", ""]
+        described = [_condition_phrase(c) for c in conditions]
+        ratings = model.get("dut", {}).get("ratings") or {}
+        nominal_output = _positive(ratings.get("output_voltage_nominal_V"))
+        input_min, input_max = ratings.get("input_voltage_min_V"), ratings.get("input_voltage_max_V")
+        plural = "s" if len(described) != 1 else ""
+        if prior_input_attempt:
+            what = ((f"The comparison covers the requested {_join(described)} condition{plural}. " if described else "")
+                    + (f"The earlier {prior_phrase} startup attempt produced no qualified efficiency result. "
+                       if prior_phrase else "An earlier startup attempt produced no qualified efficiency result. ")
+                    + (f"This acquisition continues at {continued_phrase}. " if continued_phrase else ""))
+        elif described:
+            what = (f"The supply powers the converter input at {_count_word(len(described))} "
+                    f"condition{plural}: {_join(described)}. ")
+        else:
+            what = "The supply powers the converter input at each requested condition. "
+        what += ("At each tested input, the electronic load gradually draws more current from the converter's "
+                 + (f"{nominal_output:g} V output. " if nominal_output else "output. ")
+                 + "Input and output power are measured to show how much reaches the load as useful output power. "
+                 "Each input condition has its own color throughout the report.")
+        boundary_text = ((f"The supply current limit is {source_limit:g} A, so the available input power and the "
+                          "maximum reachable output load differ between input conditions. " if source_limit is not None else "")
+                         + "A curve stops at the recorded source or measurement boundary.")
+        setpoints = []
+        for condition in conditions:
+            nominal, programmed = condition["nominal_input_V"], condition.get("programmed_input_V")
+            if not _finite(programmed) or programmed == nominal:
+                continue
+            sentence = f"The nominal {nominal:g} V condition is programmed at {programmed:g} V"
+            if _finite(input_max) and programmed < input_max <= nominal:
+                sentence += f", {input_max - programmed:.3g} V below the stated {input_max:g} V input ceiling"
+            setpoints.append(sentence + ". The measured input voltage is retained with every point; "
+                             f"this is not an exact {nominal:.3f} V endpoint test.")
+        if described and _finite(input_min) and _finite(input_max):
+            setpoints.append(f"The stated {input_min:g}–{input_max:g} V operating range is not fully verified "
+                             f"by these {_count_word(len(described))} condition{plural}.")
+        if temperature := _temperature_note(model):
+            setpoints.append(temperature)
+        out += ["### What this test does", "", what, "", boundary_text, "",
+                *([" ".join(setpoints), ""] if setpoints else [])]
     if method:
         acquisition = method["declared_acquisition"]
         settling = method["declared_settling"]
@@ -626,15 +761,18 @@ def _body(model: dict) -> str:
                 + "Returning to a lower load lets you compare the output with its earlier reading.", "",
                 _rows_table(["Stage", "Candidate loads" if source_search else "Requested load", "Candidates" if source_search else "Planned bins", "Qualified windows"], stage_rows), ""]
         if source_search:
+            search_limit = _source_current_limit(model, source_search)
             out += ["The output load increases only while measured input current and voltage allow it. "
-                    "The 1 A limit belongs to the supply feeding the converter; output current can be higher. "
-                    "Unused candidates are possible settings that the adaptive search did not request. "
+                    + (f"The {search_limit:g} A limit belongs to the supply feeding the converter; output current can be higher. "
+                       if search_limit is not None else "")
+                    + "Unused candidates are possible settings that the adaptive search did not request. "
                     "A final light-load observation is planned to check the return condition, if the test can continue safely.", ""]
         if has_hold:
             out += ["Each hold bin covers a separate acquisition interval at the same requested load. "
                 "The converter remains loaded between those bins; the test does not repeatedly switch the load off. "
                 "The time plot uses recorded query times, so a long hold occupies real horizontal space.", ""]
-        out += ["No temperature probe was present.", ""]
+        if temperature := _temperature_note(model):
+            out += [temperature, ""]
     # The outcome, shutdown states and evidence note form one PDF block. An
     # individual OFF row must not become the sole content on a later page.
     out += ["```{=typst}", "#block(breakable: false)[", "```", ""]
@@ -707,7 +845,8 @@ def _body(model: dict) -> str:
                 layout="voltage-outcomes"), ""]
     if prior_input_attempt:
         startup = prior_input_attempt.get('last_startup_cycle', {})
-        out += ["### Earlier 12 V startup attempt {#prior-input-attempt}", "",
+        out += [(f"### Earlier {prior_phrase} startup attempt {{#prior-input-attempt}}" if prior_phrase
+                 else "### Earlier startup attempt {#prior-input-attempt}"), "",
             "These readings belong to the last recorded startup cycle of a separate, aborted run. "
             "They are not a settled operating point and do not qualify an efficiency measurement. "
             "They are excluded from the efficiency curves and comparison values.", "",
@@ -748,7 +887,9 @@ def _body(model: dict) -> str:
             "**Method version:** " + _md(model.get("provenance", {}).get("formula_version", "unknown")), "",
             "```{=html}", '<p class="report-footer">Local artifacts: '
             '<a href="report_model.json">report model and embedded evidence</a> · '
-            '<a href="build_manifest.json">build manifest</a> '
+            '<a href="build_manifest.json">build manifest</a> · '
+            '<a href="exports/points.csv">issued point results CSV</a> · '
+            '<a href="exports/points.meta.json">CSV conditions and columns</a> '
             '<span id="canonical-pdf-link"></span></p>', "```", ""]
     return "\n".join(out)
 
@@ -764,6 +905,8 @@ def _compact(value: Any) -> str:
 def _controls_html(model: dict) -> str:
     time_option = ('<option value="elapsed_s">Elapsed time (s)</option>'
                    if any(figure["x_key"] == "elapsed_s" for figure in model["figures"]) else '')
+    temperature = (' Temperatures: not acquired; no temperature channel is bound in this bench profile.'
+                   if _temperature_note(model) else '')
     return ('<div class="exploratory-print">EXPLORATORY CURRENT VIEW — issued findings remain unchanged.</div>'
         '<section class="report-controls" aria-labelledby="controls-title"><h3 id="controls-title">Explore recorded results</h3>'
         f'<div class="identity-strip">{html.escape(_identity(model))} · {html.escape(model["run_id"])} · '
@@ -784,8 +927,152 @@ def _controls_html(model: dict) -> str:
         '<p class="scope-note">Selected-curves CSV includes every point in the chosen traces, before zoom and log display exclusions. '
         'Visible-range CSV uses inclusive current plot bounds and excludes points absent from that view. '
         'Each CSV has a separate metadata JSON download. Nonpositive current is omitted only from log views; '
-        'no-load points remain in the evidence explorer. Temperatures: not acquired in this electrical report.</p>'
+        'no-load points remain in the evidence explorer.' + html.escape(temperature) + '</p>'
         '<p id="report-error" role="alert"></p></section>')
+
+
+# Issued numerical export: the same columns, order and number text as the
+# interactive report's selected-curves CSV, so the two files diff cleanly.
+EXPORT_FIELDS = ("run_id", "analysis_id", "evidence_type", "point_id", "test_id", "vin_target_V",
+                 "programmed_input_V", "input_condition_label", "iout_target_A",
+                 "Vin_V", "Iin_A", "Vout_V", "Iout_A", "Pin_W", "Pout_W", "loss_W",
+                 "efficiency_pct", "vout_error_pct", "qualification", "reason")
+EXPORT_TIMING_FIELDS = ("phase_label", "elapsed_start_s", "elapsed_s", "elapsed_end_s")
+EXPORT_COLUMNS: dict[str, tuple[str, str | None]] = {
+    "run_id": ("Acquisition run identifier", None),
+    "analysis_id": ("Analysis identifier bound to this evidence and formula version", None),
+    "evidence_type": ("Evidence label of the whole run: MEASURED or SYNTHETIC", None),
+    "point_id": ("Requested operating-point identifier", None),
+    "test_id": ("Test definition the point belongs to", None),
+    "vin_target_V": ("Requested (nominal) input voltage", "V"),
+    "programmed_input_V": ("Input voltage actually programmed on the source, when recorded", "V"),
+    "input_condition_label": ("Recorded input-condition label, when recorded", None),
+    "iout_target_A": ("Requested output load current", "A"),
+    "Vin_V": ("Mean input voltage over accepted acquisition cycles", "V"),
+    "Iin_A": ("Mean input current over accepted acquisition cycles", "A"),
+    "Vout_V": ("Mean output voltage over accepted acquisition cycles", "V"),
+    "Iout_A": ("Mean output current over accepted acquisition cycles", "A"),
+    "Pin_W": ("Input power = mean(Vin) × mean(Iin)", "W"),
+    "Pout_W": ("Output power = mean(Vout) × mean(Iout); not evaluated at no load", "W"),
+    "loss_W": ("Path loss = Pin − Pout across the declared boundary", "W"),
+    "efficiency_pct": ("Path efficiency = 100 × Pout / Pin", "%"),
+    "vout_error_pct": ("Output deviation = 100 × (Vout − Vnominal) / Vnominal", "%"),
+    "qualification": ("Point qualification: valid, inconclusive, setup-limited, not-run, …", None),
+    "reason": ("Recorded qualification reason", None),
+    "phase_label": ("Sequence stage label, when the run records stages", None),
+    "elapsed_start_s": ("Start of the accepted query span, relative to the first accepted query", "s"),
+    "elapsed_s": ("Midpoint of the accepted query span", "s"),
+    "elapsed_end_s": ("End of the accepted query span", "s"),
+}
+
+
+def _export_fields(model: dict) -> list[str]:
+    fields = list(EXPORT_FIELDS)
+    if any(figure.get("x_key") == "elapsed_s" for figure in model["figures"]):
+        fields.extend(EXPORT_TIMING_FIELDS)
+    return fields
+
+
+def _csv_number(value: int | float) -> str:
+    """Shortest round-trip decimal text in ECMAScript Number.toString form.
+
+    The interactive report writes numbers through JavaScript. Producing the
+    same text here keeps the issued and exploratory CSV files byte-comparable
+    while retaining full numerical precision.
+    """
+    if isinstance(value, int) or (value.is_integer() and abs(value) < 1e21):
+        return str(int(value))
+    sign, digits, exponent = Decimal(repr(value)).normalize().as_tuple()
+    text = "".join(map(str, digits))
+    k, n = len(digits), exponent + len(digits)
+    if k <= n <= 21:
+        body = text + "0" * (n - k)
+    elif 0 < n <= 21:
+        body = text[:n] + "." + text[n:]
+    elif -6 < n <= 0:
+        body = "0." + "0" * (-n) + text
+    else:
+        body = text[0] + ("." + text[1:] if k > 1 else "") + "e" + ("+" if n - 1 >= 0 else "-") + str(abs(n - 1))
+    return ("-" if sign else "") + body
+
+
+def _csv_cell(value: Any) -> Any:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if _finite(value):
+        return _csv_number(value)
+    return _safe_cell(value)
+
+
+def write_exports(model: dict, out_dir: Path) -> dict[str, dict]:
+    """Write reports/<revision>/exports/: the issued numerical selection.
+
+    points.csv holds every requested operating point of the issued model in
+    report order, with unique unit-bearing column names, empty missing values
+    and run/analysis/point identifiers. points.meta.json describes the
+    columns, recorded conditions and the selection. Text cells are guarded
+    against spreadsheet formula execution without altering stored evidence.
+    """
+    exports = Path(out_dir) / "exports"
+    exports.mkdir(parents=True, exist_ok=True)
+    fields = _export_fields(model)
+    if len(set(fields)) != len(fields) or any(name not in EXPORT_COLUMNS for name in fields):
+        raise ValueError("Export columns must be unique and documented")
+    constants = {"run_id": model["run_id"], "analysis_id": model["analysis_id"],
+                 "evidence_type": model.get("evidence_label")}
+    points = model["points"]
+    handle = io.StringIO(newline="")
+    writer = csv.writer(handle, lineterminator="\r\n")
+    writer.writerow(fields)
+    for point in points:
+        writer.writerow([_csv_cell(constants[key] if key in constants else point.get(key)) for key in fields])
+    csv_path = exports / "points.csv"
+    csv_path.write_text(handle.getvalue(), encoding="utf-8", newline="")
+
+    input_conditions: list[dict] = []
+    for point in points:
+        if not _finite(point.get("vin_target_V")):
+            continue
+        entry = {"vin_target_V": point["vin_target_V"],
+                 "programmed_input_V": point["programmed_input_V"] if _finite(point.get("programmed_input_V")) else None,
+                 "label": point.get("input_condition_label")}
+        if entry not in input_conditions:
+            input_conditions.append(entry)
+    execution = model.get("execution", {})
+    method = execution.get("source_limit_search") or execution.get("voltage_efficiency_sweep") or None
+    metadata = {
+        "schema_version": "1.0", "kind": "canonical-issued-export",
+        "selection": "Canonical issued selection: every requested operating point of the issued report model, "
+                     "in report order, before any reader filter, zoom or log-axis omission. This is the report's "
+                     "default view, not an exploratory reader selection.",
+        "run_id": model["run_id"], "analysis_id": model["analysis_id"],
+        "report_revision": model.get("report_revision"), "evidence_type": model.get("evidence_label"),
+        "dut": _identity(model), "measurement_boundary": model.get("boundary"),
+        "formula_version": model.get("provenance", {}).get("formula_version"),
+        "point_count": len(points),
+        "conditions": {
+            "input_conditions": input_conditions,
+            "requested_loads_A": sorted({float(p["iout_target_A"]) for p in points if _finite(p.get("iout_target_A"))}),
+            "test_ids": list(dict.fromkeys(str(p["test_id"]) for p in points if p.get("test_id") is not None)),
+            "source_current_limit_A": _source_current_limit(model, method) if method else None,
+            "qualification_counts": {label: sum(1 for p in points if p.get("qualification") == label)
+                                     for label in dict.fromkeys(str(p.get("qualification")) for p in points)},
+        },
+        "figure_ids": [figure["id"] for figure in model["figures"]],
+        "columns": [{"name": name, "description": EXPORT_COLUMNS[name][0], "unit": EXPORT_COLUMNS[name][1]}
+                    for name in fields],
+        "csv": {"file": "points.csv", "encoding": "utf-8", "delimiter": ",", "line_terminator": "CRLF",
+                "header_row": 1, "quoting": "RFC 4180; fields containing quotes, commas or line breaks are quoted",
+                "missing_values": "empty field",
+                "numbers": "shortest round-trip decimal text, identical to the interactive report's CSV export",
+                "string_safety": "Text cells beginning with = + - or @ are prefixed with an apostrophe to prevent "
+                                 "spreadsheet formula execution; stored evidence is unchanged",
+                "sha256": _sha(csv_path), "bytes": csv_path.stat().st_size},
+    }
+    meta_path = exports / "points.meta.json"
+    meta_path.write_text(_json(metadata), encoding="utf-8")
+    return {name: {"path": str(path), "sha256": _sha(path), "bytes": path.stat().st_size}
+            for name, path in (("points.csv", csv_path), ("points.meta.json", meta_path))}
 
 
 def _quarto() -> str:
@@ -929,7 +1216,7 @@ def _render_report(report_model: dict, out_dir: Path, formats=("html", "pdf")) -
     manifest: dict = {"schema_version": "1.0", "run_id": model["run_id"],
         "analysis_id": model["analysis_id"], "report_revision": model.get("report_revision"),
         "created_utc": datetime.now(timezone.utc).isoformat(), "requested_formats": list(requested),
-        "status": "building", "artifacts": {}, "figures": [],
+        "status": "building", "artifacts": {}, "figures": [], "exports": {},
         "versions": {name: _version(name) for name in ("plotly", "kaleido", "dcdc-bench")},
         "model_sha256": hashlib.sha256(_json(model).encode()).hexdigest(),
         "template_sha256": _sha(TEMPLATES / "characterization.qmd"),
@@ -944,6 +1231,9 @@ def _render_report(report_model: dict, out_dir: Path, formats=("html", "pdf")) -
     # apparently finished report folder without an outcome record.
     (out / "build_manifest.json").write_text(_json(manifest), encoding="utf-8")
     try:
+        # The numerical export needs no document toolchain; write it first so
+        # a failed document build still leaves the issued selection inspectable.
+        manifest["exports"] = write_exports(model, out)
         from plotly.offline import get_plotlyjs, get_plotlyjs_version
 
         manifest["versions"]["plotly_js"] = get_plotlyjs_version()
