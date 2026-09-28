@@ -199,8 +199,7 @@ hardware execution; configured real jobs use `JobService` through the UI.
 
 ### Current verification record
 
-For the current test totals, see the branch's final verification record; this
-document does not carry a running count. One historical count is retained,
+On 2026-09-28, after the nine parallel increments were merged and their seams settled, the non-browser suite passed **653 tests** with 15 browser/PDF tests deselected (`pytest dcdc-bench/tests -m 'not browser and not pdf'`, Raspberry Pi, 478 s). The 15 deselected gates still need a laptop or CI run. One historical count is retained,
 labeled as such: on 2026-09-27, before this branch's work, the non-browser
 dcdc-bench suite passed 393/393 and the `Software/` (benchctl) suite 435/435.
 Earlier per-selection counts have been removed from this document because

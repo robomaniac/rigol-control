@@ -480,9 +480,7 @@ has its own service, so restarting the interface does not restart a test.
 The mock pipeline imports no real transport and opens no instruments. The
 general `run --mode real` path remains disabled while M2 is incomplete.
 
-The current ordinary suite passed **378 tests**, with 13 browser/PDF tests
-deselected. A subsequent focused UI, job and report regression passed **57 tests**;
-these overlapping counts are not added. The configured real run passed a
+On 2026-09-28 the ordinary suite passed **653 tests**, with 15 browser/PDF tests deselected (Raspberry Pi, 478 s). At an earlier checkpoint it passed 378 tests with 13 deselected, and a focused UI, job and report regression passed 57; overlapping counts are not added. The configured real run passed a
 separate **67-check evidence audit**, and the startup/descent run passed 51 checks.
 See [interface verification](docs/bench-ui-verification.md) for browser coverage
 and the actual UI-callback hardware check.
