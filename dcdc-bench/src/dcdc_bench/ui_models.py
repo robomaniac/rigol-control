@@ -35,8 +35,12 @@ def edited_dut(original: dict, values: dict) -> dict:
                 'output_current_rated_A', 'output_power_rated_W'):
         result['ratings'][key] = float(values[key])
     result['ratings']['verified_from_sample_label'] = bool(values.get('verified_from_sample_label', False))
-    # Profile statements are not a run authorization. The backend binds the
-    # fresh physical confirmation to its validated plan and inventory hashes.
+    # Saved approvals gate whether a real plan can be previewed at all; each Start
+    # additionally binds a fresh physical confirmation to the plan and inventory hashes.
+    approval = result.setdefault('execution_approval', {})
+    for key in ('real_hardware_enabled', 'wiring_and_polarity_confirmed'):
+        if key in values:
+            approval[key] = bool(values[key])
     return result
 
 

@@ -250,6 +250,13 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
             fields['verified_from_sample_label'] = ui.checkbox('I checked these ratings against the sample label',
                 value=data['ratings'].get('verified_from_sample_label', False), on_change=invalidate)
             ui.label('Ratings describe the converter. The bench may reach a smaller load range.').classes('bench-muted')
+            approval = data.get('execution_approval', {})
+            with ui.expansion('Real-hardware approval for this converter profile', icon='verified_user').classes('w-full'):
+                fields['real_hardware_enabled'] = ui.checkbox('This converter profile is approved for real hardware',
+                    value=bool(approval.get('real_hardware_enabled', False)), on_change=invalidate)
+                fields['wiring_and_polarity_confirmed'] = ui.checkbox('The wiring plan and polarity for this converter were reviewed',
+                    value=bool(approval.get('wiring_and_polarity_confirmed', False)), on_change=invalidate)
+                ui.label('Saved approvals are required before a real preview is supported. Each Start still needs a fresh wiring, CH1, protection and serial confirmation.').classes('bench-muted')
 
         def render_bench():
             data = state['profiles']['bench']
@@ -277,6 +284,10 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                                        ('dut_output_overvoltage_V', 'Output overvoltage guard (V)'),
                                        ('output_overcurrent_A', 'Output current guard (A)')]:
                         input_field(key, label, data.get('protective_controls', {}).get(key), fields, number=True)
+                if data['mode'] == 'real':
+                    fields['approved'] = ui.checkbox('These protective limits were reviewed and are approved for this bench',
+                        value=bool(data.get('protective_controls', {}).get('approved', False)), on_change=invalidate)
+                    ui.label('A real run stays blocked until the saved bench limits are approved here and the converter profile is approved for real hardware.').classes('bench-muted')
                 ui.label('Instrument addresses and expected serials come from the local inventory file supplied when starting this UI.').classes('bench-muted')
             for note in data.get('notes', []):
                 ui.label(note).classes('bench-muted')
@@ -330,6 +341,8 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
             bench_fields = values('bench')
             bench['bench_id'] = str(bench_fields.pop('bench_id')).strip()
             bench.setdefault('protective_controls', {})
+            if 'approved' in bench_fields:
+                bench['protective_controls']['approved'] = bool(bench_fields.pop('approved'))
             for key, value in bench_fields.items():
                 bench['protective_controls'][key] = None if value is None else float(value)
             recipe = edited_recipe(state['profiles']['recipe'], values('recipe'), dut_id=dut['profile_id'],

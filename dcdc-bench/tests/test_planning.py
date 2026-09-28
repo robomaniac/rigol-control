@@ -160,7 +160,14 @@ def test_real_execution_never_claimed_ready_and_example_has_no_ratings_for_unkno
     recipe.execution_mode = "real"
     plan = build_plan(dut, bench, recipe)
     assert not any(p.feasible for p in plan.points)
-    assert any(p.status == "approval_blocked" for p in plan.points)
+    blocked = [p for p in plan.points if p.status == "approval_blocked"]
+    assert blocked
+    for field in ("real_hardware_enabled", "wiring_and_polarity_confirmed", "protective_controls.approved"):
+        assert all(f"{field} is false" in p.reason for p in blocked)
+    dut.execution_approval.real_hardware_enabled = dut.execution_approval.wiring_and_polarity_confirmed = True
+    bench.protective_controls.approved = True
+    approved = [p for p in build_plan(dut, bench, recipe).points if p.status == "approval_blocked"]
+    assert approved and all("fresh operator arming" in p.reason and "is false" not in p.reason for p in approved)
     example = load_profile(PROFILES / "bench/rigol.example.yaml", BenchProfile)
     assert example.load.physical_model is None
     assert example.load.max_current_A is None

@@ -12,7 +12,7 @@ from statistics import mean
 
 from .domain import Plan
 from .extended import ExtendedAbort, _run_fixed
-from .planning import _hash_payload, verify_plan_hash
+from .planning import _hash_payload, missing_approvals, verify_plan_hash
 from .source_limit import SourceLimitRigol
 from .storage import atomic_json
 from .voltage_sweep import VoltageSweepProcedure
@@ -28,6 +28,7 @@ def prepare_real_plan(original: Plan) -> tuple[Plan, list[str], float]:
     b, r, d = plan.bench, plan.recipe, plan.dut
     c, errors = b.protective_controls, []
     c.policy_id = d.execution_approval.protective_policy_id = r.authorization.protective_policy_id = POLICY
+    errors += missing_approvals(d, b)
     if b.mode != "real" or r.execution_mode != "real":
         errors.append("This backend requires real bench and recipe profiles")
     if b.source.channel != 1 or b.source.remote_sense_required or b.load.remote_sense_required:

@@ -151,18 +151,33 @@ def test_systemd_launcher_failure_marks_late_worker_cancelled(service, monkeypat
     assert service.status(job_id)["state"] == "cancelled" and not (job / "runs").exists()
 
 
-def test_seeded_real_profile_is_feasible_with_private_inventory(service, monkeypatch, tmp_path):
+def test_seeded_real_profile_requires_saved_approvals_then_is_feasible(service, monkeypatch, tmp_path):
     from test_voltage_sweep import bench
     fake = bench(tmp_path, monkeypatch)
     fake.config.write_text("# fake inventory; parsed through the fixture's config loader\n")
     service.inventory_path = fake.config
-    p = service.preview(service.list_profiles()["dut"][0], "rigol-local-limited", "real-24v-small-grid")
+    dut_name = service.list_profiles()["dut"][0]
+    monkeypatch.setattr("dcdc_bench.job_service.subprocess.Popen", lambda *a, **k: SimpleNamespace(pid=None))
+    p = service.preview(dut_name, "rigol-local-limited", "real-24v-small-grid")
+    assert not p["supported"]
+    assert any("real_hardware_enabled is false" in e for e in p["errors"])
+    assert any("wiring_and_polarity_confirmed is false" in e for e in p["errors"])
+    assert any("protective_controls.approved is false" in e for e in p["errors"])
+    with pytest.raises(ValueError, match="Unsupported plan"):
+        service.start(p["plan_hash"])
+    dut = service.load_profile("dut", dut_name)
+    dut["execution_approval"].update(real_hardware_enabled=True, wiring_and_polarity_confirmed=True)
+    service.save_profile("dut", dut)
+    bench_profile = service.load_profile("bench", "rigol-local-limited")
+    bench_profile["protective_controls"]["approved"] = True
+    service.save_profile("bench", bench_profile)
+    p = service.preview(dut_name, "rigol-local-limited", "real-24v-small-grid")
     assert p["supported"] and p["counts"]["executable"] == 3
     assert p["confirmation_required"] and p["inventory"]["source"]["serial"] == "FAKE-source"
     assert fake.commands == []
-    monkeypatch.setattr("dcdc_bench.job_service.subprocess.Popen", lambda *a, **k: SimpleNamespace(pid=None))
     with pytest.raises(ValueError, match="Confirm"):
         service.start(p["plan_hash"])
+    assert fake.commands == []
 
 
 def test_systemd_launch_preserves_shared_lease_and_render_paths(service, monkeypatch):

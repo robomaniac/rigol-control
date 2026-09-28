@@ -35,6 +35,18 @@ def verify_plan_hash(plan: Plan) -> bool:
     return plan.plan_hash == _hash_payload(plan.model_dump(mode="json", exclude={"plan_hash"}))
 
 
+def missing_approvals(dut: DutProfile, bench: BenchProfile) -> list[str]:
+    """Saved-profile approvals that must all be true before any real arming."""
+    missing = []
+    if not dut.execution_approval.real_hardware_enabled:
+        missing.append("DUT profile execution_approval.real_hardware_enabled is false")
+    if not dut.execution_approval.wiring_and_polarity_confirmed:
+        missing.append("DUT profile execution_approval.wiring_and_polarity_confirmed is false")
+    if not bench.protective_controls.approved:
+        missing.append("bench profile protective_controls.approved is false")
+    return missing
+
+
 def _unsupported_capabilities(dut: DutProfile, bench: BenchProfile, test: TestDefinition) -> list[str]:
     reasons: list[str] = []
     if test.type != "steady_state_load_sweep":
@@ -126,7 +138,9 @@ def _point(dut: DutProfile, bench: BenchProfile, recipe: TestRecipe, test: TestD
                   f"{policy.source_current_budget_fraction:.0%}); request retained without clipping")
     elif recipe.execution_mode == "real":
         status = "approval_blocked"
-        reason = "Real execution is deferred to M2 and requires confirmed identity, protective policy, wiring, and fresh operator arming"
+        missing = missing_approvals(dut, bench)
+        reason = ("Real execution is blocked by saved-profile approvals: " + "; ".join(missing) if missing else
+                  "Real execution requires confirmed identity, protective policy, wiring, and fresh operator arming bound to this plan")
     else:
         status = "executable"
         reason = "Executable with the synthetic bench; feasibility remains a planning assumption"

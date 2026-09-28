@@ -90,6 +90,30 @@ def test_bad_confirmation_never_opens_instruments(tmp_path, monkeypatch, field, 
     assert fake.commands == []
 
 
+def test_unapproved_saved_profiles_never_open_instruments(tmp_path, monkeypatch):
+    from dcdc_bench.extended import _run_fixed
+    fake = bench(tmp_path, monkeypatch)
+    base = extended_plan()
+    base.dut.execution_approval.real_hardware_enabled = False
+    base.bench.protective_controls.approved = False
+    p, errors, _ = prepare_real_plan(build_plan(base.dut, base.bench, base.recipe))
+    assert any("real_hardware_enabled is false" in e for e in errors)
+    assert any("protective_controls.approved is false" in e for e in errors)
+    with pytest.raises(ValueError, match="real_hardware_enabled is false"):
+        run_real(p, fake.config, fake.out, confirmation=confirmed(p))
+    assert fake.commands == []
+
+    class Unapproved:
+        adapter = None
+
+        def plan(self):
+            return p
+
+    with pytest.raises(ExtendedAbort, match="approvals are missing"):
+        _run_fixed(fake.config, fake.out, arm=True, procedure=Unapproved())
+    assert fake.commands == [] and not fake.out.exists()
+
+
 def test_cancel_during_acquisition_preserves_partial_evidence_and_verified_off(tmp_path, monkeypatch):
     fake = bench(tmp_path, monkeypatch)
     p, _, _ = plan()

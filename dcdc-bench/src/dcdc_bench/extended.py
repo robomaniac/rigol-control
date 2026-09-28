@@ -242,6 +242,10 @@ def _run_fixed_unlocked(config_path: Path, out: Path, *, arm: bool = False, proc
     from .runner import _provenance
     plan = extended_plan() if procedure is None else procedure.plan()
     adapter = ExtendedRigol if procedure is None else procedure.adapter
+    from .planning import missing_approvals
+    missing = missing_approvals(plan.dut, plan.bench)
+    if missing:
+        raise ExtendedAbort("Saved-profile approvals are missing; no instrument was opened: " + "; ".join(missing))
     config = load_config(config_path)
     devices = {role: config.devices[name] for role, name in (("source", "psu_rigol_1"), ("load", "load_rigol_1"))}
     if any(not device.expected_serial for device in devices.values()):
