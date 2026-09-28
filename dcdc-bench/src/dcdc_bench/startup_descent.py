@@ -33,8 +33,8 @@ class StartupDescentRigol(SourceLimitRigol):
     def set_live_voltage(self, target):
         """Only the next authorized descending step may change an ON source.
 
-        The general benchctl driver's output-OFF requirement remains unchanged.
-        This fixed experiment explicitly needs a continuously energized DUT.
+        The driver's ordinary set_voltage keeps its output-OFF interlock; the
+        bounded set_voltage_live is its single sanctioned exception.
         """
         if self.voltage not in PROGRAMMED_INPUTS[:-1] or target != PROGRAMMED_INPUTS[PROGRAMMED_INPUTS.index(self.voltage)+1]:
             raise ExtendedAbort("Live voltage change is not the next fixed descending step")
@@ -42,8 +42,11 @@ class StartupDescentRigol(SourceLimitRigol):
             raise ExtendedAbort("Source must be in CV before a live voltage change")
         _number(self.supply.get_current_limit(1), 1., "Live source current limit", .0005)
         _number(self.load.get_current_setpoint(), LOAD_A, "Live load current request", .0005)
-        self._write_source(f":SOUR1:VOLT {target}")
-        _number(self.supply.get_voltage_setpoint(1), target, "Live voltage request")
+        try:
+            self.supply.set_voltage_live(1, target, max_step_v=1.)
+        except (RuntimeError, ValueError) as exc:
+            raise ExtendedAbort(f"Live voltage change refused by the driver: {exc}") from exc
+        self.supply.check_errors()
         self.voltage = target
 
 
