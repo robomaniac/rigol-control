@@ -125,6 +125,11 @@ def run_mock(plan: Plan, out: Path, scenario: str = "normal", real_time: bool = 
         raise ValueError("run_mock accepts mock profiles only; real execution is not implemented")
     if scenario not in SCENARIOS:
         raise ValueError(f"unknown scenario: {scenario}")
+    if any(test.type != "steady_state_load_sweep" for test in plan.recipe.tests):
+        # The generic loop cold-starts every point; a UVLO ramp needs its own
+        # phase-scoped procedure (uvlo.run_uvlo_mock) so off-steps are never
+        # settled and qualified as ordinary operating points.
+        raise ValueError("run_mock executes steady_state_load_sweep tests only; use the test type's own procedure")
     if any(v not in plan.bench.measurements for v in QUANTITIES):
         raise ValueError("mock acquisition requires four declared electrical measurement bindings")
     if plan.bench.source.max_current_A is None:

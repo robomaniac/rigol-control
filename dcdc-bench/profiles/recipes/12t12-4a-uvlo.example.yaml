@@ -1,0 +1,62 @@
+# EXAMPLE UVLO input-ramp recipe (implementation brief 7.5; acceptance RUN-09, DATA-04).
+# Mock execution only. This file ships UNAPPROVED: the planner marks every step
+# approval_blocked until authorization.uvlo_approved is true AND
+# authorization.protective_policy_id names the bench profile's reviewed
+# protective policy (protective_controls.policy_id, with its source current
+# limit, output overvoltage and output overcurrent limits declared).
+# REAL execution additionally needs the saved DUT/bench hardware approvals and
+# a reviewed protective policy for operating below the DUT's stated 9 V
+# minimum; no real UVLO execution context exists in this release.
+#
+# Steps below the DUT's stated minimum input, down to floor_V, are the
+# authorized excursion; steps below floor_V or above the DUT maximum are
+# refused, never clipped. Output-off is an expected, recorded state only for
+# descending steps below expected_off_below_V and ascending steps below
+# expected_on_above_V; elsewhere the normal minimum-output rule applies.
+# Absolute current/voltage limits apply at every step in every phase.
+schema_version: '1.0'
+recipe_id: 12t12-4a-uvlo-example
+dut_profile_id: 12t12-4a
+execution_mode: mock
+tests:
+- id: uvlo-ramp-100mA
+  type: uvlo_input_ramp
+  # Declared ramp: descend from a start inside the normal range to the floor, then ascend.
+  input_voltage_targets_V: [12.0, 11.0, 10.0, 9.5, 9.0, 8.75, 8.5, 8.25, 8.0,
+                            8.25, 8.5, 8.75, 9.0, 9.5, 10.0, 11.0, 12.0]
+  output_current_targets_A: [0.1]        # one fixed light load
+  uvlo:
+    floor_V: 8.0                         # lowest input this recipe may request
+    startup_interval_s: 5.0              # bounded unloaded startup before the first minimum-output check
+    output_on_minimum_V: 10.8            # accepted Vout mean at/above this is "on"
+    output_off_maximum_V: 1.0            # at/below this is "off"; between is "indeterminate"
+    expected_off_below_V: 9.0            # descending: output-off is an expected state below this
+    expected_on_above_V: 10.0            # ascending: output must be on again at/above this
+  derived_results:
+  - uvlo_turn_off_bracket
+  - uvlo_turn_on_bracket
+  - uvlo_hysteresis_bracket
+planning:
+  efficiency_estimate_fraction: 0.8
+  source_current_budget_fraction: 0.9
+  infeasible_point_policy: record_and_skip
+  assumption_status: planning_only_not_measured
+settling:
+  policy: electrical
+  settings_origin: draft_requires_bench_validation
+  minimum_dwell_s: 5.0                   # dwell at each step before acquisition
+  window_s: 5.0
+  minimum_fresh_samples: 5
+  maximum_vout_span_V: 0.05
+  timeout_s: 30.0
+acquisition:
+  duration_s: 5.0
+  target_poll_interval_s: 0.5
+  minimum_complete_cycles: 5
+  maximum_interchannel_skew_s: 0.5
+  settings_origin: draft_requires_driver_timing_validation
+authorization:
+  require_operator_arming: true
+  allow_unattended: false
+  protective_policy_id: null             # name the bench's reviewed protective policy before approving
+  uvlo_approved: false                   # real execution needs a reviewed protective policy; leave false until then

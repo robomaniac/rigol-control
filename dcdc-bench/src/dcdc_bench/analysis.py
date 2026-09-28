@@ -18,7 +18,7 @@ from typing import Any
 
 from pydantic import Field, model_validator
 
-from .domain import AcquisitionPolicy, Contract, Plan, RawSample, SettlingPolicy
+from .domain import UVLO_TEST_TYPE, AcquisitionPolicy, Contract, Plan, RawSample, SettlingPolicy, uvlo_ramp_phases
 from .storage import atomic_json, verify_integrity
 from .uncertainty import DERIVED as UNCERTAINTY_DERIVED, evaluate_run_budget, evaluated_quantity
 
@@ -253,6 +253,66 @@ def transition_bracket(last_on_V: float, first_off_V: float) -> dict[str, Any]:
             "convention": "observed off at lower and on at upper; threshold unresolved within step"}
 
 
+def uvlo_ramp_brackets(steps: list[dict[str, Any]]) -> dict[str, Any]:
+    """Turn-off, turn-on and hysteresis brackets from ordered ramp steps; never an exact threshold.
+
+    ``steps`` are the declared steps in execution order, each with
+    ``ramp_phase`` (``down``/``up``), ``vin_target_V``, ``point_id`` and
+    ``output_state`` (``on``, ``off``, ``indeterminate``, or None when the step
+    has no accepted mean). Descending bracket: last ``on`` step to first
+    ``off`` step. Ascending bracket (from the turnaround): last ``off`` step
+    to first ``on`` step. Hysteresis: the difference of the two brackets,
+    bound by bound. Unqualified or indeterminate steps inside a bracket widen
+    it and are listed; nothing is interpolated. DATA-04 convention.
+    """
+    result: dict[str, Any] = {"turn_off": None, "turn_on": None, "hysteresis": None, "exact_threshold_V": None,
+        "convention": {
+            "turn_off": "descending ramp: output on at the upper bound, off at the lower bound; the threshold lies within that step and is unresolved",
+            "turn_on": "ascending ramp: output off at the lower bound, on at the upper bound; the threshold lies within that step and is unresolved",
+            "hysteresis": "turn-on bracket minus turn-off bracket, bound by bound (lower = turn-on lower − turn-off upper; "
+                          "upper = turn-on upper − turn-off lower); a step-limited interval, not a measured value"},
+        "notes": []}
+    down = [step for step in steps if step["ramp_phase"] == "down"]
+    up = steps[len(down) - 1:] if down else []
+    if not down or len(up) < 2:
+        result["notes"].append("ramp steps do not form a descending and ascending sequence")
+        return result
+    first_off = next((i for i, step in enumerate(down) if step["output_state"] == "off"), None)
+    if first_off is None:
+        result["notes"].append(f"no output-off step was observed on the descending ramp down to "
+                               f"{down[-1]['vin_target_V']:g} V; turn-off is not bracketed")
+    else:
+        last_on = next((i for i in range(first_off - 1, -1, -1) if down[i]["output_state"] == "on"), None)
+        if last_on is None:
+            result["notes"].append("the output was not observed on before its first off step; turn-off is not bracketed")
+        else:
+            result["turn_off"] = {**transition_bracket(down[last_on]["vin_target_V"], down[first_off]["vin_target_V"]),
+                "direction": "descending", "last_on_point_id": down[last_on]["point_id"],
+                "first_off_point_id": down[first_off]["point_id"],
+                "unresolved_steps_inside": [step["point_id"] for step in down[last_on + 1:first_off]]}
+    first_off_up = next((i for i, step in enumerate(up) if step["output_state"] == "off"), None)
+    if first_off_up is None:
+        result["notes"].append("no output-off step at or after the turnaround; turn-on is not bracketed")
+    else:
+        first_on = next((i for i in range(first_off_up + 1, len(up)) if up[i]["output_state"] == "on"), None)
+        if first_on is None:
+            result["notes"].append(f"the output had not returned by the final ascending step "
+                                   f"{up[-1]['vin_target_V']:g} V; turn-on is not bracketed")
+        else:
+            last_off = max(i for i in range(first_off_up, first_on) if up[i]["output_state"] == "off")
+            result["turn_on"] = {**transition_bracket(up[first_on]["vin_target_V"], up[last_off]["vin_target_V"]),
+                "direction": "ascending", "last_off_point_id": up[last_off]["point_id"],
+                "first_on_point_id": up[first_on]["point_id"],
+                "unresolved_steps_inside": [step["point_id"] for step in up[last_off + 1:first_on]]}
+    if result["turn_off"] and result["turn_on"]:
+        off, on = result["turn_off"], result["turn_on"]
+        lower, upper = on["lower_V"] - off["upper_V"], on["upper_V"] - off["lower_V"]
+        result["hysteresis"] = {"lower_V": lower, "upper_V": upper, "exact_V": None}
+        if lower <= 0:
+            result["notes"].append("hysteresis is not resolved by the declared step size (its lower bound is not positive)")
+    return result
+
+
 def _safe_cell(value: Any) -> Any:
     if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@", "\t", "\r")):
         return "'" + value
@@ -289,6 +349,49 @@ def _evidence_label(plan: Plan, run: dict) -> str:
     if source == "measured" and run.get("clock", {}).get("mode") == "virtual":
         raise ValueError("Measured acquisition cannot use a virtual clock")
     return "MEASURED" if source == "measured" else "SYNTHETIC"
+
+
+def _uvlo_analysis(plan: Plan, run: dict, points: list[dict]) -> dict[str, Any]:
+    """Recompute each UVLO step's output state from accepted means; bracket transitions per test.
+
+    Off/indeterminate steps are recorded states, not efficiency points. A
+    non-on state outside the declared expected-off phase is reclassified as
+    inconclusive here regardless of what the worker claimed, and a worker
+    output-state claim that disagrees with the accepted mean is rejected.
+    """
+    outcomes = {p["point_id"]: p for p in run.get("points", [])}
+    by_point = {p["point_id"]: p for p in points}
+    result: dict[str, Any] = {}
+    for test in plan.recipe.tests:
+        if test.type != UVLO_TEST_TYPE or test.uvlo is None:
+            continue
+        phases = uvlo_ramp_phases(test.input_voltage_targets_V)
+        requests = [p for p in plan.points if p.test_id == test.id]
+        if [p.vin_target_V for p in requests] != list(test.input_voltage_targets_V):
+            raise ValueError("UVLO plan points do not match the declared ramp steps")
+        steps = []
+        for request, phase in zip(requests, phases):
+            point = by_point[request.point_id]
+            state = test.uvlo.classify_output(point["Vout_V"]) if point["qualification"] == "valid" else None
+            recorded = outcomes.get(request.point_id, {}).get("output_state")
+            if state is not None and recorded is not None and recorded != state:
+                raise ValueError(f"Worker recorded output state {recorded!r} for {request.point_id}; "
+                                 f"the accepted Vout mean classifies as {state!r}")
+            off_expected = test.uvlo.off_expected(request.vin_target_V, phase)
+            point.update(ramp_phase=phase, output_state=state, output_off_expected=off_expected,
+                         minimum_vout_rule_applied=not off_expected)
+            if state is not None and state != "on":
+                point.update(efficiency_pct=None,
+                             efficiency_reason=f"output {state}: recorded UVLO ramp state, not an efficiency point")
+                point["requirements"].update(output_voltage="not-applicable", efficiency="not-applicable")
+                if not off_expected:
+                    point.update(qualification="inconclusive",
+                                 reason=f"output {state} outside the declared expected-off phase; cause unclassified")
+            steps.append({"point_id": request.point_id, "vin_target_V": request.vin_target_V, "ramp_phase": phase,
+                          "output_state": state, "qualification": point["qualification"]})
+        result[test.id] = {"policy": test.uvlo.model_dump(), "load_A": test.output_current_targets_A[0],
+                           "steps": steps, **uvlo_ramp_brackets(steps)}
+    return result
 
 
 def analyze_evidence(plan: Plan, run: dict, samples: list[dict], *, version: str = FORMULA_VERSION) -> dict:
@@ -360,6 +463,9 @@ def analyze_evidence(plan: Plan, run: dict, samples: list[dict], *, version: str
                        "accepted_cycle_count": len(by_cycle),
                        "accepted_sample_ids": [s["sample_id"] for s in accepted],
                        "acquisition_cycle_ids": sorted(cycles)})
+    # UVLO steps are classified first so expected-off steps carry no efficiency
+    # before the budget is evaluated on the final point set.
+    uvlo = _uvlo_analysis(plan, run, points) if any(t.type == UVLO_TEST_TYPE for t in plan.recipe.tests) else None
     # Structured readback budget (section 9.2). Unknown terms yield not_evaluated
     # reasons, never zeros; the per-point qualification state follows the budget.
     budget = evaluate_run_budget(plan, points, accepted_values, evidence_label=evidence_label,
@@ -372,7 +478,8 @@ def analyze_evidence(plan: Plan, run: dict, samples: list[dict], *, version: str
             "run_id": run["run_id"], "evidence_label": evidence_label,
             "boundary": run.get("measurement_boundary", plan.bench.measurement_boundary),
             "points": points, "coverage": coverage_by_test(points),
-            "uncertainty": budget}
+            "uncertainty": budget,
+            **({"uvlo_input_ramp": uvlo} if uvlo else {})}
 
 
 def _finite_number(value: Any) -> float | None:
@@ -534,6 +641,16 @@ def _report_method(plan: Plan, run: dict, analysis: dict, raw_samples: list[dict
                           "it is a planning assumption, not a measured value.")
         notes.append(assumption + " Measured current controls advancement; it is not an assumed converter efficiency. "
                      "Conditional candidates not commanded by the adaptive search are not failed measurements.")
+    if recorded_method.get("uvlo_input_ramp"):
+        notes.append("Approved UVLO input ramp: the source stays on while the input steps down to the declared floor and back "
+                     f"up at a fixed light load; each step waits the {plan.recipe.settling.minimum_dwell_s:g} s dwell before "
+                     "acquisition. The normal minimum-output and load-established rules apply only where output-off is not "
+                     "expected (descending steps at or above the expected-off boundary, ascending steps at or above the "
+                     "expected-on boundary); elsewhere output-off is recorded, not faulted. Absolute input-current, "
+                     "voltage and output-current limits apply at every step.")
+        if recorded_method["uvlo_input_ramp"].get("synthetic_model"):
+            notes.append("The synthetic plant's UVLO threshold, hysteresis and standby draw are simulation parameters, "
+                         "not characteristics of the DUT.")
     if recorded_method.get("hold_settling"):
         notes.append(str(recorded_method["hold_settling"]) + f". The {plan.recipe.settling.minimum_dwell_s:g} s settling dwell applies to sweep steps; continuous hold bins do not restart it.")
     if recorded_method.get("sustained_load_actual_elapsed_s") is not None:
@@ -777,10 +894,11 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
     search = run.get("method", {}).get("source_limit_search")
     voltage_sweep = run.get("method", {}).get("voltage_efficiency_sweep")
     startup_descent = run.get("method", {}).get("startup_descent")
+    uvlo = analysis.get("uvlo_input_ramp")
     comparison = _voltage_comparison(points, voltage_sweep) if voltage_sweep else []
     if voltage_sweep or startup_descent:
         _accepted_point_times(points, raw_samples)
-    executed = run.get("executed_point_ids") if search or voltage_sweep or startup_descent else None
+    executed = run.get("executed_point_ids") if search or voltage_sweep or startup_descent or uvlo else None
     if executed is not None:
         known_ids = {p["point_id"] for p in points}
         if (not isinstance(executed, list) or any(not isinstance(pid, str) for pid in executed)
@@ -881,6 +999,21 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
             caption=f"{evidence_label}. Qualified input-voltage window means in execution order. "
                 "Time is relative to the first accepted query. "
                 "The source stayed enabled between input settings. The preceding unloaded startup is retained in raw evidence."))
+    if uvlo:
+        for test in plan.recipe.tests:
+            detail = uvlo.get(test.id)
+            if not detail:
+                continue
+            load_mA = detail["load_A"] * 1000
+            figures.append(FigureSpec(id=f"fig-uvlo-{test.id}", title="Output Voltage vs Input Step (UVLO Ramp)",
+                x_key="Vin_V", y_key="Vout_V", x_label="Input Voltage (V)", y_label="Output Voltage (V)",
+                series=[FigureSeries(id=f"uvlo-{test.id}", label=f"{load_mA:g} mA load · declared ramp order",
+                    vin_target_V=None, iout_target_A=detail["load_A"], selection_key=f"uvlo-{test.id}",
+                    point_ids=[step["point_id"] for step in detail["steps"]])],
+                caption=f"{evidence_label}. {boundary}. Accepted DC means at each declared input step in execution order "
+                        f"(descending, then ascending) at a fixed {load_mA:g} mA load. Output-off steps are recorded states "
+                        "under the declared UVLO convention, not faults. Transitions are bracketed between adjacent steps; "
+                        "no exact threshold is claimed."))
     metrics: list[MetricResult] = []
     efficiency = [p for p in valid if p["efficiency_pct"] is not None]
     if efficiency:
@@ -893,6 +1026,8 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
             selector={"point_id": peak["point_id"]}, point_ids=[peak["point_id"]], figure_ids=["fig-efficiency"]))
     nominal = plan.dut.ratings.output_voltage_nominal_V
     for test in plan.recipe.tests:
+        if test.type == UVLO_TEST_TYPE:
+            continue  # a ramp through an expected-off region is not a regulation sweep
         for vin in dict.fromkeys(test.input_voltage_targets_V):
             rows = [p for p in valid if p["test_id"] == test.id and p["vin_target_V"] == vin]
             if len(rows) >= 2 and len({p["iout_target_A"] for p in rows}) >= 2:
@@ -947,6 +1082,21 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
         metric.qualification = f"{observation} observation"
     summary = [f"{len(valid)} of {len(points)} requested operating points produced qualified {observation} DC results."]
     summary_evidence = []
+    if uvlo:
+        for test_id, detail in uvlo.items():
+            off, on, hysteresis = detail["turn_off"], detail["turn_on"], detail["hysteresis"]
+            parts = [f"UVLO input ramp '{test_id}' at {detail['load_A'] * 1000:g} mA:",
+                     (f"turn-off is bracketed between {off['lower_V']:g} and {off['upper_V']:g} V input "
+                      f"(last on at {off['upper_V']:g} V, first off at {off['lower_V']:g} V)." if off else "turn-off was not bracketed."),
+                     (f"Turn-on is bracketed between {on['lower_V']:g} and {on['upper_V']:g} V "
+                      f"(last off at {on['lower_V']:g} V, first on at {on['upper_V']:g} V)." if on else "Turn-on was not bracketed.")]
+            if hysteresis:
+                parts.append(f"Hysteresis lies between {hysteresis['lower_V']:g} and {hysteresis['upper_V']:g} V "
+                             "by the bracket-difference convention.")
+            parts.append("These are step-limited intervals under the declared convention; no exact threshold is claimed.")
+            summary.append(" ".join(parts))
+            for note in detail["notes"]:
+                summary.append(f"UVLO input ramp '{test_id}': {note}.")
     if startup_descent:
         summary.append(f"This run checks continued operation after starting at {start_text}: the source is kept on while "
                        f"input voltage decreases in steps, with a {load_phrase}. It does not test cold start at the lower input voltages.")
@@ -1101,6 +1251,7 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
                    **({"source_limit_search": copy.deepcopy(search)} if search else {}),
                    **({"voltage_efficiency_sweep": copy.deepcopy(voltage_sweep), "voltage_comparison": comparison} if voltage_sweep else {}),
                    **({"startup_descent": copy.deepcopy(startup_descent)} if startup_descent else {}),
+                   **({"uvlo_input_ramp": copy.deepcopy(uvlo)} if uvlo else {}),
                    **({"executed_point_ids": list(executed)} if executed is not None else {})},
         coverage=analysis["coverage"], points=points, metrics=metrics, figures=figures,
         tables=[TableSpec(id="table-points", title="All requested operating points", columns=CSV_FIELDS,
