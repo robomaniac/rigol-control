@@ -1135,6 +1135,31 @@ def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _check_pdf(artifact: Path, model: dict) -> dict:
+    """PDF-02 pagination check of the finished document (see pdf_check)."""
+    from .pdf_check import check_pdf
+    return check_pdf(artifact, model).to_dict()
+
+
+def _record_pdf_check(manifest: dict, artifact: Path, model: dict) -> None:
+    """Record the pagination check; an error finding makes the PDF a validation failure.
+
+    The document is kept for inspection. A crash inside the checker is
+    recorded as a failed check, never as an unverified success.
+    """
+    try:
+        manifest["pdf_check"] = _check_pdf(artifact, model)
+    except Exception as exc:
+        manifest["pdf_check"] = {"schema_version": "1.0", "status": "fail", "path": str(artifact),
+            "findings": [{"code": "checker-error", "severity": "error", "page": None,
+                          "message": f"{type(exc).__name__}: {exc}", "details": {}}], "pages": []}
+    if manifest["pdf_check"].get("status") == "fail":
+        errors = [f for f in manifest["pdf_check"].get("findings", []) if f.get("severity") == "error"]
+        summary = "; ".join((f"p{f['page']}: " if f.get("page") else "") + str(f.get("code")) for f in errors[:8])
+        manifest["artifacts"]["pdf"].update(status="failed-validation",
+            error=f"PDF pagination check (PDF-02) reported {len(errors)} error finding(s): {summary}")
+
+
 def _version(package: str) -> str | None:
     try:
         return importlib.metadata.version(package)
@@ -1447,6 +1472,8 @@ def _render_report(report_model: dict, out_dir: Path, formats=("html", "pdf")) -
                     artifact.write_text(document.replace(runtime_slot, interactions), encoding="utf-8")
                 manifest["artifacts"][fmt] = {"status": "success", "path": str(artifact),
                     "sha256": _sha(artifact), "bytes": artifact.stat().st_size}
+                if fmt == "pdf":
+                    _record_pdf_check(manifest, artifact, model)
             except Exception as exc:
                 message = f"{type(exc).__name__}: {exc}"
                 manifest["artifacts"][fmt] = {"status": "failed", "error": message}
@@ -1459,8 +1486,11 @@ def _render_report(report_model: dict, out_dir: Path, formats=("html", "pdf")) -
     except Exception as exc:
         for fmt in requested:
             manifest["artifacts"].setdefault(fmt, {"status": "failed", "error": f"{type(exc).__name__}: {exc}"})
-    failures = [fmt for fmt in requested if manifest["artifacts"].get(fmt, {}).get("status") != "success"]
-    manifest["status"] = "failed" if failures else "success"
+    statuses = {fmt: manifest["artifacts"].get(fmt, {}).get("status") for fmt in requested}
+    failures = [fmt for fmt, status in statuses.items() if status != "success"]
+    # A document that built but failed its pagination check is kept and named as such.
+    manifest["status"] = ("success" if not failures else "failed-validation"
+                          if all(statuses[fmt] == "failed-validation" for fmt in failures) else "failed")
     (out / "build_manifest.json").write_text(_json(manifest), encoding="utf-8")
     if failures:
         details = "; ".join(f"{fmt}: {manifest['artifacts'].get(fmt,{}).get('error','no output')}" for fmt in failures)
