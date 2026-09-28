@@ -30,3 +30,16 @@ table{font-size:.82rem;width:100%}th{color:#29495d;background:var(--wash);font-w
 @media print{.report-table{overflow:visible}.report-table table{min-width:0}.report-table tr{break-inside:avoid}}
 
 .trace-swatch{position:relative;display:inline-flex;align-items:center;justify-content:center;width:2.1rem;height:1rem;flex-shrink:0}.trace-swatch-line{position:absolute;left:0;right:0;top:50%;border-top:2.5px solid currentColor}.trace-swatch-marker{position:relative;line-height:1;font-size:.85rem}
+
+/* Sensor placement: the frame hugs the photograph so marker positions derived
+   from normalized coordinates track its rendered size; percentages are the
+   no-script fallback and report.js sets pixel positions on load and resize. */
+.sensor-placement{margin:1.25rem 0 .6rem}
+.sensor-image-frame{position:relative;display:inline-block;max-width:100%;line-height:0}
+.sensor-image-frame img.sensor-image{display:block;max-width:100%;height:auto}
+.sensor-marker{position:absolute;transform:translate(-50%,-50%);width:1.55rem;height:1.55rem;padding:0;border-radius:50%;border:2px solid #fff;background:#d55e00;color:#fff;font:700 .72rem/1.3rem system-ui,sans-serif;text-align:center;cursor:pointer;box-shadow:0 0 0 2px #d55e00}
+.sensor-marker[aria-pressed="true"]{background:#15608f;box-shadow:0 0 0 3px #15608f}
+.sensor-marker-label{position:absolute;left:1.35rem;top:-.15rem;white-space:nowrap;background:rgba(255,255,255,.93);color:#183047;padding:.05rem .35rem;border-radius:3px;font:600 .75rem/1.3 system-ui,sans-serif;pointer-events:none}
+.sensor-marker-detail{font-size:.85rem;color:var(--muted);min-height:1.4em}
+.sensor-marker-table tr.selected td,.sensor-marker-table tr.selected th{background:#e8f0f6}
+@media print{.sensor-marker{box-shadow:none}.sensor-placement-block{break-inside:avoid}}

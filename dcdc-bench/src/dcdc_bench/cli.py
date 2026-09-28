@@ -44,6 +44,8 @@ def parser() -> argparse.ArgumentParser:
     command.add_argument("run_dir", type=Path)
     command.add_argument("--formats", type=_formats)
     command.add_argument("--profile", type=Path)
+    command.add_argument("--annotations", type=Path,
+                         help="Sensor placement annotations JSON saved with this new report revision")
     command = sub.add_parser("ui", help="Open the local converter test bench")
     command.add_argument("--root", type=Path, default=Path("dcdc-bench/workspace"))
     command.add_argument("--inventory", type=Path, help="Private benchctl instrument inventory for real tests")
@@ -96,7 +98,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "report":
             profile = load_profile(args.profile, ReportProfile) if args.profile else None
-            print(report_run(args.run_dir, formats=args.formats, profile=profile))
+            annotations = json.loads(args.annotations.read_text(encoding="utf-8")) if args.annotations else None
+            print(report_run(args.run_dir, formats=args.formats, profile=profile, annotations=annotations))
             return 0
         raise ValueError(f"{args.command} is deferred; this increment provides the mock CLI and offline reports")
     except ImportError as exc:
