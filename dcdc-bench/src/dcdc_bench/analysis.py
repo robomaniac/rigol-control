@@ -496,6 +496,8 @@ def _voltage_comparison(points: list[dict], sweep: dict) -> list[dict]:
     """Compare qualified windows at a common requested load; never interpolate."""
     rows = []
     phases = {p["nominal_input_V"]: p for p in sweep.get("phases", [])}
+    # Older sweep records predate the recorded reference load; they were all run at 0.5 A.
+    reference_load = sweep.get("reference_load_A", .5)
     for nominal, programmed in zip(sweep["nominal_input_voltages_V"], sweep["programmed_input_voltages_V"]):
         label = f"{nominal:g} V input" if nominal == programmed else f"{nominal:g} V nominal ({programmed:g} V set)"
         candidates = [p for p in points if p["vin_target_V"] == nominal]
@@ -505,7 +507,7 @@ def _voltage_comparison(points: list[dict], sweep: dict) -> list[dict]:
             point.update(input_condition_label=label, programmed_input_V=programmed,
                          display_label=f"{label} · {current}")
         valid = [p for p in candidates if p["qualification"] == "valid"]
-        reference = [p for p in valid if p["iout_target_A"] == .5]
+        reference = [p for p in valid if p["iout_target_A"] == reference_load]
         # Repeated visits are separate observations, not silently averaged.
         ref = reference[0] if len(reference) == 1 else {}
         efficient = [p for p in valid if p.get("efficiency_pct") is not None]
@@ -513,7 +515,7 @@ def _voltage_comparison(points: list[dict], sweep: dict) -> list[dict]:
         highest = max(valid, key=lambda p: p["Iout_A"]) if valid else {}
         phase = phases.get(nominal, {})
         rows.append(dict(nominal_input_V=nominal, programmed_input_V=programmed, label=label,
-            qualified_points=len(valid), reference_load_A=.5, reference_point_id=ref.get("point_id"),
+            qualified_points=len(valid), reference_load_A=reference_load, reference_point_id=ref.get("point_id"),
             reference_measured_input_V=ref.get("Vin_V"), reference_efficiency_pct=ref.get("efficiency_pct"),
             highest_load_A=highest.get("Iout_A"), highest_load_point_id=highest.get("point_id"),
             peak_efficiency_pct=peak.get("efficiency_pct"), peak_efficiency_current_A=peak.get("Iout_A"),

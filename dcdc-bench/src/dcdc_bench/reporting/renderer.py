@@ -162,7 +162,8 @@ def _temperature_note(model: dict) -> str | None:
     for name, binding in bindings.items():
         unit = str(binding.get("unit", "")) if isinstance(binding, dict) else ""
         quantity = str(binding.get("quantity", name)) if isinstance(binding, dict) else str(name)
-        if unit.strip().lstrip("°") in ("C", "K") or re.search(r"(?i)temp|_C$", quantity):
+        normalized = unit.strip().casefold().replace("℃", "c").replace("°", "").removeprefix("deg").strip()
+        if normalized in ("c", "k") or re.search(r"(?i)temp|_C$", quantity):
             return None
     return ("No temperature measurement channel is bound in this bench profile, "
             "so temperature was not acquired.")
@@ -549,7 +550,7 @@ def _body(model: dict) -> str:
         loads = {float(row["reference_load_A"]) for row in voltage_comparison
                  if isinstance(row, dict) and _finite(row.get("reference_load_A"))}
         reference_load = loads.pop() if len(loads) == 1 else None
-        at_reference = f"at {reference_load:g} A" if reference_load is not None else "at the common load"
+        at_reference = f"at {reference_load:g} A" if reference_load is not None else "at the reference load"
         intro = []
         if reference_load is not None:
             intro.append(f"Compare the curves at the same {reference_load:g} A requested output load.")
@@ -696,8 +697,9 @@ def _body(model: dict) -> str:
             sentence = f"The nominal {nominal:g} V condition is programmed at {programmed:g} V"
             if _finite(input_max) and programmed < input_max <= nominal:
                 sentence += f", {input_max - programmed:.3g} V below the stated {input_max:g} V input ceiling"
+            endpoint = " endpoint" if nominal in (input_min, input_max) else ""
             setpoints.append(sentence + ". The measured input voltage is retained with every point; "
-                             f"this is not an exact {nominal:.3f} V endpoint test.")
+                             f"this is not an exact {nominal:.3f} V{endpoint} test.")
         if described and _finite(input_min) and _finite(input_max):
             setpoints.append(f"The stated {input_min:g}–{input_max:g} V operating range is not fully verified "
                              f"by these {_count_word(len(described))} condition{plural}.")
@@ -1004,6 +1006,12 @@ def _csv_cell(value: Any) -> Any:
     return _safe_cell(value)
 
 
+def _write_atomic(path: Path, text: str) -> None:
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(text, encoding="utf-8", newline="")
+    os.replace(temporary, path)
+
+
 def write_exports(model: dict, out_dir: Path) -> dict[str, dict]:
     """Write reports/<revision>/exports/: the issued numerical selection.
 
@@ -1015,6 +1023,9 @@ def write_exports(model: dict, out_dir: Path) -> dict[str, dict]:
     """
     exports = Path(out_dir) / "exports"
     exports.mkdir(parents=True, exist_ok=True)
+    for stale in exports.iterdir():
+        if stale.is_file():
+            stale.unlink()
     fields = _export_fields(model)
     if len(set(fields)) != len(fields) or any(name not in EXPORT_COLUMNS for name in fields):
         raise ValueError("Export columns must be unique and documented")
@@ -1027,7 +1038,7 @@ def write_exports(model: dict, out_dir: Path) -> dict[str, dict]:
     for point in points:
         writer.writerow([_csv_cell(constants[key] if key in constants else point.get(key)) for key in fields])
     csv_path = exports / "points.csv"
-    csv_path.write_text(handle.getvalue(), encoding="utf-8", newline="")
+    _write_atomic(csv_path, handle.getvalue())
 
     input_conditions: list[dict] = []
     for point in points:
@@ -1070,7 +1081,7 @@ def write_exports(model: dict, out_dir: Path) -> dict[str, dict]:
                 "sha256": _sha(csv_path), "bytes": csv_path.stat().st_size},
     }
     meta_path = exports / "points.meta.json"
-    meta_path.write_text(_json(metadata), encoding="utf-8")
+    _write_atomic(meta_path, _json(metadata))
     return {name: {"path": str(path), "sha256": _sha(path), "bytes": path.stat().st_size}
             for name, path in (("points.csv", csv_path), ("points.meta.json", meta_path))}
 

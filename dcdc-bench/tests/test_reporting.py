@@ -406,7 +406,7 @@ def test_prior_attempt_without_recorded_conditions_names_no_voltage(model):
     assert "### Earlier startup attempt {#prior-input-attempt}" in body
     assert "An earlier run attempted an input condition and produced no qualified efficiency result." in body
     assert "An earlier startup attempt produced no qualified efficiency result." in body
-    assert "| Input condition | Measured input at the common load | Efficiency at the common load |" in body
+    assert "| Input condition | Measured input at the reference load | Efficiency at the reference load |" in body
     for invented in ("The earlier ", "condition was attempted", "continues with", "continues at",
                      "covers the requested", "Earlier 12 V", "24 V", "36 V"):
         assert invented not in body, invented
@@ -458,7 +458,7 @@ def test_voltage_narrative_omits_every_condition_the_model_does_not_record(model
     body = renderer._body(model)
     controls = renderer._controls_html(model)
     assert "### Efficiency at each input voltage" in body
-    assert "| Input condition | Measured input at the common load | Efficiency at the common load |" in body
+    assert "| Input condition | Measured input at the reference load | Efficiency at the reference load |" in body
     assert "The supply powers the converter input at each requested condition." in body
     assert "from the converter's output." in body
     assert "A curve stops at the recorded source or measurement boundary." in body
@@ -594,3 +594,20 @@ def test_render_writes_issued_exports_before_documents_and_records_them(model, t
     assert 'href="exports/points.csv"' in (tmp_path / "report.qmd").read_text()
     exported = list(csv.DictReader(io.StringIO((tmp_path / "exports/points.csv").read_text(encoding="utf-8", newline=""))))
     assert [row["point_id"] for row in exported] == [point["point_id"] for point in model["points"]]
+
+
+REAL_MODELS = sorted((Path(__file__).resolve().parents[1] / "runs").glob("*/*/reports/*/report_model.json"))
+
+
+@pytest.mark.skipif(not REAL_MODELS, reason="no local issued report models (runs/ is not versioned)")
+@pytest.mark.parametrize("model_path", REAL_MODELS, ids=lambda p: f"{p.parents[2].name}/{p.parent.name}")
+def test_issued_real_models_still_render_and_export(model_path, tmp_path):
+    """Every locally issued model must keep rendering from its own fields alone."""
+    issued = json.loads(model_path.read_text(encoding="utf-8"))
+    body = renderer._body(issued)
+    assert isinstance(body, str) and issued["run_id"] in body
+    exports = renderer.write_exports(issued, tmp_path)
+    assert set(exports) == {"points.csv", "points.meta.json"}
+    rows = list(csv.DictReader(io.StringIO((tmp_path / "exports/points.csv").read_text(encoding="utf-8", newline=""))))
+    assert len(rows) == len(issued["points"])
+    assert len(rows[0]) == len(set(rows[0])) if rows else True

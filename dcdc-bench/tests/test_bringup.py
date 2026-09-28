@@ -379,16 +379,19 @@ def test_startup_voltage_guards_abort_before_load_enable_and_preserve_evidence(
     assert run["points"][0]["acquisition_cycle_ids"] == []
     assert run["points"][1]["qualification"] == "not-run"
     assert len(samples) == expected_rows
+    # The recorder replaces time.sleep globally, so subprocess.wait() polling
+    # (git provenance) also lands here as sub-second values; count dwells only.
+    dwells = [seconds for seconds in sleeps if seconds >= 1]
     if output_voltage == 0:
         # Five startup observations may be below nominal. The first subsequent
         # settling observation must enforce the normal lower voltage bound.
         assert [row["phase"] for row in samples] == ["starting"] * 20 + ["settling"] * 4
-        assert sleeps == [1] * 6
+        assert dwells == [1] * 6
     else:
         # An excessive output fails on the first startup observation, without
         # waiting for the complete startup allowance.
         assert all(row["phase"] == "starting" for row in samples)
-        assert sleeps == [1]
+        assert dwells == [1]
     assert all(row["acquisition_settings"]["load_enabled"] is False for row in samples)
     by_quantity = {row["quantity"]: row for row in samples}
     assert by_quantity["Vout_V"]["value"] == output_voltage

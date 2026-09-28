@@ -130,7 +130,7 @@ class VoltageSweepProcedure:
                     "programmed_input_voltages_V": [p["programmed_input_V"] for p in PHASES],
                     "input_current_limit_A": SOURCE_CURRENT_LIMIT, "target_input_current_A": TARGET_INPUT_CURRENT,
                     "headroom_stop_input_current_A": HEADROOM_STOP_CURRENT,
-                    "common_output_loads_A": list(COMMON_LOADS),
+                    "common_output_loads_A": list(COMMON_LOADS), "reference_load_A": .5,
                     "phases": [{**p, "loads_A": list(p["loads_A"]), "status": "not-run", "stop_reason": None,
                         "highest_qualified_point": None, "executed_point_ids": [], "qualified_point_ids": []}
                         for p in PHASES]}}}
