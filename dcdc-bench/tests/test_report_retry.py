@@ -65,6 +65,9 @@ def test_html_timeout_still_builds_pdf_and_never_claims_html_success(tmp_path, m
 
     monkeypatch.setattr(renderer.subprocess, "run", version)
     monkeypatch.setattr(renderer, "_run_tool", compile)
+    # The fixture PDF is not a document; the PDF-02 checker has its own tests.
+    monkeypatch.setattr(renderer, "_check_pdf", lambda artifact, model: {"schema_version": "1.0", "status": "pass",
+                                                                      "findings": [], "pages": []})
     with pytest.raises(renderer.ReportRenderError, match="html"):
         renderer.render_report(model, tmp_path)
     manifest = json.loads((tmp_path / "build_manifest.json").read_text())

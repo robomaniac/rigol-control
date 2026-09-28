@@ -377,6 +377,11 @@ def test_large_evidence_bypasses_document_parser_without_losing_data(model, tmp_
         (directory/'report.html').write_text('<!doctype html><html><body>' + slot + '</body></html>')
         return SimpleNamespace(stdout='fixture conversion', stderr='', returncode=0)
     monkeypatch.setattr(renderer.subprocess, "run", document_fixture)
+    def tool_fixture(command, **kwargs):
+        result = document_fixture(command, cwd=kwargs["cwd"])
+        result.usage = {"timed_out": False, "survivors": [], "command": command}
+        return result
+    monkeypatch.setattr(renderer, "_run_tool", tool_fixture)
     result = render_report(model, tmp_path, formats=('html',))
     document = (tmp_path/'report.html').read_text()
     assert result['status'] == 'success'
@@ -582,6 +587,11 @@ def test_render_writes_issued_exports_before_documents_and_records_them(model, t
                                                + (directory / "interactions.html").read_text() + "</body></html>")
         return SimpleNamespace(stdout="", stderr="", returncode=0)
     monkeypatch.setattr(renderer.subprocess, "run", document_fixture)
+    def tool_fixture(command, **kwargs):
+        result = document_fixture(command, cwd=kwargs["cwd"])
+        result.usage = {"timed_out": False, "survivors": [], "command": command}
+        return result
+    monkeypatch.setattr(renderer, "_run_tool", tool_fixture)
     manifest = render_report(model, tmp_path, formats=("html",))
     assert manifest["status"] == "success"
     assert set(manifest["exports"]) == {"points.csv", "points.meta.json"}

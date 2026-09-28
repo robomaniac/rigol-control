@@ -334,6 +334,11 @@ def _stub_document_toolchain(monkeypatch, renderer):
         (Path(kwargs["cwd"]) / "report.pdf").write_bytes(b"%PDF-1.7 unit-test fixture")
         return SimpleNamespace(stdout="", stderr="", returncode=0)
     monkeypatch.setattr(renderer.subprocess, "run", document_fixture)
+    def tool_fixture(command, **kwargs):
+        result = document_fixture(command, cwd=kwargs["cwd"])
+        result.usage = {"timed_out": False, "survivors": [], "command": command}
+        return result
+    monkeypatch.setattr(renderer, "_run_tool", tool_fixture)
 
 
 def test_renderer_records_the_check_and_fails_validation_while_keeping_the_pdf(model, tmp_path, monkeypatch):

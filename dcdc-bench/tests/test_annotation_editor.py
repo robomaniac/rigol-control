@@ -106,7 +106,9 @@ def test_upload_validate_and_save_flow_through_the_job_service(service, monkeypa
     launched = []
     monkeypatch.setattr(service, "_launch", lambda directory, **kwargs: launched.append(kwargs))
     result = service.retry_report(job_id, document)
-    assert result["state"] == "queued" and launched == [{"report_only": True}]
+    # A retry is queued, never launched from the request path; the dispatcher launches it when idle.
+    assert result["state"] == "report-queued" and launched == []
+    assert service.dispatch_reports() == {"job_id": job_id, "state": "queued"} and launched == [{"report_only": True}]
     request = job / "annotations.request.json"
     assert json.loads(request.read_text()) == document
     rendered = []
@@ -325,5 +327,7 @@ def test_editor_page_drives_select_upload_place_nudge_and_save_without_a_server(
         {"sensor_id": "S1", "x_norm": 0.3, "y_norm": 0.5, "label": ""},
         {"sensor_id": "S2", "x_norm": 0.88, "y_norm": 0.105, "label": "Ambient <reference>"}]
     assert ui.notifications[-1][1] == "positive" and "no acquisition" in ui.notifications[-1][0]
+    assert service.status(job_id)["state"] == "report-queued"
+    service.dispatch_reports()
     assert service.status(job_id)["state"] == "queued" and service.status(job_id).get("action") == "report-only"
     verify_integrity(path)

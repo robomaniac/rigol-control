@@ -233,6 +233,11 @@ def _stub_document_tools(monkeypatch, seen):
                                                + (directory / "interactions.html").read_text() + "</body></html>")
         return SimpleNamespace(stdout="", stderr="", returncode=0)
     monkeypatch.setattr(renderer.subprocess, "run", document_fixture)
+    def tool_fixture(command, **kwargs):
+        result = document_fixture(command, cwd=kwargs["cwd"])
+        result.usage = {"timed_out": False, "survivors": [], "command": command}
+        return result
+    monkeypatch.setattr(renderer, "_run_tool", tool_fixture)
 
 
 def test_render_report_adds_the_section_only_for_revisions_with_markers_and_fails_on_hash_mismatch(model, finalized, monkeypatch):

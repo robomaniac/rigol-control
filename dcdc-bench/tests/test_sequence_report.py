@@ -178,12 +178,15 @@ def test_phase_filters_and_colors_stay_distinct_at_same_input_voltage(sequence):
         "Increasing demand · 24 V", "Sustained load · 24 V", "Decreasing demand · 24 V"]
     efficiency = next(spec for spec in model["figures"] if spec["id"] == "fig-efficiency")
     plot = _plot_figure(model, efficiency, 2)
-    assert plot.data[1].mode == "markers"
+    # Uncertainty band traces (showlegend False) may precede the series traces; select by identity.
+    sustained = next(t for t in plot.data if t.name == "Sustained load · 24 V" and t.showlegend is not False)
+    assert sustained.mode == "markers"
     hold = next(spec for spec in model["figures"] if spec["id"] == "fig-hold-voltage")
     hold_plot = _plot_figure(model, hold, 5)
-    assert hold_plot.data[0].line.color == plot.data[1].line.color
-    assert hold_plot.data[0].mode == "lines+markers"
-    assert list(hold_plot.data[0].x) == pytest.approx([44.5175, 64.5175])
+    hold_main = next(t for t in hold_plot.data if t.showlegend is not False)
+    assert hold_main.line.color == sustained.line.color
+    assert hold_main.mode == "lines+markers"
+    assert list(hold_main.x) == pytest.approx([44.5175, 64.5175])
 
 
 def _transition_traces(plot):

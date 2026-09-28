@@ -217,7 +217,8 @@ def test_run02_refresh_while_running_reattaches_to_the_single_worker(service, mo
     assert runs_before == [run_dir.name]
     pinned = {name: hashlib.sha256((job / name).read_bytes()).hexdigest() for name in ("plan.json", "request.json", "launch.json")}
     events_before = len(lifecycle(run_dir)[0])
-    forbid_new_owners(monkeypatch)
+    guard = pytest.MonkeyPatch()
+    forbid_new_owners(guard)
 
     # Refresh #1: the same UI server gets a new client (F5).
     # Refresh #2: the UI process itself restarts on the same workspace.
@@ -256,6 +257,7 @@ def test_run02_refresh_while_running_reattaches_to_the_single_worker(service, mo
     queued = JobService(service.root).status(job_id)
     assert queued["state"] == "report-queued" and queued["pid"] is None and queued["run_dir"] == str(run_dir), queued
     wait_until(lambda: not worker_pids(job), 10, lambda: f"acquisition worker outlived its queued job: {worker_pids(job)}")
+    guard.undo()  # the dispatcher is the one place a report-only worker may be launched
     assert service.dispatch_reports() == {"job_id": job_id, "state": "queued"}
     wait_until(lambda: service.status(job_id)["state"] not in ACTIVE, 60,
                lambda: f"report did not finish: {service.status(job_id)}\n{worker_log()}")

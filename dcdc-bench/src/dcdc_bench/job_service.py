@@ -34,6 +34,7 @@ ACTIVE = {"queued", "acquiring", "reporting"}
 # Pending, not active: measurements are saved and verified OFF, the render is
 # not yet dispatched. Acquisition may start while such jobs wait.
 REPORT_QUEUED = "report-queued"
+LAUNCH_GRACE_S = 5  # a launched worker may not have exec'd yet; see status()
 DEFERRAL_LOG_INTERVAL_S = 60
 
 
@@ -60,6 +61,15 @@ def _inside(root, path):
     if not path.is_relative_to(root):
         raise ValueError("Path escapes the local workspace")
     return path
+
+
+def _pid_starting(pid):
+    """True while the process exists and is running or sleeping (not a zombie or exited)."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+        return stat.rsplit(")", 1)[1].split()[0] not in ("Z", "X", "x")
+    except (OSError, IndexError):
+        return False
 
 
 def _pid_matches(pid, job):
@@ -463,7 +473,16 @@ class JobService:
                 value["report_artifacts"]["model"] = {
                     "status": "success" if (report / "report_model.json").is_file() else "missing"}
         if value["state"] in ACTIVE and value.get("pid") and not _pid_matches(value["pid"], job):
-            value.update(state="failed", error="Worker exited unexpectedly; inspect shutdown evidence before another real run")
+            # Between fork and exec the child's command line is still the launcher's;
+            # a launch younger than the grace window is starting, not dead.
+            requested = launch.get("requested_utc")
+            try:
+                launch_age_s = (datetime.now(timezone.utc) - datetime.fromisoformat(requested)).total_seconds() if requested else None
+            except (TypeError, ValueError):
+                launch_age_s = None
+            starting = launch_age_s is not None and launch_age_s <= LAUNCH_GRACE_S and _pid_starting(value["pid"])
+            if not starting:
+                value.update(state="failed", error="Worker exited unexpectedly; inspect shutdown evidence before another real run")
         elif value["state"] == "queued" and launch.get("requested_utc"):
             if (datetime.now(timezone.utc)-datetime.fromisoformat(launch["requested_utc"])).total_seconds() > 120:
                 value.update(state="failed", error="Worker launch expired before acquisition; no automatic restart")

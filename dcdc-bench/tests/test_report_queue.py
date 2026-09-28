@@ -248,7 +248,7 @@ def test_retry_queues_instead_of_refusing_and_acquisition_keeps_priority(service
 # (e) the report process session is swept on the normal path -------------------------------------
 
 def test_render_process_sweeps_survivors_of_the_report_session(tmp_path, monkeypatch):
-    monkeypatch.setattr("dcdc_bench.job_service._report_command", lambda path: ["sh", "-c", "sleep 300 & exit 0"])
+    monkeypatch.setattr("dcdc_bench.job_service._report_command", lambda path, annotations=None: ["sh", "-c", "sleep 300 & exit 0"])
     log = tmp_path / "resources.jsonl"
     assert _render_process(tmp_path, log_path=log) == 0
     events = lines(log)
@@ -270,7 +270,7 @@ def test_render_process_logs_into_the_job_directory_by_default(tmp_path, monkeyp
     run_dir = job / "runs" / "run-1"
     run_dir.mkdir(parents=True)
     atomic_json(job / "job.json", {"job_id": "job-1"})
-    monkeypatch.setattr("dcdc_bench.job_service._report_command", lambda path: ["true"])
+    monkeypatch.setattr("dcdc_bench.job_service._report_command", lambda path, annotations=None: ["true"])
     assert _render_process(run_dir) == 0
     events = lines(job / "resources.jsonl")
     assert [e["phase"] for e in events] == ["start", "survivors", "end"] and events[1]["count"] == 0
