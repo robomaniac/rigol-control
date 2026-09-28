@@ -1,5 +1,8 @@
 """Rendering validates references, preserves analysis, and reports failures honestly."""
 import copy
+import csv
+import hashlib
+import io
 import json
 from pathlib import Path
 
@@ -233,27 +236,40 @@ def test_missing_or_invalid_reference_does_not_invent_nominal_or_limit(model, va
 def test_voltage_comparison_uses_supplied_values_and_discloses_unreached_conditions(model):
     model["points"].append({"point_id": "unused", "test_id": "load", "vin_target_V": 35.8,
         "iout_target_A": 2., "qualification": "not-run", "reason": "boundary reached"})
+    model["dut"]["ratings"] = {"input_voltage_min_V": 9., "input_voltage_max_V": 36., "output_voltage_nominal_V": 12.}
     model["execution"] = {
         "voltage_efficiency_sweep": {"input_current_limit_A": 1.},
         "executed_point_ids": ["p1", "p2", "p3"],
         "voltage_comparison": [
-            {"label": "12 V input", "reference_measured_input_V": 12.00234,
+            {"label": "12 V input", "nominal_input_V": 12., "programmed_input_V": 12., "reference_load_A": .5,
+             "reference_measured_input_V": 12.00234,
              "reference_efficiency_pct": 83.45678, "highest_load_A": .797123,
              "peak_efficiency_pct": 84.67891, "peak_efficiency_current_A": .69932,
              "qualified_points": 7, "phase_status": "completed", "stop_reason": "source headroom boundary"},
-            {"label": "36 V nominal (35.8 V set)", "nominal_input_V": 36.,
-             "qualified_points": 0, "phase_status": "not-run", "stop_reason": "earlier phase fault"},
+            {"label": "24 V input", "nominal_input_V": 24., "programmed_input_V": 24., "reference_load_A": .5,
+             "qualified_points": 0, "phase_status": "not-run", "stop_reason": "not started"},
+            {"label": "36 V nominal (35.8 V set)", "nominal_input_V": 36., "programmed_input_V": 35.8,
+             "reference_load_A": .5, "qualified_points": 0, "phase_status": "not-run",
+             "stop_reason": "earlier phase fault"},
         ]}
     before = copy.deepcopy(model)
     body = renderer._body(model)
     assert "| 12 V input | 12.002 V | 83.46 % | 0.797 A | 84.68 % at 0.70 A |" in body
     assert "| 36 V nominal (35.8 V set) | not available | not available | not available | not available |" in body
     assert "same 0.5 A requested output load" in body
+    assert "| Input condition | Measured input at 0.5 A | Efficiency at 0.5 A |" in body
+    assert "supply is limited to 1 A at its output" in body
     assert "Highest qualified load" in body and "Highest tested load" not in body
     assert "See @fig-efficiency." in body
-    assert "Both outputs are switched OFF before changing" in body
+    assert "The supply powers the converter input at three conditions: 12 V, 24 V and nominal 36 V." in body
+    assert "from the converter's 12 V output" in body
+    assert "The supply current limit is 1 A, so" in body
+    assert "programmed at 35.8 V, 0.2 V below the stated 36 V input ceiling" in body
     assert "not an exact 36.000 V endpoint test" in body
-    assert "not fully verified by these three conditions" in body
+    assert "The stated 9–36 V operating range is not fully verified by these three conditions." in body
+    # No run evidence records the outputs being switched between conditions;
+    # the renderer must not assert it on the recipe's behalf.
+    assert "switched OFF" not in body
     assert "1 declared load conditions were not reached" in body
     assert "earlier phase fault" in body and "source headroom boundary" in body
     assert "coarse stepping" not in body
@@ -267,11 +283,20 @@ def test_prior_startup_failure_is_separate_from_current_efficiency_evidence(mode
     model["execution"] = {"voltage_efficiency_sweep": {"prior_input_attempt": {
         "run_id": "earlier-aborted-run", "reason": "source current limit during startup",
         "last_startup_cycle": {"Vin_V": 7.125, "Iin_A": .9991, "Vout_V": .1, "Iout_A": .02}}},
-        "voltage_comparison": [{"label": "12 V input", "qualified_points": 0,
-                                "phase_status": "previous-attempt-unqualified"}]}
+        "voltage_comparison": [
+            {"label": "12 V input", "nominal_input_V": 12., "programmed_input_V": 12., "qualified_points": 0,
+             "phase_status": "previous-attempt-unqualified"},
+            {"label": "24 V input", "nominal_input_V": 24., "programmed_input_V": 24., "qualified_points": 0,
+             "phase_status": "not-run"},
+            {"label": "36 V nominal (35.8 V set)", "nominal_input_V": 36., "programmed_input_V": 35.8,
+             "qualified_points": 0, "phase_status": "not-run"}]}
     before = copy.deepcopy(model)
     body = renderer._body(model)
+    assert "The 12 V condition was attempted in an earlier run" in body
     assert "It therefore has no efficiency curve" in body
+    assert "This run continues with 24 V and nominal 36 V." in body
+    assert "The comparison covers the requested 12 V, 24 V and nominal 36 V conditions." in body
+    assert "The earlier 12 V startup attempt produced no qualified efficiency result." in body
     assert "This acquisition continues at 24 V and nominal 36 V" in body
     assert "Earlier 12 V startup attempt {#prior-input-attempt}" in body
     assert "not a settled operating point" in body
@@ -350,3 +375,205 @@ def test_large_evidence_bypasses_document_parser_without_losing_data(model, tmp_
     assert encoded_style == {"color": static_trace.line.color, "dash": static_trace.line.dash,
                              "symbol": static_trace.marker.symbol}
     assert '</script>RAW-EVIDENCE' not in document
+
+
+def test_prior_attempt_without_recorded_conditions_names_no_voltage(model):
+    """Absent evidence leaves the sentence out; it never falls back to a recipe."""
+    model["execution"] = {"voltage_efficiency_sweep": {"prior_input_attempt": {
+        "run_id": "earlier-aborted-run",
+        "last_startup_cycle": {"Vin_V": 7.125, "Iin_A": .9991, "Vout_V": .1, "Iout_A": .02}}},
+        "voltage_comparison": [{"label": "earlier input", "qualified_points": 0,
+                                "phase_status": "previous-attempt-unqualified"}]}
+    before = copy.deepcopy(model)
+    body = renderer._body(model)
+    assert "### Earlier startup attempt {#prior-input-attempt}" in body
+    assert "An earlier run attempted an input condition and produced no qualified efficiency result." in body
+    assert "An earlier startup attempt produced no qualified efficiency result." in body
+    assert "| Input condition | Measured input at the common load | Efficiency at the common load |" in body
+    for invented in ("The earlier ", "condition was attempted", "continues with", "continues at",
+                     "covers the requested", "Earlier 12 V", "24 V", "36 V"):
+        assert invented not in body, invented
+    assert model == before
+
+
+def test_voltage_narrative_follows_recorded_conditions_not_recipe_literals(model):
+    """A 2 A supply with 18 V / near-28 V inputs must not tell the 1 A, 12/24/36 V story."""
+    for point, vin in zip(model["points"], (18., 18., 28.)):
+        point["vin_target_V"] = vin
+    model["figures"][0]["series"] = [
+        {"id": "vin-18", "label": "18 V input", "vin_target_V": 18., "point_ids": ["p1", "p2"]},
+        {"id": "vin-28", "label": "28 V nominal (27.8 V set)", "vin_target_V": 28., "point_ids": ["p3"]}]
+    model["dut"]["ratings"] = {"input_voltage_min_V": 9., "input_voltage_max_V": 28., "output_voltage_nominal_V": 5.}
+    model["bench"] = {"protective_controls": {"source_current_limit_A": 2.}, "measurements": {
+        name: {"instrument_id": "x", "quantity": name, "unit": name[-1], "location": "bench"}
+        for name in ("Vin_V", "Iin_A", "Vout_V", "Iout_A")}}
+    model["execution"] = {"voltage_efficiency_sweep": {"input_current_limit_A": 2.},
+        "voltage_comparison": [
+            {"label": "18 V input", "nominal_input_V": 18., "programmed_input_V": 18., "reference_load_A": .25,
+             "qualified_points": 2, "phase_status": "completed", "stop_reason": "grid completed"},
+            {"label": "28 V nominal (27.8 V set)", "nominal_input_V": 28., "programmed_input_V": 27.8,
+             "reference_load_A": .25, "qualified_points": 1, "phase_status": "completed",
+             "stop_reason": "grid completed"}]}
+    before = copy.deepcopy(model)
+    body = renderer._body(model)
+    assert "Compare the curves at the same 0.25 A requested output load." in body
+    assert "supply is limited to 2 A at its output" in body
+    assert "| Input condition | Measured input at 0.25 A | Efficiency at 0.25 A |" in body
+    assert "The supply powers the converter input at two conditions: 18 V and nominal 28 V." in body
+    assert "from the converter's 5 V output" in body
+    assert "The supply current limit is 2 A, so" in body
+    assert "The nominal 28 V condition is programmed at 27.8 V, 0.2 V below the stated 28 V input ceiling." in body
+    assert "not an exact 28.000 V endpoint test" in body
+    assert "The stated 9–28 V operating range is not fully verified by these two conditions." in body
+    assert "No temperature measurement channel is bound in this bench profile" in body
+    for literal in ("0.5 A requested", "limited to 1 A", "current limit is 1 A", "35.8 V", "36.000 V",
+                    "12 V, 24 V and nominal 36 V", "three conditions", "12 V output", "switched OFF",
+                    "temperature probe"):
+        assert literal not in body, literal
+    assert model == before
+
+
+def test_voltage_narrative_omits_every_condition_the_model_does_not_record(model):
+    model["execution"] = {"voltage_efficiency_sweep": {"target_input_current_A": .98},
+        "voltage_comparison": [{"label": "first input", "qualified_points": 1, "phase_status": "completed"},
+                               {"label": "second input", "qualified_points": 1, "phase_status": "completed"}]}
+    before = copy.deepcopy(model)
+    body = renderer._body(model)
+    controls = renderer._controls_html(model)
+    assert "### Efficiency at each input voltage" in body
+    assert "| Input condition | Measured input at the common load | Efficiency at the common load |" in body
+    assert "The supply powers the converter input at each requested condition." in body
+    assert "from the converter's output." in body
+    assert "A curve stops at the recorded source or measurement boundary." in body
+    for absent in ("requested output load", "supply is limited to", "supply current limit is", "programmed at",
+                   "endpoint test", "operating range is not fully verified", "temperature was not acquired",
+                   "temperature probe", "switched OFF", "converter input at one", "converter input at two",
+                   "converter input at three", "V input ceiling"):
+        assert absent not in body, absent
+    assert "Temperatures" not in controls
+    assert model == before
+
+
+@pytest.mark.parametrize("bindings,expected", [
+    ({"Vin_V": {"unit": "V", "quantity": "Vin_V"}, "Iout_A": {"unit": "A", "quantity": "Iout_A"}}, True),
+    ({"Vin_V": {"unit": "V", "quantity": "Vin_V"}, "Tcase_C": {"unit": "°C", "quantity": "Tcase_C"}}, False),
+    ({"Vin_V": {"unit": "V", "quantity": "Vin_V"}, "board": {"unit": "C", "quantity": "board_temperature"}}, False),
+    ({}, False),
+    (None, False),
+])
+def test_temperature_absence_is_stated_only_when_bindings_show_no_temperature_channel(model, bindings, expected):
+    for point in model["points"]:
+        point["phase_label"] = "Increasing demand"
+    if bindings is not None:
+        model["bench"] = {"measurements": bindings}
+    body = renderer._body(model)
+    controls = renderer._controls_html(model)
+    assert ("temperature was not acquired" in body) is expected
+    assert ("Temperatures: not acquired; no temperature channel is bound" in controls) is expected
+    assert "temperature probe" not in body
+
+
+@pytest.mark.parametrize("limit", [2., None])
+def test_adaptive_search_limit_sentence_uses_recorded_setting_or_is_omitted(model, limit):
+    for point in model["points"]:
+        point["phase_label"] = "Increasing demand"
+    model["execution"] = {"source_limit_search": {"target_input_current_A": 1.96,
+                                                  **({"input_current_limit_A": limit} if limit else {})},
+                          "executed_point_ids": ["p1", "p2", "p3"]}
+    body = renderer._body(model)
+    assert ("limit belongs to the supply feeding the converter" in body) is (limit is not None)
+    assert ("The 2 A limit belongs to the supply" in body) is (limit is not None)
+    assert "The 1 A limit" not in body
+
+
+def test_issued_exports_match_model_points_with_unique_unit_headers_and_empty_missing_values(model, tmp_path):
+    model["points"][0].update(programmed_input_V=12., input_condition_label='12 V input, "set"',
+                              reason="=SUM(A1) offset")
+    model["points"][1].update(Vin_V=12.0, Iin_A=1e-05, Pin_W=None)
+    model["provenance"] = {"formula_version": "settled-dc-1.1"}
+    before = copy.deepcopy(model)
+    recorded = renderer.write_exports(model, tmp_path)
+    csv_path, meta_path = tmp_path / "exports/points.csv", tmp_path / "exports/points.meta.json"
+    assert set(recorded) == {"points.csv", "points.meta.json"}
+    for name, path in (("points.csv", csv_path), ("points.meta.json", meta_path)):
+        assert recorded[name]["path"] == str(path)
+        assert recorded[name]["bytes"] == path.stat().st_size > 0
+        assert recorded[name]["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+    text = csv_path.read_text(encoding="utf-8", newline="")
+    assert text.endswith("\r\n") and "\n" not in text.replace("\r\n", "")
+    header = text.split("\r\n")[0].split(",")
+    assert header == list(renderer.EXPORT_FIELDS) and len(set(header)) == len(header)
+    assert {"run_id", "analysis_id", "point_id", "Vin_V", "Iin_A", "Vout_V", "Iout_A", "Pin_W", "Pout_W",
+            "loss_W", "efficiency_pct", "vout_error_pct"} <= set(header)
+    rows = list(csv.DictReader(io.StringIO(text)))
+    assert [row["point_id"] for row in rows] == ["p1", "p2", "p3"]
+    assert all(row["run_id"] == "synthetic-run" and row["analysis_id"] == "analysis-1"
+               and row["evidence_type"] == "SYNTHETIC" for row in rows)
+    assert rows[0]["efficiency_pct"] == "39.1575" and rows[2]["efficiency_pct"] == "81.23456789"
+    assert rows[1]["efficiency_pct"] == "" and rows[1]["Pin_W"] == "" and rows[2]["programmed_input_V"] == ""
+    assert rows[0]["programmed_input_V"] == "12" and rows[1]["Vin_V"] == "12" and rows[1]["Iin_A"] == "0.00001"
+    assert [row["Iout_A"] for row in rows] == ["0.099", "0.2", "0.3"]
+    assert rows[0]["input_condition_label"] == '12 V input, "set"'
+    assert rows[0]["reason"] == "'=SUM(A1) offset"
+    meta = json.loads(meta_path.read_text())
+    assert (meta["run_id"], meta["analysis_id"], meta["report_revision"]) == ("synthetic-run", "analysis-1", "r0001")
+    assert meta["evidence_type"] == "SYNTHETIC" and meta["dut"] == "Different 5 V DUT"
+    assert meta["kind"] == "canonical-issued-export" and "Canonical issued selection" in meta["selection"]
+    assert [column["name"] for column in meta["columns"]] == header
+    units = {column["name"]: column["unit"] for column in meta["columns"]}
+    assert units["efficiency_pct"] == "%" and units["Vin_V"] == "V" and units["point_id"] is None
+    assert meta["conditions"]["input_conditions"] == [
+        {"vin_target_V": 12, "programmed_input_V": 12., "label": '12 V input, "set"'},
+        {"vin_target_V": 12, "programmed_input_V": None, "label": None}]
+    assert meta["conditions"]["requested_loads_A"] == [.1, .2, .3]
+    assert meta["conditions"]["qualification_counts"] == {"valid": 2, "inconclusive": 1}
+    assert meta["figure_ids"] == ["fig-efficiency"] and meta["formula_version"] == "settled-dc-1.1"
+    assert meta["csv"]["sha256"] == recorded["points.csv"]["sha256"]
+    assert meta["csv"]["missing_values"] == "empty field"
+    assert model == before, "Writing exports must not alter the report model"
+
+
+def test_timing_columns_are_exported_only_when_the_report_has_a_time_axis(model, tmp_path):
+    model["figures"].append({**model["figures"][0], "id": "fig-demand-time", "x_key": "elapsed_s"})
+    model["points"][0].update(phase_label="Increasing demand", elapsed_start_s=0., elapsed_s=4.5175, elapsed_end_s=9.035)
+    renderer.write_exports(model, tmp_path)
+    rows = list(csv.DictReader(io.StringIO((tmp_path / "exports/points.csv").read_text(encoding="utf-8", newline=""))))
+    assert list(rows[0]) == [*renderer.EXPORT_FIELDS, *renderer.EXPORT_TIMING_FIELDS]
+    assert (rows[0]["phase_label"], rows[0]["elapsed_s"]) == ("Increasing demand", "4.5175")
+    assert (rows[1]["phase_label"], rows[1]["elapsed_s"]) == ("", "")
+
+
+def test_render_writes_issued_exports_before_documents_and_records_them(model, tmp_path, monkeypatch):
+    """Renderer orchestration only; the browser/PDF suite covers real documents."""
+    from types import SimpleNamespace
+    import plotly.offline
+    monkeypatch.setattr(plotly.offline, "get_plotlyjs", lambda: "window.runtimeFixture=true;")
+    monkeypatch.setattr(renderer, "_quarto", lambda: "quarto-test-fixture")
+
+    async def static_fixture(model, directory):
+        for spec in model["figures"]:
+            for extension in ("svg", "pdf"):
+                (directory / (spec["id"] + "." + extension)).write_text("unit-test fixture")
+    monkeypatch.setattr(renderer, "_write_static_figures", static_fixture)
+
+    def document_fixture(command, **kwargs):
+        if command[-1] == "--version":
+            return SimpleNamespace(stdout="1.10.18\n", stderr="", returncode=0)
+        directory = Path(kwargs["cwd"])
+        assert (directory / "exports/points.csv").is_file(), "the issued export precedes the document build"
+        (directory / "report.html").write_text("<!doctype html><html><body>"
+                                               + (directory / "interactions.html").read_text() + "</body></html>")
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+    monkeypatch.setattr(renderer.subprocess, "run", document_fixture)
+    manifest = render_report(model, tmp_path, formats=("html",))
+    assert manifest["status"] == "success"
+    assert set(manifest["exports"]) == {"points.csv", "points.meta.json"}
+    for name, record in manifest["exports"].items():
+        path = Path(record["path"])
+        assert path.resolve() == (tmp_path / "exports" / name).resolve() and path.is_file()
+        assert record["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+        assert record["bytes"] == path.stat().st_size
+    assert json.loads((tmp_path / "build_manifest.json").read_text())["exports"] == manifest["exports"]
+    assert 'href="exports/points.csv"' in (tmp_path / "report.qmd").read_text()
+    exported = list(csv.DictReader(io.StringIO((tmp_path / "exports/points.csv").read_text(encoding="utf-8", newline=""))))
+    assert [row["point_id"] for row in exported] == [point["point_id"] for point in model["points"]]
