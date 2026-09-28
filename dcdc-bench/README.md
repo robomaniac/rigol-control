@@ -52,7 +52,7 @@ From the parent repository root, install both the existing instrument drivers
 and the interface dependencies:
 
 ```sh
-python -m pip install -e . -e './dcdc-bench[ui,report]'
+python -m pip install -e . -e './dcdc-bench[ui,report,real]'
 dcdc-bench ui --root dcdc-bench/workspace --inventory Software/config/lab.yaml
 ```
 
@@ -414,7 +414,14 @@ runs/<run_id>/
   reports/<revision>/
     report_model.json, annotations.json
     report.html, report.pdf, figures/, build_manifest.json
+    exports/points.csv, exports/points.meta.json
 ```
+
+Raw samples carry every field the brief's §8.2 table requires; three use
+shorter keys than the brief's wording: `location` (brief: `location_id`),
+`measurement_range` (`range_id`) and `query_start_utc` / `query_end_utc`
+(`query_started_utc` / `query_completed_utc`). Tools reading `samples.jsonl`
+should use the keys as written; existing finalized evidence is not renamed.
 
 Raw evidence is appended during acquisition and hashed at finalization. Analysis
 checks those hashes. A formula version changes the analysis ID; rerendering
