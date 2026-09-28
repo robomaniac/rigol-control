@@ -1,4 +1,6 @@
-# Extended characterization: independent code review
+# Extended characterization: agent-role code review
+
+This review was performed by an automated agent role in the same authoring pipeline, not by a human or external reviewer.
 
 Reviewed: 27 September 2026.
 
@@ -12,7 +14,7 @@ and the related analysis, report renderer, JavaScript and CSS changes.
 **No unresolved acquisition blocker was found for this fixed procedure.**
 This review does not qualify the general real-hardware backend, other electrical
 limits, manufacturer acceptance, or measurement uncertainty. Browser/PDF visual
-review and independent numerical review are recorded separately.
+review and agent-role numerical review are recorded separately.
 
 ## Findings corrected
 
@@ -102,7 +104,7 @@ geometry verification is assigned to the UI reviewer; no browser checks were
 run as part of this source-review follow-up.
 
 **Final source-review verdict: no unresolved blocking finding in the reviewed
-fixed acquisition and reporting changes.** Browser/PDF quality and independent
+fixed acquisition and reporting changes.** Browser/PDF quality and agent-role
 numerical validation remain separate review responsibilities.
 
 The reviewer performed no instrument calls, browser runs, report rendering or

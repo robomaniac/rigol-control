@@ -1,4 +1,6 @@
-# Independent results review: approaching the supply's 1 A input limit
+# Agent-role results review: approaching the supply's 1 A input limit
+
+This review was performed by an automated agent role in the same authoring pipeline, not by a human or external reviewer.
 
 Run: `20260927T173043.388477Z_real_75a478`  
 Official analysis: `a-d0697ec66a0e`  
@@ -6,7 +8,7 @@ Review date: 2026-09-27 UTC
 
 ## Verdict
 
-**The recorded acquisition and numerical analysis pass this independent evidence audit.** The test reached **0.9873 A measured supply current** with the supply set to 24 V and a 1.000 A current limit. It delivered **1.7247 A at 11.8857 V** to the electronic load. The supply remained in constant-voltage operation, and source output, load input and the source deadline were all verified OFF at completion.
+**The recorded acquisition and numerical analysis pass this agent-role evidence audit.** The test reached **0.9873 A measured supply current** with the supply set to 24 V and a 1.000 A current limit. It delivered **1.7247 A at 11.8857 V** to the electronic load. The supply remained in constant-voltage operation, and source output, load input and the source deadline were all verified OFF at completion.
 
 This verifies the observed operating points and their calculations. It does not certify the converter's full 4 A rating, absolute measurement accuracy, thermal equilibrium or compliance with a product specification.
 

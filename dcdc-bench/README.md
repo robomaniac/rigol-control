@@ -3,7 +3,11 @@
 Configure a converter test, preserve the readings, and produce an interactive
 engineering report and a matching vector PDF.
 
-**M0/M1 complete, plus supervised real characterization.** The first
+**Status as of 2026-09-27 (branch dcdc-bench-hardening): M0 reached; M1
+substantially reached; M2 partial (freshness, readback accuracy and uncertainty
+unquantified; enabled-no-load unqualified); an M3 workflow slice demonstrated
+(bounded three-point real job through the UI's application services) but M3
+not complete by the spec's exit criteria; M4/M5 not started.** The first
 profile describes your **12T12-4A: 9–36 V input, 12 V / 4 A output**, with ratings
 marked as user supplied. The normal demonstration uses simulated instruments.
 A separate, explicitly armed pilot measured the connected converter at
@@ -11,13 +15,19 @@ A separate, explicitly armed pilot measured the connected converter at
 sweep, a three-minute hold, and a return sweep at 24 V.
 The latest [input-voltage comparison](#efficiency-at-different-input-voltages)
 measured 27 load points at 24 V and near 36 V, reaching 2.5 A output.
-The separately preserved 12 V startup attempt stopped without a valid efficiency result.
-The local bench interface runs bounded real recipes for the reviewed
-DP821A CH1 / DL3031A setup, with automatic HTML/PDF reports. A real three-point
-acceptance run completed through its controls and continued after the client
-disconnected. The older generic CLI `run --mode real` remains disabled.
+The separately preserved 12 V startup attempt stopped without a valid efficiency
+result; the converter has failed direct 12 V cold-start twice and the cause is
+unestablished. The local bench interface runs bounded real recipes for the
+reviewed DP821A CH1 / DL3031A setup, with automatic HTML/PDF reports. A bounded
+three-point real job completed through the UI's application services and
+continued after the client disconnected; a browser-click acquisition is not
+claimed. Saved DUT and bench profiles must now carry explicit approvals before
+any real plan is feasible. M2 qualification remains the gate before M3 can be
+called complete. The older generic CLI `run --mode real` remains disabled.
 The complete mock demo produces all three HTML/PDF reports. All 15 mock PDF
-pages have passed visual review, and all ten offline browser/PDF checks passed.
+pages passed visual review, and the offline browser/PDF gates passed at the
+initial checkpoint; on this aarch64 Pi they now run on a laptop or CI. For
+current test totals see the branch's final verification record.
 
 ## Contents
 
@@ -471,14 +481,23 @@ platform, acceptance coverage and limitations. The complete
 
 ## What comes next
 
-The next step is to finish M2 qualification of the real adapters and bench
-profile. Beyond the bounded extended procedure, M2 still needs to
-establish measurement freshness, useful readback accuracy and the physical
-load's capabilities, and validate wider operating limits and fault handling.
+Status as of 2026-09-27 (branch dcdc-bench-hardening): M0 reached; M1
+substantially reached; M2 partial; an M3 workflow slice demonstrated but M3 not
+complete by the brief's Section 15 exit criteria; M4/M5 not started.
+
+The next bounded task, before any further energizing, is to finish M2
+qualification — measurement freshness, useful readback accuracy, an evaluated
+uncertainty budget and the physical load's capabilities — and to write the
+12 V cold-start hypothesis for the two unexplained 12T12-4A failures.
 
 The NiceGUI bench workflow is implemented for the supported steady-state
-procedure. Automatic publication, paired-run comparisons, temperature
-acquisition and an image/annotation editor remain future work.
-No repository push or report publication has been
-performed for this increment. The original project's license has not been
-changed or extended by this subproject.
+procedure, with saved-profile approvals now load-bearing and refresh/reconnect
+(RUN-02) covered at the mock/application-services level. In progress on this
+branch, not done: `reports/<rev>/exports/` and replacing the renderer's
+hard-coded narrative literals. Not implemented: the approved UVLO runtime rule
+(RUN-09), cross-run comparison (CMP-01/02) and the automated PDF pagination
+check (PDF-02). Automatic publication, temperature acquisition and an
+image/annotation editor remain future work. For current test totals see the
+branch's final verification record. No repository push or report publication
+has been performed for this increment. The original project's license has not
+been changed or extended by this subproject.

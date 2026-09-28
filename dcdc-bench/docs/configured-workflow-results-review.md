@@ -1,4 +1,6 @@
-# Configured workflow: independent results review
+# Configured workflow: agent-role results review
+
+This review was performed by an automated agent role in the same authoring pipeline, not by a human or external reviewer.
 
 **Result: PASS.** The configured real run completed all three requested points
 in **57.382 seconds**, with the power-supply output, electronic-load input, and
@@ -62,7 +64,7 @@ input/output wiring losses. Calibration uncertainty, ADC freshness, temperature,
 and thermal equilibrium remain unquantified.
 
 The coordinating agent exercised the UI callbacks and disconnected the client;
-this review independently checks the resulting acquisition evidence. Browser
+this agent-role review separately checks the resulting acquisition evidence. Browser
 disconnect timing and report appearance require their separate acceptance
 evidence. Automatic report rendering was still running during this audit.
 

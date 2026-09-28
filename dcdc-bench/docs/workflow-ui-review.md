@@ -1,5 +1,7 @@
 # Operator workflow code review
 
+This review was performed by an automated agent role in the same authoring pipeline, not by a human or external reviewer.
+
 Reviewed on 27 September 2026. Scope: `ui.py`, `ui_models.py`, the supporting
 `JobService` state/artifact metadata, and `docs/bench-ui.md`.
 

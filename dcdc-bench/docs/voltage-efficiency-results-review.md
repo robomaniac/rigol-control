@@ -1,4 +1,6 @@
-# Independent review: efficiency versus input voltage
+# Agent-role review: efficiency versus input voltage
+
+This review was performed by an automated agent role in the same authoring pipeline, not by a human or external reviewer.
 
 Reviewed 2026-09-27 UTC.
 
@@ -8,7 +10,7 @@ Reviewed 2026-09-27 UTC.
 
 ## Verdict
 
-**The recorded results and numerical analysis pass this independent evidence audit: 122 checks passed.** All 27 requested operating points in the 24 V / near-36 V continuation were qualified. The acquisition completed in **427.91 seconds** with no recorded errors. Source output, load input and the source deadline were verified OFF at completion.
+**The recorded results and numerical analysis pass this agent-role evidence audit: 122 checks passed.** All 27 requested operating points in the 24 V / near-36 V continuation were qualified. The acquisition completed in **427.91 seconds** with no recorded errors. Source output, load input and the source deadline were verified OFF at completion.
 
 There is **no qualified 12 V efficiency curve**. The earlier 12 V startup stopped when measured input voltage collapsed and input current reached the configured source boundary. That evidence is preserved separately and must not be interpreted as a steady-state efficiency measurement or proof that the converter cannot operate from a suitable 12 V source.
 

@@ -1,5 +1,7 @@
 # Source-limit test verification
 
+This review was performed by an automated agent role in the same authoring pipeline, not by a human or external reviewer.
+
 Date: 27 September 2026. Run: `20260927T173043.388477Z_real_75a478`.
 Analysis: `a-d0697ec66a0e`. Report: `r0001`.
 
@@ -36,15 +38,15 @@ The endpoint acquisition loop lasted 30.749 s; its accepted queries span
 efficiency occurred at 1.7 A requested load; no significant advantage over the
 endpoint is established without an uncertainty budget.
 
-## Independent checks
+## Agent-role review checks
 
-- [Senior code review](source-limit-code-review.md): fixed limits, identity
+- [Agent-role code review](source-limit-code-review.md): fixed limits, identity
   gates, shutdown, one permitted recovery, and report evidence validation.
 - 48 combined source-limit/extended fake-instrument tests passed before the
   live run.
 - 33 sequence/report tests passed after the report changes. These include
   conditional coverage, source-current metrics and stage-transition guides.
-- [Independent results review](source-limit-results-review.md): 50 audit
+- [Agent-role results review](source-limit-results-review.md): 50 audit
   assertions passed, all eight acquisition hashes matched, and independently
   recomputed channel means, powers and efficiency matched the official analysis.
 - The parent visually inspected all seven pages of the generated PDF. Figures,

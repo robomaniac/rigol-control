@@ -1,5 +1,7 @@
 # Extended DC–DC report: UI and UX review
 
+This review was performed by an automated agent role in the same authoring pipeline, not by a human or external reviewer.
+
 Run: `20260927T093948.075493Z_real_42e971`  
 Analysis: `a-4a0763ae9add`  
 Final report revision: `r0006`  
@@ -7,10 +9,10 @@ Review date: 2026-09-27 UTC
 
 **Final result: no blocking UI or UX findings remain in the reviewed scope.**
 
-An independent report reviewer inspected the report source, then exercised the
+An automated agent-role report reviewer inspected the report source, then exercised the
 actual generated HTML in one offline Chromium browser after the supply and load
 were confirmed off. The reviewer implemented the point-inspector improvement
-below after reporting it; the parent and senior code reviewer reviewed that change.
+below after reporting it; the parent agent and the agent-role code reviewer reviewed that change.
 
 ## Findings and changes
 
@@ -151,7 +153,7 @@ coordinates, apart from the revision token.
 - [Actual desktop hover](../runs/real-extended/20260927T093948.075493Z_real_42e971/reviews/ux-hover/hover-desktop.png)
 - [Actual mobile-width hover](../runs/real-extended/20260927T093948.075493Z_real_42e971/reviews/ux-hover/hover-mobile.png)
 
-This review checks presentation and interactions. Independent measurement review
+This review checks presentation and interactions. Agent-role measurement review
 is recorded separately; readable plots do not establish accuracy or uncertainty.
 
 ## Stage-boundary follow-up: revision r0006

@@ -1,5 +1,7 @@
 # Voltage-efficiency report: UI and UX review
 
+This review was performed by an automated agent role in the same authoring pipeline, not by a human or external reviewer.
+
 Date: 27 September 2026.  
 Run: `20260927T185631.575651Z_real_eb3bcd`  
 Analysis: `a-e2e7cc8e0d01`; final presentation revision: `r0004`.

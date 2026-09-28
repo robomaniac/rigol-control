@@ -1,5 +1,7 @@
 # Local bench workflow verification
 
+This review was performed by an automated agent role in the same authoring pipeline, not by a human or external reviewer.
+
 Reviewed on 27 September 2026 on the Raspberry Pi running the real DP821A CH1
 and DL3031A bench. This verifies the local operator page and its independent
 acquisition worker. The measured converter is the 12T12-4A sample.

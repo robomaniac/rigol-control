@@ -1,4 +1,6 @@
-# Independent review: configured acquisition and local jobs
+# Agent-role review: configured acquisition and local jobs
+
+This review was performed by an automated agent role in the same authoring pipeline, not by a human or external reviewer.
 
 Review date: 2026-09-27 UTC.
 
@@ -43,4 +45,4 @@ The previously failing startup/descent report fixture was rerun separately and p
 
 The physical startup/descent result was acquired by the separately reviewed fixed procedure. See `startup-descent-results-review.md` for that evidence.
 
-A subsequent configured real job, `20260927T223820Z_bb4a479f`, exercised the deployed NiceGUI selection, Preview, confirmation and Start callbacks using a lightweight Socket.IO client. It measured three points at 24 V input and requested loads of 0.1, 0.25 and 0.5 A. All three qualified after the client disconnected; source, load and source timer were verified OFF before the automatic report process began. This is physical integration evidence for the new reusable path. It is separate from browser rendering/accessibility checks and from the fixed startup experiment. See `configured-workflow-results-review.md` for the independent numerical review.
+A subsequent configured real job, `20260927T223820Z_bb4a479f`, exercised the deployed NiceGUI selection, Preview, confirmation and Start callbacks using a lightweight Socket.IO client. It measured three points at 24 V input and requested loads of 0.1, 0.25 and 0.5 A. All three qualified after the client disconnected; source, load and source timer were verified OFF before the automatic report process began. This is physical integration evidence for the new reusable path. It is separate from browser rendering/accessibility checks and from the fixed startup experiment. See `configured-workflow-results-review.md` for the agent-role numerical review.
