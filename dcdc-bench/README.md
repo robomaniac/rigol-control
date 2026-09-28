@@ -26,6 +26,7 @@ current test totals see the branch's final verification record.
 
 ## Contents
 
+- [Start here](#start-here)
 - [Use the bench interface](#use-the-bench-interface)
 - [Start at 15 V, then reduce the input](#start-at-15-v-then-reduce-the-input)
 - [Try the demonstration](#try-the-demonstration)
@@ -39,6 +40,33 @@ current test totals see the branch's final verification record.
 - [Evidence and reports](#evidence-and-reports)
 - [Architecture and verification](#architecture-and-verification)
 - [What comes next](#what-comes-next)
+
+## Start here
+
+**New to this repository? Read [Getting started](docs/getting-started.md) first.**
+It covers installation, a demo that needs no hardware, the checklist that must be
+complete before any real converter test, and the browser workflow, one command
+at a time, with what you should see after each.
+
+The short version, from the **repository root** (nothing here touches an instrument):
+
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install -e . -e './dcdc-bench[ui,report,real]'
+sudo apt-get install --no-install-recommends chromium-headless-shell poppler-utils
+python3 dcdc-bench/tools/setup.py                              # pinned Quarto into dcdc-bench/.tools/
+.venv/bin/dcdc-bench demo --out dcdc-bench/examples/generated  # three simulated reports; run on a laptop if you can
+.venv/bin/dcdc-bench ui --root dcdc-bench/workspace            # bench page on http://localhost:8082, simulated bench
+```
+
+A real test additionally needs the private `Software/config/lab.yaml` with both
+instrument serials, the three saved approvals in the DUT and bench profiles, a
+read-only `dcdc-bench doctor` pass, and a fresh wiring / CH1 / protection /
+serial confirmation at every Start; see
+[Getting started, section 5](docs/getting-started.md#5-critical-before-any-real-test).
+Then start the page with `--inventory Software/config/lab.yaml` and follow
+**Select → Preview → Confirm → Start → Stop**. On a 1 GB Pi the demo and report
+rendering take several minutes and have needed extra swap; acquisition is light.
 
 ## Use the bench interface
 
@@ -132,8 +160,7 @@ for this increment is on Debian 13 ARM64. A source checkout is required for
 the included profiles and templates.
 
 The setup command installs Python dependencies and downloads the pinned official
-Quarto release, verifying its published SHA-256. Quarto includes Typst. Static
-figures also require Chrome/Chromium. On Debian/Pi, install these system packages
+Quarto release, verifying its published SHA-256. Quarto includes Typst. Static figures require Chrome/Chromium for both the HTML and the PDF build, because the vector figures are rendered before either document. On Debian/Pi, install these system packages
 once before setup:
 
 ```sh

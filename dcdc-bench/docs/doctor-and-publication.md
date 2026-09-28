@@ -16,7 +16,7 @@ dcdc-bench publish runs/<run_id> --revision r0002 --out public/ --approval appro
 Exit codes: `0` no findings; `4` diagnosis completed with findings (including
 an unapproved profile); `2` refused (mock profile, wrong adapters, bad
 inventory, outputs not verified OFF for the cadence probe, publication
-refused). `compare` remains reserved.
+refused). `compare` is implemented separately (see the README's "More commands").
 
 ## 1. `doctor` (brief 7.2)
 
