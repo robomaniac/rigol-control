@@ -11,7 +11,9 @@ dependencies = ["pydantic==2.13.4", "PyYAML==6.0.3", "filelock==4.0.4"]
 
 [project.optional-dependencies]
 ui = ["nicegui==3.17.1"]
-report = ["plotly==7.1.0", "kaleido==1.4.0"]
+# pypdf reads page boxes, tagged structure and drawing geometry for the PDF-02
+# pagination check; poppler-utils (pdftohtml) is the system-package counterpart.
+report = ["plotly==7.1.0", "kaleido==1.4.0", "pypdf==6.19.0"]
 # The real-hardware path wraps the owner's driver package from the repository
 # root (`pip install -e .` there provides `benchctl`); mock runs never need it.
 real = ["benchctl"]

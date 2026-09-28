@@ -119,6 +119,7 @@ const shipped = [
   slice('  const hoverLabels', '  function stageTransitions'),     // hover text used by traces()
   slice('  function stageTransitions', '  function syncControls'), // stageTransitions, traces, layout
   slice('  function draw()', '  function setView'),                // status text and Plotly.react call
+  slice('  function setView', '  function resetZoom'),             // zoom bounds validation and log-range policy
   slice('  function bounds(spec)', '  function download'),         // bounds, getSelectedPoints, CSV export
 ].join('\n');
 const picker = slice("    const picker=document.getElementById('point-picker');", '    picker.addEventListener');
@@ -147,6 +148,8 @@ const execute = new Function('model', "'use strict';\n" + helpers + `
     plotted: model.points.map(p => plottedValue(specs[0], p)),
     x: drawn.get('plot-' + figure).traces.filter(t => !t.meta?.isTransition).map(t => t.x),
     axis_type: drawn.get('plot-' + figure).layout.xaxis.type,
+    axis_range: drawn.get('plot-' + figure).layout.xaxis.range ?? null,
+    saved_range: state.ranges[figure]?.x ?? null,
     status: document.getElementById('status-' + figure).textContent,
     selected: getSelectedPoints('selected', figure).map(p => p.point_id),
     visible: getSelectedPoints('visible', figure).map(p => p.point_id),
@@ -159,8 +162,12 @@ const execute = new Function('model', "'use strict';\n" + helpers + `
     state.log_current = true;
     await draw();
     const log = snapshot();
+    await setView({ranges: {[figure]: {x: [0.05, 1]}}});
+    const zoomed = snapshot();
+    await setView({ranges: {[figure]: {x: [-0.001, 1]}}});
+    const crossing = snapshot();
     ` + picker + `
-    return {linear, log, picker: document.getElementById('point-picker').children.map(option => option.textContent),
+    return {linear, log, zoomed, crossing, picker: document.getElementById('point-picker').children.map(option => option.textContent),
       points: model.points.map(p => p.Iout_A)};
   })();
 `);
@@ -189,6 +196,17 @@ execute(model).then(result => process.stdout.write(JSON.stringify(result)));
     assert [row["Iout_A"] for row in rows] == ["0", "-0.0004", "0.099249", "0.499"]
     assert log["visible_export"]["metadata"]["point_count"] == 2
     assert "nonpositive points excluded for log current" in log["visible_export"]["metadata"]["scope_description"]
+    # A positive zoom is drawn in log10 units but exported in physical units;
+    # a zoom crossing zero cannot exist on a log axis and is dropped, never
+    # transformed into NaN or -Infinity bounds.
+    zoomed, crossing = observed["zoomed"], observed["crossing"]
+    assert zoomed["saved_range"] == [.05, 1]
+    assert zoomed["axis_range"] == [pytest.approx(-1.3010299956639813), 0]
+    assert zoomed["visible"] == ["light", "half"]
+    assert zoomed["visible_export"]["metadata"]["axis_bounds"]["x"] == [.05, 1]
+    assert crossing["saved_range"] is None and crossing["axis_range"] is None
+    assert crossing["x"] == [[None, None, .099249, .499]]
+    assert crossing["visible_export"]["metadata"]["axis_bounds"]["x"] is None
     assert observed["points"] == [0, -.0004, .099249, .499], "the embedded evidence is never rewritten"
     assert observed["picker"] == ["no-load · 24 V / 0 A · valid", "load-off-offset · 24 V / 0 A · valid",
                                   "light · 24 V / 0.1 A · valid", "half · 24 V / 0.5 A · valid"]

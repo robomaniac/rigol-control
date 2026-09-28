@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="540" height="265" viewBox="0 0 540 265">
+  <rect width="540" height="265" fill="#ffffff"/>
+  <text x="32" y="26" font-family="Liberation Sans, sans-serif" font-size="12" fill="#183047">Figure 1. Fixture efficiency versus output current</text>
+  <line x1="60" y1="220" x2="500" y2="220" stroke="#183047" stroke-width="1"/>
+  <line x1="60" y1="40" x2="60" y2="220" stroke="#183047" stroke-width="1"/>
+  <line x1="60" y1="130" x2="500" y2="130" stroke="#e6edf1" stroke-width="1"/>
+  <polyline fill="none" stroke="#0072B2" stroke-width="2" points="80,200 160,120 240,90 320,80 400,85 480,95"/>
+  <circle cx="80" cy="200" r="3" fill="#0072B2"/>
+  <circle cx="160" cy="120" r="3" fill="#0072B2"/>
+  <circle cx="240" cy="90" r="3" fill="#0072B2"/>
+  <circle cx="320" cy="80" r="3" fill="#0072B2"/>
+  <circle cx="400" cy="85" r="3" fill="#0072B2"/>
+  <circle cx="480" cy="95" r="3" fill="#0072B2"/>
+  <text x="58" y="236" font-family="Liberation Sans, sans-serif" font-size="9" fill="#183047">0</text>
+  <text x="472" y="236" font-family="Liberation Sans, sans-serif" font-size="9" fill="#183047">1.0</text>
+  <text x="44" y="224" font-family="Liberation Sans, sans-serif" font-size="9" fill="#183047">0</text>
+  <text x="36" y="44" font-family="Liberation Sans, sans-serif" font-size="9" fill="#183047">100</text>
+  <text x="32" y="256" font-family="Liberation Sans, sans-serif" font-size="8" fill="#516677">SYNTHETIC | FIXTURE-DUT | Run run-fixture | fig-efficiency | fixture conditions</text>
+</svg>

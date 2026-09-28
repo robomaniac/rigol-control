@@ -8,6 +8,7 @@ from contextlib import contextmanager
 import csv
 import io
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -317,6 +318,82 @@ def test_web05_web06_web08_scope_csv_and_log_bounds(viewer):
     page.evaluate("dcdcReport.setView({log_current:false})")
     assert page.evaluate("dcdcReport.state.ranges['fig-efficiency'].x") == [.5, 1]
     page.evaluate("dcdcReport.restoreDefaults()")
+
+
+@pytest.mark.browser
+def test_web08_log_mode_excludes_zero_and_negative_current_points_explicitly(viewer, documents, tmp_path):
+    """WEB-08: a 0 A point and a negative-current point leave the log view explicitly.
+
+    They are never replaced by a small positive number, the visible-range
+    export bounds stay finite physical values, and both readings return in
+    linear mode and remain reachable in the point explorer.
+    """
+    chosen = {}
+
+    def nonpositive_fixture(model):
+        spec = next(f for f in model["figures"] if f["id"] == "fig-efficiency")
+        series = spec["series"][0]
+        rows = [p for p in model["points"] if p["point_id"] in series["point_ids"] and p["qualification"] == "valid"
+                and p.get("efficiency_pct") is not None and (p.get("Iout_A") or 0) > 0]
+        assert len(rows) >= 4, "the fixture needs positive points left after the two edits"
+        zero, negative = rows[0], rows[1]
+        zero.update(Iout_A=0., iout_target_A=0.)
+        negative.update(Iout_A=-.0004)
+        chosen.update(zero=zero["point_id"], negative=negative["point_id"], key=format(series["vin_target_V"], "g"),
+                      positive=sorted(p["Iout_A"] for p in rows[2:]))
+
+    with _report_variant(viewer, documents, tmp_path, nonpositive_fixture) as (page, model):
+        graph = "document.getElementById('plot-fig-efficiency')"
+
+        def trace_x():
+            return page.evaluate(f"key => {graph}.data.find(t => t.meta.conditionKey === key && !t.meta.isBand).x", chosen["key"])
+
+        def visible_ids():
+            return {p["point_id"] for p in page.evaluate("dcdcReport.getSelectedPoints('visible','fig-efficiency')")}
+
+        excluded = {chosen["zero"], chosen["negative"]}
+        page.evaluate("dcdcReport.setView({selected_series:[arguments[0]]})".replace("arguments[0]", json.dumps(chosen["key"])))
+        page.evaluate("dcdcReport.whenIdle()")
+        assert page.evaluate(f"{graph}._fullLayout.xaxis.type") == "linear"
+        assert 0 in trace_x() and -.0004 in trace_x()
+        assert page.evaluate(f"{graph}._fullLayout.xaxis.range")[0] <= -.0004, "default limits include the negative reading"
+        assert excluded <= visible_ids()
+
+        page.evaluate("dcdcReport.setView({log_current:true})")
+        page.evaluate("dcdcReport.whenIdle()")
+        assert page.evaluate(f"{graph}._fullLayout.xaxis.type") == "log"
+        xs = trace_x()
+        assert xs.count(None) == 2, "the two nonpositive readings become gaps"
+        assert sorted(x for x in xs if x is not None) == chosen["positive"], "no value is substituted or shifted"
+        assert "2 nonpositive-current point(s) omitted from this log view" in page.locator("#status-fig-efficiency").inner_text()
+        assert not (excluded & visible_ids())
+        selected = page.evaluate("dcdcReport.exportCSV('selected','fig-efficiency')")
+        rows = {row["point_id"]: row for row in csv.DictReader(io.StringIO(selected["csv"]))}
+        assert rows[chosen["zero"]]["Iout_A"] == "0" and rows[chosen["negative"]]["Iout_A"] == "-0.0004"
+        visible = page.evaluate("dcdcReport.exportCSV('visible','fig-efficiency')")
+        bounds = visible["metadata"]["axis_bounds"]["x"]
+        assert len(bounds) == 2 and all(math.isfinite(b) for b in bounds) and 0 < bounds[0] < bounds[1]
+        assert bounds[0] <= chosen["positive"][0] and bounds[1] >= chosen["positive"][-1]
+        assert visible["metadata"]["point_count"] == len(list(csv.DictReader(io.StringIO(visible["csv"]))))
+        assert not (excluded & {row["point_id"] for row in csv.DictReader(io.StringIO(visible["csv"]))})
+        assert "nonpositive points excluded for log current" in visible["metadata"]["scope_description"]
+        # A zoom crossing zero cannot exist on a log axis: it is dropped, never turned into NaN bounds.
+        page.evaluate("dcdcReport.setView({ranges:{'fig-efficiency':{x:[-0.001,1]}}})")
+        page.evaluate("dcdcReport.whenIdle()")
+        assert page.evaluate("dcdcReport.state.ranges['fig-efficiency']?.x ?? null") is None
+        assert all(math.isfinite(v) for v in page.evaluate(f"{graph}._fullLayout.xaxis.range"))
+
+        page.evaluate("dcdcReport.setView({log_current:false})")
+        page.evaluate("dcdcReport.whenIdle()")
+        assert 0 in trace_x() and -.0004 in trace_x()
+        assert excluded <= visible_ids()
+        page.evaluate("id => dcdcReport.showPoint(id)", chosen["negative"])
+        assert page.locator("#point-picker").input_value() == chosen["negative"]
+        assert "-0.4 mA" in page.locator("#point-measurements").inner_text()
+        page.evaluate("id => dcdcReport.showPoint(id)", chosen["zero"])
+        assert "0 mA" in page.locator("#point-measurements").inner_text()
+        assert page.evaluate("id => dcdcReport.model.points.find(p => p.point_id === id).Iout_A", chosen["zero"]) == 0
+        page.evaluate("dcdcReport.restoreDefaults()")
 
 
 @pytest.mark.browser

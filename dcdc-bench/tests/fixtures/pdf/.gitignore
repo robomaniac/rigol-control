@@ -1,0 +1,3 @@
+# Fixture PDFs are compiled from the .typ sources at test time.
+*.pdf
+*.xml

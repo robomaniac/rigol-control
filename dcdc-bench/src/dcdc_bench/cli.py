@@ -50,6 +50,9 @@ def parser() -> argparse.ArgumentParser:
     command.add_argument("--report-root", type=Path, help="Existing saved report directory; preserve its /Runs links")
     command.add_argument("--host", default="127.0.0.1", choices=("127.0.0.1", "localhost", "::1"))
     command.add_argument("--port", type=int, default=8082)
+    command = sub.add_parser("pdf-check", help="Inspect every page of an issued PDF (PDF-02) and print the JSON result")
+    command.add_argument("pdf", type=Path)
+    command.add_argument("--model", type=Path, help="report_model.json for run/DUT identity checks; defaults to the sibling file")
     for name in ("doctor", "compare"):
         sub.add_parser(name, help="Reserved for a later milestone").add_argument("arguments", nargs=argparse.REMAINDER)
     return root
@@ -98,6 +101,13 @@ def main(argv: list[str] | None = None) -> int:
             profile = load_profile(args.profile, ReportProfile) if args.profile else None
             print(report_run(args.run_dir, formats=args.formats, profile=profile))
             return 0
+        if args.command == "pdf-check":
+            from .reporting.pdf_check import check_pdf
+            model_path = args.model or (args.pdf.parent / "report_model.json")
+            model = json.loads(model_path.read_text(encoding="utf-8")) if model_path.is_file() else None
+            result = check_pdf(args.pdf, model)
+            print(result.to_json())
+            return 0 if result.status != "fail" else 4
         raise ValueError(f"{args.command} is deferred; this increment provides the mock CLI and offline reports")
     except ImportError as exc:
         extra = "ui" if args.command == "ui" else "report"
