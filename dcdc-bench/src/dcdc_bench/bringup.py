@@ -208,14 +208,25 @@ def pilot_plan(*, loaded_only: bool = False):
 
 
 def run_bringup(config_path: Path, out: Path, *, arm: bool = False, loaded_only: bool = False) -> Path:
+    """Single-owner bring-up: the bench lease fails closed if anything else is active."""
     if not arm:
         raise BringupAbort("Explicit --arm is required; this command operates real equipment")
+    from .activity import bench_activity
+    with bench_activity("acquisition", timeout=0):
+        return _run_bringup_unlocked(config_path, out, loaded_only=loaded_only)
+
+
+def _run_bringup_unlocked(config_path: Path, out: Path, *, loaded_only: bool = False) -> Path:
+    from .planning import missing_approvals
+    plan = pilot_plan(loaded_only=loaded_only)
+    missing = missing_approvals(plan.dut, plan.bench)
+    if missing:
+        raise BringupAbort("Saved-profile approvals are missing; no instrument was opened: " + "; ".join(missing))
     from benchctl.config import load_config
     from benchctl.identity import identify_and_verify
     from benchctl.registry import get_driver_class
     from benchctl.transport import VisaTransport
     from .runner import _provenance
-    plan = pilot_plan(loaded_only=loaded_only)
     config = load_config(config_path)
     devices = {role: config.devices[name] for role, name in
                (("source", "psu_rigol_1"), ("load", "load_rigol_1"))}

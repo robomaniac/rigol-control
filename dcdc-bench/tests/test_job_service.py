@@ -180,6 +180,28 @@ def test_seeded_real_profile_requires_saved_approvals_then_is_feasible(service, 
     assert fake.commands == []
 
 
+def test_stale_supported_preview_cannot_start_an_unapproved_real_job(service, monkeypatch, tmp_path):
+    import json
+    from test_voltage_sweep import bench
+    fake = bench(tmp_path, monkeypatch)
+    fake.config.write_text("# fake inventory; parsed through the fixture's config loader\n")
+    service.inventory_path = fake.config
+    dut_name = service.list_profiles()["dut"][0]
+    p = service.preview(dut_name, "rigol-local-limited", "real-24v-small-grid")
+    assert not p["supported"]
+    cached = service.root / "previews" / (p["plan_hash"] + ".json")
+    stale = json.loads(cached.read_text())
+    stale.update(supported=True, errors=[])
+    atomic_json(cached, stale)
+    monkeypatch.setattr("dcdc_bench.job_service.subprocess.Popen", lambda *a, **k: SimpleNamespace(pid=None))
+    confirmation = {"plan_hash": p["plan_hash"], "wiring_and_polarity": True, "channel1": True,
+                    "protections_reviewed": True, "source_serial": "FAKE-source", "load_serial": "FAKE-load"}
+    with pytest.raises(ValueError, match="real_hardware_enabled is false"):
+        service.start(p["plan_hash"], confirmation=confirmation)
+    assert service.list_jobs() == [] and fake.commands == []
+    assert not any((service.root / "jobs").iterdir())
+
+
 def test_systemd_launch_preserves_shared_lease_and_render_paths(service, monkeypatch):
     monkeypatch.setenv("DCDC_JOB_LAUNCHER", "systemd")
     monkeypatch.setenv("QUARTO_PATH", "/opt/quarto with spaces/bin/quarto")

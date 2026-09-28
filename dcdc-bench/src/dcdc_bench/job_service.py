@@ -266,6 +266,12 @@ class JobService:
                 raise ValueError("Saved plan was changed")
             confirmation = dict(confirmation or {})
             if plan.bench.mode == "real":
+                # A cached preview is not an authorization: rebuild from the
+                # profiles as saved now and re-run every real-plan check.
+                from .real_backend import prepare_real_plan
+                rebuilt, errors, _ = prepare_real_plan(build_plan(plan.dut, plan.bench, plan.recipe))
+                if errors or rebuilt.plan_hash != plan_hash:
+                    raise ValueError("Unsupported plan: " + "; ".join(errors or ["plan no longer matches its profiles"]))
                 inventory = self._inventory()
                 if _digest(self.inventory_path) != preview["inventory_sha256"]:
                     raise ValueError("Instrument inventory changed; preview again")

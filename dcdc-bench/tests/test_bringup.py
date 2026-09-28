@@ -169,6 +169,11 @@ def test_load_status_requires_expected_input_state():
     assert pilot.load_status(True) == 0
 
 
+@pytest.fixture(autouse=True)
+def isolated_activity_lock(tmp_path, monkeypatch):
+    monkeypatch.setenv("DCDC_ACTIVITY_LOCK", str(tmp_path / "activity.lock"))
+
+
 def test_recording_transport_preserves_numeric_scpi_text_without_reformatting():
     underlying = FakeTransport({":MEAS:VOLT?": "+1.204000E+01"})
     tap = RecordingTransport(underlying)

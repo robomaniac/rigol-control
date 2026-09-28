@@ -213,17 +213,17 @@ def _run_fixed_unlocked(config_path: Path, out: Path, *, arm: bool = False, proc
     """Shared lifecycle for explicitly coded fixed procedures; no recipe executor."""
     if not arm:
         raise ExtendedAbort("Explicit --arm is required; this command operates real equipment")
+    from .planning import missing_approvals
+    plan = extended_plan() if procedure is None else procedure.plan()
+    adapter = ExtendedRigol if procedure is None else procedure.adapter
+    missing = missing_approvals(plan.dut, plan.bench)
+    if missing:
+        raise ExtendedAbort("Saved-profile approvals are missing; no instrument was opened: " + "; ".join(missing))
     from benchctl.config import load_config
     from benchctl.identity import identify_and_verify
     from benchctl.registry import get_driver_class
     from benchctl.transport import VisaTransport
     from .runner import _provenance
-    plan = extended_plan() if procedure is None else procedure.plan()
-    adapter = ExtendedRigol if procedure is None else procedure.adapter
-    from .planning import missing_approvals
-    missing = missing_approvals(plan.dut, plan.bench)
-    if missing:
-        raise ExtendedAbort("Saved-profile approvals are missing; no instrument was opened: " + "; ".join(missing))
     config = load_config(config_path)
     devices = {role: config.devices[name] for role, name in (("source", "psu_rigol_1"), ("load", "load_rigol_1"))}
     if any(not device.expected_serial for device in devices.values()):
