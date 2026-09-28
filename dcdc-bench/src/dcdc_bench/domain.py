@@ -89,6 +89,106 @@ class AccuracySpec(Contract):
         return self
 
 
+# ---------------------------------------------------------------------------
+# Structured readback uncertainty budget (brief section 9.2). Percent terms are
+# in percent (0.05 means 0.05 %), never fractions, so a datasheet line can be
+# transcribed as printed. Every term must be declared explicitly; a missing
+# term makes the budget not evaluable, it is never treated as zero.
+# ---------------------------------------------------------------------------
+READBACK_SOURCE_CANDIDATES: dict[str, list[str]] = {
+    "source": ["R1 Rigol DP800 datasheet, readback accuracy and resolution for the exact source model and range: "
+               "https://www.rigol.com/dam/global/downloads/brochures/en/data-sheet/dc-powers/DP800_DataSheet_EN.pdf"],
+    "load": ["R4 Rigol DL3000 datasheet, readback (measurement) specification only; do not transcribe the CC programming accuracy: "
+             "https://www.rigol.com/dam/global/downloads/brochures/en/data-sheet/dc-load/DL3000_DataSheet_EN.pdf"],
+}
+READBACK_ENTRY_INSTRUCTION = ("No numeric value is entered here. The bench owner must transcribe the readback terms for the "
+                              "exact model, firmware and range from the cited document and record the calibration status.")
+
+
+class CalibrationRecord(Contract):
+    """Declared calibration status only; software never verifies or invents a certificate."""
+    status: Literal["unknown", "factory_only", "within_interval", "overdue"] = "unknown"
+    last_calibration_date: str | None = None
+    interval_months: int | None = Field(default=None, gt=0)
+    certificate: str | None = None
+    note: str | None = None
+
+
+class TemperatureCoefficient(Contract):
+    """Optional drift term applied per degree beyond the specification's reference band."""
+    percent_of_reading_per_C: float = Field(default=0, ge=0)
+    percent_of_range_per_C: float = Field(default=0, ge=0)
+    absolute_per_C: float = Field(default=0, ge=0)
+    reference_temperature_C: float
+    reference_band_C: float = Field(ge=0)
+    source: str
+
+
+class ReadbackSpecification(Contract):
+    """Readback (measurement) error-limit terms for one bound channel.
+
+    ``status`` records provenance: ``unknown`` (nothing entered), ``unverified_user_entry``
+    (typed by a person without a cited document), ``datasheet_quoted`` (cited document,
+    page or table), ``calibrated`` (certificate governs the terms) or ``synthetic_example``
+    (mock plant demonstration; never an instrument). Programming/setting accuracy is a
+    different field on the binding and is never consumed as readback uncertainty.
+    """
+    role: Literal["readback"] = "readback"
+    status: Literal["unknown", "unverified_user_entry", "datasheet_quoted", "calibrated", "synthetic_example"] = "unknown"
+    source: str = "unknown"
+    source_candidates: list[str] = Field(default_factory=list)
+    unit: str | None = None
+    percent_of_reading: float | None = Field(default=None, ge=0)
+    percent_of_range: float | None = Field(default=None, ge=0)
+    range_value: float | None = Field(default=None, gt=0)
+    absolute_offset: float | None = Field(default=None, ge=0)
+    resolution: float | None = Field(default=None, ge=0)
+    temperature_coefficient: TemperatureCoefficient | None = None
+    calibration: CalibrationRecord = Field(default_factory=CalibrationRecord)
+    applicable_conditions: str | None = None
+    distribution: Literal["rectangular"] = "rectangular"
+    distribution_justification: str | None = None
+
+    @model_validator(mode="after")
+    def consistent_provenance(self) -> ReadbackSpecification:
+        numeric = (self.percent_of_reading, self.percent_of_range, self.range_value,
+                   self.absolute_offset, self.resolution)
+        if self.status == "unknown" and (any(v is not None for v in numeric) or self.temperature_coefficient):
+            raise ValueError("An unknown readback specification cannot carry numeric terms; declare its status and source")
+        if self.status in ("datasheet_quoted", "calibrated") and self.source.strip().lower() in ("", "unknown"):
+            raise ValueError("A quoted or calibrated readback specification must cite its document or certificate")
+        if self.status == "synthetic_example" and "synthetic" not in self.source.lower():
+            raise ValueError("A synthetic example specification must say so in its source")
+        if self.status == "calibrated" and (self.calibration.status != "within_interval" or not self.calibration.certificate):
+            raise ValueError("A calibrated readback specification requires an in-interval calibration record with a certificate")
+        if self.percent_of_range and self.range_value is None:
+            raise ValueError("A percent-of-range term requires the readback range value")
+        return self
+
+    def missing_terms(self) -> list[str]:
+        """Names of terms that block evaluation; empty means the budget is evaluable."""
+        missing: list[str] = []
+        if self.status == "unknown":
+            missing.append("specification status unknown")
+        for name in ("percent_of_reading", "percent_of_range", "absolute_offset", "resolution"):
+            if getattr(self, name) is None:
+                missing.append(f"{name} not declared")
+        if self.percent_of_range and self.range_value is None:
+            missing.append("range_value not declared")
+        if self.calibration.status == "unknown":
+            missing.append("calibration status unknown; specification terms are conditional on the calibration interval")
+        elif self.calibration.status == "overdue":
+            missing.append("calibration interval exceeded; specification terms are not applicable")
+        return missing
+
+
+def unknown_readback_specification(quantity: str) -> ReadbackSpecification:
+    """The honest default for a real channel: nothing entered, documents to consult listed."""
+    role = "source" if quantity in ("Vin_V", "Iin_A") else "load"
+    return ReadbackSpecification(status="unknown", source="unknown",
+                                 source_candidates=[*READBACK_SOURCE_CANDIDATES[role], READBACK_ENTRY_INSTRUCTION])
+
+
 class MeasurementBinding(Contract):
     instrument_id: str
     quantity: str
@@ -98,6 +198,7 @@ class MeasurementBinding(Contract):
     resolution: float | None = Field(default=None, gt=0)
     accuracy: AccuracySpec | None = None
     programming_accuracy: AccuracySpec | None = None
+    readback_specification: ReadbackSpecification | None = None
 
     @model_validator(mode="after")
     def correct_accuracy_role(self) -> MeasurementBinding:
@@ -105,6 +206,9 @@ class MeasurementBinding(Contract):
             raise ValueError("Programming accuracy is not a readback uncertainty specification")
         if self.programming_accuracy and self.programming_accuracy.applies_to != "programming":
             raise ValueError("programming_accuracy requires a programming specification")
+        spec = self.readback_specification
+        if spec is not None and spec.unit is not None and spec.unit != self.unit:
+            raise ValueError("Readback specification unit does not match the bound channel unit")
         return self
 
 
@@ -153,6 +257,30 @@ class ProtectiveControls(Contract):
     approved: bool = False
 
 
+class UncertaintyPolicy(Contract):
+    """Declared evaluation policy for the readback budget; values are recorded in every budget."""
+    coverage_factor: float = Field(default=2, gt=0)
+    coverage_factor_note: str = ("k = 2 is a conventional coverage factor; the interval is not claimed as a validated "
+                                 "95 % confidence interval because effective degrees of freedom and distribution shape are not evaluated")
+    linear_model_relative_uncertainty_bound: float = Field(default=.1, gt=0, lt=1)
+    include_repeatability_in_combined: bool = True
+    policy_origin: str = "draft default; adjust with a recorded justification"
+
+
+class ChannelCorrelation(Contract):
+    """Declared correlation between two readback channels' systematic errors (UNC-03)."""
+    quantity_a: str
+    quantity_b: str
+    coefficient: float = Field(ge=-1, le=1)
+    justification: str
+
+    @model_validator(mode="after")
+    def distinct_channels(self) -> ChannelCorrelation:
+        if self.quantity_a == self.quantity_b:
+            raise ValueError("A correlation needs two distinct channels")
+        return self
+
+
 class BenchProfile(Contract):
     schema_version: Literal["1.0"] = "1.0"
     bench_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
@@ -163,6 +291,15 @@ class BenchProfile(Contract):
     protective_controls: ProtectiveControls = Field(default_factory=ProtectiveControls)
     measurement_boundary: str = "source-to-DUT-output path"
     notes: list[str] = Field(default_factory=list)
+    uncertainty_policy: UncertaintyPolicy = Field(default_factory=UncertaintyPolicy)
+    readback_correlations: list[ChannelCorrelation] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def correlations_reference_bound_channels(self) -> BenchProfile:
+        for item in self.readback_correlations:
+            if item.quantity_a not in self.measurements or item.quantity_b not in self.measurements:
+                raise ValueError("Readback correlations must reference bound measurement channels")
+        return self
 
 
 class TestDefinition(Contract):

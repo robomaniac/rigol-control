@@ -66,10 +66,13 @@
     const context = point.input_condition_label ?? ([...String(phase)].slice(0, 32).join('') +
       ([...String(phase)].length > 32 ? '…' : '') + ' · ' + number(point.vin_target_V) + ' V');
     const horizontal = xKey(spec);
-    return ['<b>' + safe(context) + '</b>',
+    const lines = ['<b>' + safe(context) + '</b>',
       safe(hoverLabels[horizontal] ?? spec.x_label) + ': ' + safe(hoverValue(horizontal, point[horizontal])),
-      safe(hoverLabels[spec.y_key] ?? spec.y_label) + ': <b>' + safe(hoverValue(spec.y_key, point[spec.y_key])) + '</b>'
-    ].join('<br>');
+      safe(hoverLabels[spec.y_key] ?? spec.y_label) + ': <b>' + safe(hoverValue(spec.y_key, point[spec.y_key])) + '</b>'];
+    // The ± text exists only where the analysis evaluated a readback budget (UNC-02).
+    const band = point[spec.y_key + '_uncertainty_label'];
+    if (typeof band === 'string' && spec.lower_key && spec.upper_key) lines.push('Expanded uncertainty: ' + safe(band));
+    return lines.join('<br>');
   }
   function stageTransitions(spec) {
     if (spec.id !== 'fig-demand-time' || xKey(spec) !== 'elapsed_s' || spec.y_key !== 'Iout_A') return [];

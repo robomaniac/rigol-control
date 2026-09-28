@@ -18,7 +18,7 @@ from types import SimpleNamespace
 import uuid
 
 from .bringup import BringupAbort, RecordingTransport, RigolPilot
-from .domain import RawSample, TestDefinition
+from .domain import RawSample, TestDefinition, unknown_readback_specification
 from .planning import _hash_payload, build_plan
 from .services import default_plan
 from .storage import RunStore, atomic_json
@@ -169,6 +169,8 @@ def extended_plan():
         binding.instrument_id = "source" if name in ("Vin_V", "Iin_A") else "load"
         if name == "Vout_V": binding.location = "load_input_terminals_local_sense"
         if name == "Iout_A": binding.location = "load_input"
+        # A real bench never inherits the mock profile's synthetic readback terms.
+        binding.readback_specification = unknown_readback_specification(name)
     controls = bench.protective_controls
     controls.policy_id, controls.approved = POLICY_ID, True
     controls.source_current_limit_A, controls.dut_input_overvoltage_V = ILIMIT, SOURCE_OVP

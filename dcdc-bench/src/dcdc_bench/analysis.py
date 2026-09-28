@@ -20,8 +20,9 @@ from pydantic import Field, model_validator
 
 from .domain import AcquisitionPolicy, Contract, Plan, RawSample, SettlingPolicy
 from .storage import atomic_json, verify_integrity
+from .uncertainty import DERIVED as UNCERTAINTY_DERIVED, evaluate_run_budget, evaluated_quantity
 
-FORMULA_VERSION = "settled-dc-1.1"
+FORMULA_VERSION = "settled-dc-1.2"
 QUANTITIES = ("Vin_V", "Iin_A", "Vout_V", "Iout_A")
 CSV_FIELDS = ["run_id", "analysis_id", "test_id", "point_id", "vin_target_V",
               "iout_target_A", *QUANTITIES, "Pin_W", "Pout_W", "loss_W",
@@ -68,6 +69,11 @@ class FigureSpec(Contract):
     y_label: str
     caption: str
     series: list[FigureSeries]
+    # Band keys are set only when the readback budget evaluated the plotted quantity
+    # (WEB-03 / UNC-02): absent keys mean no band is drawn anywhere.
+    lower_key: str | None = None
+    upper_key: str | None = None
+    uncertainty_source: str | None = None
 
 
 class TableSpec(Contract):
@@ -127,6 +133,9 @@ class ReportModel(Contract):
     limitations: list[str]
     raw_samples: dict[str, list[dict[str, Any]]]
     provenance: dict[str, Any]
+    uncertainty: dict[str, Any] = Field(default_factory=lambda: {
+        "status": "not_evaluated", "metrology": "unquantified", "evaluated_point_ids": [],
+        "note": "No readback uncertainty budget was evaluated for this analysis; no bands or resolved-difference verdicts are shown."})
 
     @model_validator(mode="after")
     def references_exist(self) -> ReportModel:
@@ -303,6 +312,7 @@ def analyze_evidence(plan: Plan, run: dict, samples: list[dict], *, version: str
         grouped[row["point_id"]].append(row)
     outcomes = {p["point_id"]: p for p in run.get("points", [])}
     points = []
+    accepted_values: dict[str, dict[str, list[float]]] = {}
     for request in plan.points:
         outcome = outcomes.get(request.point_id, {})
         qualification = outcome.get("qualification", "not-run")
@@ -326,6 +336,7 @@ def analyze_evidence(plan: Plan, run: dict, samples: list[dict], *, version: str
             raise ValueError("Valid point lacks the required accepted complete cycles")
         values = {q: mean([s["value"] for s in accepted if s["quantity"] == q])
                   if any(s["quantity"] == q for s in accepted) else None for q in QUANTITIES}
+        accepted_values[request.point_id] = {q: [s["value"] for s in accepted if s["quantity"] == q] for q in QUANTITIES}
         derived = dc_metrics(values, plan.dut.ratings.output_voltage_nominal_V,
                              no_load=request.iout_target_A == 0)
         if qualification != "valid":
@@ -349,13 +360,19 @@ def analyze_evidence(plan: Plan, run: dict, samples: list[dict], *, version: str
                        "accepted_cycle_count": len(by_cycle),
                        "accepted_sample_ids": [s["sample_id"] for s in accepted],
                        "acquisition_cycle_ids": sorted(cycles)})
+    # Structured readback budget (section 9.2). Unknown terms yield not_evaluated
+    # reasons, never zeros; the per-point qualification state follows the budget.
+    budget = evaluate_run_budget(plan, points, accepted_values, evidence_label=evidence_label,
+                                 observed_conditions={"ambient_temperature_C": run.get("ambient_temperature_C")})
+    for p in points:
+        p["metrology"] = budget["points"][p["point_id"]]["metrology"]
     return {"schema_version": "1.0", "formula_version": version,
             "aggregation": "Metrics from qualified channel means over accepted complete acquisition cycles",
             "sign_convention": "Positive power enters input boundary and leaves output boundary; no absolute-value correction",
             "run_id": run["run_id"], "evidence_label": evidence_label,
             "boundary": run.get("measurement_boundary", plan.bench.measurement_boundary),
             "points": points, "coverage": coverage_by_test(points),
-            "uncertainty": {"status": "unquantified", "reason": "No applicable complete readback uncertainty budget evaluated", "bands": None}}
+            "uncertainty": budget}
 
 
 def _finite_number(value: Any) -> float | None:
@@ -670,6 +687,81 @@ def _sequence_results(points: list[dict], series: list[FigureSeries], label: str
     return figures, metrics
 
 
+def _blocking_summary(budget: Any) -> str:
+    """One clause per channel whose readback specification blocks evaluation."""
+    if not isinstance(budget, dict):
+        return ""
+    clauses = []
+    for review in budget.get("channels", {}).values():
+        reasons = review.get("reasons", []) if isinstance(review, dict) else []
+        if reasons:
+            clauses.append(str(reasons[0]) + (f" (+{len(reasons) - 1} more)" if len(reasons) > 1 else ""))
+    return "; ".join(clauses)
+
+
+def _apply_uncertainty(points: list[dict], figures: list[FigureSpec], metrics: list[MetricResult],
+                       budget: Any) -> dict[str, Any]:
+    """Expose evaluated per-point uncertainty to the report model; nothing when not evaluated.
+
+    Band keys, ± labels and metric uncertainty appear only for quantities whose budget
+    status is ``evaluated`` (UNC-02, WEB-03). The returned summary feeds
+    ``ReportModel.uncertainty`` and the limitations text.
+    """
+    evaluated_ids: set[str] = set()
+    banded_keys: set[str] = set()
+    for point in points:
+        for name in (*QUANTITIES, *UNCERTAINTY_DERIVED):
+            result = evaluated_quantity(budget, point["point_id"], name)
+            if result is None:
+                continue
+            point[f"{name}_lower"], point[f"{name}_upper"] = result["lower"], result["upper"]
+            point[f"{name}_uncertainty_label"] = f"± {result['label'].split(' ± ', 1)[1]} (k = {result['k']:g})"
+            evaluated_ids.add(point["point_id"])
+            banded_keys.add(name)
+    blocked = _blocking_summary(budget)
+    if not isinstance(budget, dict) or not evaluated_ids:
+        return {"status": "not_evaluated", "metrology": "unquantified", "evaluated_point_ids": [],
+                "note": "Uncertainty is unquantified: no readback uncertainty budget was evaluated for this analysis."
+                        + (f" Blocking terms: {blocked}." if blocked else "")
+                        + " No validated uncertainty bands or difference-resolution claims are provided."}
+    k = budget.get("coverage_factor")
+    metrology = str(budget.get("metrology", "unquantified"))
+    source = f"uncertainty.json ({budget.get('schema_version')}, k = {k:g})"
+    by_id = {p["point_id"]: p for p in points}
+    for figure in figures:
+        keys = (f"{figure.y_key}_lower", f"{figure.y_key}_upper")
+        if figure.y_key in banded_keys and any(keys[0] in by_id[pid] for s in figure.series for pid in s.point_ids):
+            figure.lower_key, figure.upper_key, figure.uncertainty_source = *keys, source
+            unit = "percentage points" if figure.y_key == "efficiency_pct" else None
+            figure.caption += (f" Shaded bands are expanded uncertainties (k = {k:g}"
+                               + (f", in {unit}" if unit else "") + f") from the declared readback specifications ({metrology}); "
+                               "they are not validated 95 % confidence intervals, and points without a band were not evaluated.")
+    metric_quantity = {"highest-observed-efficiency": "efficiency_pct", "highest-qualified-input-current": "Iin_A"}
+    for metric in metrics:
+        name = metric_quantity.get(metric.id)
+        pid = metric.selector.get("point_id")
+        result = evaluated_quantity(budget, pid, name) if name and isinstance(pid, str) else None
+        if result is not None:
+            metric.uncertainty = {"status": metrology, "standard": result["standard"], "expanded": result["expanded"],
+                                  "k": result["k"], "unit": result["unit"], "label": result["label"],
+                                  "independence_assumed": result.get("independence_assumed", True),
+                                  "reference": f"uncertainty.json#points/{pid}/{'quantities' if name in UNCERTAINTY_DERIVED else 'channels'}/{name}",
+                                  "reason": None}
+    status = str(budget.get("status", "partially_evaluated"))
+    note = (f"Uncertainty is {'evaluated' if status == 'evaluated' else 'partially evaluated'} from the declared readback "
+            f"specifications ({metrology}); ± values and bands are expanded uncertainties with k = {k:g}, not validated 95 % "
+            "confidence intervals. Efficiency uncertainty is in percentage points; loss uncertainty is propagated separately in watts. "
+            "Systematic terms are not reduced by averaging. ADC freshness and calibration remain unquantified aspects.")
+    if status != "evaluated":
+        note += (" Not evaluated for some points or quantities"
+                 + (f"; blocking terms: {blocked}" if blocked else "; see the per-point reasons in uncertainty.json") + ".")
+    return {"status": status, "metrology": metrology, "coverage_factor": k,
+            "coverage_factor_note": budget.get("coverage_factor_note"), "evaluated_point_ids": sorted(evaluated_ids),
+            "banded_quantities": sorted(banded_keys), "specification_status": {
+                q: c.get("status") for q, c in budget.get("channels", {}).items() if isinstance(c, dict)},
+            "unquantified_aspects": list(budget.get("unquantified_aspects", [])), "note": note}
+
+
 def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[dict],
                        revision: str = "r0001") -> ReportModel:
     evidence_label = _evidence_label(plan, run)
@@ -850,6 +942,7 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
                            + f"; {limit:g} A supply setting",
                 selector={"point_id": endpoint["point_id"]}, point_ids=[endpoint["point_id"]],
                 figure_ids=["fig-source-current"]))
+    uncertainty = _apply_uncertainty(points, figures, metrics, analysis.get("uncertainty"))
     for metric in metrics:
         metric.qualification = f"{observation} observation"
     summary = [f"{len(valid)} of {len(points)} requested operating points produced qualified {observation} DC results."]
@@ -939,7 +1032,11 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
     if metrics and metrics[0].id == "highest-observed-efficiency":
         m = metrics[0]
         summary_evidence.append(SummaryEvidence(paragraph_index=len(summary), metric_ids=[m.id]))
-        summary.append(f"Highest observed path efficiency: {m.value:.2f}% at {m.conditions}.")
+        if m.uncertainty.get("expanded") is not None and m.uncertainty.get("label"):
+            summary.append(f"Highest observed path efficiency: {m.uncertainty['label']} (k = {m.uncertainty['k']:g}, "
+                           f"{m.uncertainty['status']}) at {m.conditions}.")
+        else:
+            summary.append(f"Highest observed path efficiency: {m.value:.2f}% at {m.conditions}.")
     line_metrics = [m for m in metrics if m.id.startswith("line-span-")]
     if line_metrics:
         m = max(line_metrics, key=lambda item: item.value)
@@ -968,7 +1065,7 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
          f"SYNTHETIC: these observations come from a deterministic plant model, not the physical {plan.dut.identity.model}."),
         "DUT ratings were supplied by the owner and are not verified against the sample label.",
         f"Measurement locations — {locations}. The declared boundary is {boundary}; path loss is not solely module heat.",
-        "Uncertainty is unquantified. No validated uncertainty bands or difference-resolution claims are provided.",
+        uncertainty["note"],
         "Topology, controller, isolation, calibration and protection behavior are unknown.",
         "No schematic, board photograph or temperature channels were supplied.",
         f"This DC grid does not by itself qualify the claimed {plan.dut.ratings.output_power_rated_W:g} W rating, ripple, transient or thermal behavior.",
@@ -1012,7 +1109,7 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
         summary=summary, summary_evidence=summary_evidence,
         method=_report_method(plan, run, analysis, raw_samples),
         prose=[analysis["aggregation"], analysis["sign_convention"]],
-        limitations=limitations, raw_samples=dict(grouped), provenance=provenance)
+        limitations=limitations, raw_samples=dict(grouped), provenance=provenance, uncertainty=uncertainty)
 
 
 def analyze_run(run_dir: Path, *, version: str = FORMULA_VERSION) -> Path:
