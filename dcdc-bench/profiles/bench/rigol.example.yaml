@@ -28,6 +28,11 @@ load:
   remote_sense_required: true
   mode: CC
   min_current_A: 0.0
+# Readback specifications are UNKNOWN. No numeric value is entered here on purpose: the
+# bench owner transcribes the readback (measurement) terms for the exact model, range and
+# firmware from the cited datasheet and records the calibration status. Until every term
+# and the calibration status are declared, uncertainty.json reports not_evaluated.
+# See docs/uncertainty-budget.md for each field and the formulas.
 measurements:
   Vin_V:
     instrument_id: source
@@ -38,6 +43,23 @@ measurements:
     resolution: null
     accuracy: null
     programming_accuracy: null
+    readback_specification:
+      role: readback
+      status: unknown
+      source: unknown
+      source_candidates:
+      - 'R1 Rigol DP800 datasheet, readback accuracy and resolution for the exact source model and range: https://www.rigol.com/dam/global/downloads/brochures/en/data-sheet/dc-powers/DP800_DataSheet_EN.pdf'
+      - No numeric value is entered here. The bench owner must transcribe the readback terms for the exact model, firmware and range from the cited document and record the calibration status.
+      unit: V
+      percent_of_reading: null
+      percent_of_range: null
+      range_value: null
+      absolute_offset: null
+      resolution: null
+      temperature_coefficient: null
+      calibration:
+        status: unknown
+      applicable_conditions: null
   Iin_A:
     instrument_id: source
     quantity: Iin_A
@@ -47,6 +69,23 @@ measurements:
     resolution: null
     accuracy: null
     programming_accuracy: null
+    readback_specification:
+      role: readback
+      status: unknown
+      source: unknown
+      source_candidates:
+      - 'R1 Rigol DP800 datasheet, readback accuracy and resolution for the exact source model and range: https://www.rigol.com/dam/global/downloads/brochures/en/data-sheet/dc-powers/DP800_DataSheet_EN.pdf'
+      - No numeric value is entered here. The bench owner must transcribe the readback terms for the exact model, firmware and range from the cited document and record the calibration status.
+      unit: A
+      percent_of_reading: null
+      percent_of_range: null
+      range_value: null
+      absolute_offset: null
+      resolution: null
+      temperature_coefficient: null
+      calibration:
+        status: unknown
+      applicable_conditions: null
   Vout_V:
     instrument_id: load
     quantity: Vout_V
@@ -56,6 +95,23 @@ measurements:
     resolution: null
     accuracy: null
     programming_accuracy: null
+    readback_specification:
+      role: readback
+      status: unknown
+      source: unknown
+      source_candidates:
+      - 'R4 Rigol DL3000 datasheet, readback (measurement) specification only; do not transcribe the CC programming accuracy: https://www.rigol.com/dam/global/downloads/brochures/en/data-sheet/dc-load/DL3000_DataSheet_EN.pdf'
+      - No numeric value is entered here. The bench owner must transcribe the readback terms for the exact model, firmware and range from the cited document and record the calibration status.
+      unit: V
+      percent_of_reading: null
+      percent_of_range: null
+      range_value: null
+      absolute_offset: null
+      resolution: null
+      temperature_coefficient: null
+      calibration:
+        status: unknown
+      applicable_conditions: null
   Iout_A:
     instrument_id: load
     quantity: Iout_A
@@ -65,6 +121,29 @@ measurements:
     resolution: null
     accuracy: null
     programming_accuracy: null
+    readback_specification:
+      role: readback
+      status: unknown
+      source: unknown
+      source_candidates:
+      - 'R4 Rigol DL3000 datasheet, readback (measurement) specification only; do not transcribe the CC programming accuracy: https://www.rigol.com/dam/global/downloads/brochures/en/data-sheet/dc-load/DL3000_DataSheet_EN.pdf'
+      - No numeric value is entered here. The bench owner must transcribe the readback terms for the exact model, firmware and range from the cited document and record the calibration status.
+      unit: A
+      percent_of_reading: null
+      percent_of_range: null
+      range_value: null
+      absolute_offset: null
+      resolution: null
+      temperature_coefficient: null
+      calibration:
+        status: unknown
+      applicable_conditions: null
+uncertainty_policy:
+  coverage_factor: 2.0
+  linear_model_relative_uncertainty_bound: 0.1
+  include_repeatability_in_combined: true
+  policy_origin: draft default; adjust with a recorded justification
+readback_correlations: []
 measurement_boundary: source-to-DUT-output path
 notes:
 - TEMPLATE ONLY. Confirm physical source/load model, firmware, identity, capabilities
@@ -75,3 +154,5 @@ notes:
   does not establish physical ratings.
 - No endpoints, serials, readback accuracy, or safety approval are provided. All real
   execution remains unavailable in M0/M1.
+- Readback specifications are unknown until the owner transcribes them from R1/R4 for the
+  exact model and range and records calibration status; the budget stays not_evaluated.

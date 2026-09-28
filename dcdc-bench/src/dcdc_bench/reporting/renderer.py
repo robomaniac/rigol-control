@@ -579,7 +579,12 @@ def _body(model: dict) -> str:
             value = metric.get("value")
             display_value = (f"{value:.2f}" if metric.get("id") == "highest-observed-efficiency"
                              and isinstance(value, (int, float)) else _number(value))
-            out.append(f"| {_md(metric['label'])} | {_md(display_value)} {_md(metric.get('unit',''))} | "
+            uncertainty = metric.get("uncertainty") or {}
+            # ± text appears only for an evaluated budget (UNC-02); k is stated, never "95 %".
+            cell = (f"{uncertainty['label']} (k = {_number(uncertainty.get('k'))})"
+                    if _finite(uncertainty.get("expanded")) and isinstance(uncertainty.get("label"), str)
+                    else f"{display_value} {metric.get('unit','')}")
+            out.append(f"| {_md(metric['label'])} | {_md(cell)} | "
                        f"{_md(metric.get('conditions',''))} {refs} |")
         out.append("")
     coverage = model.get("coverage", {})
@@ -591,7 +596,12 @@ def _body(model: dict) -> str:
                     "; ".join(f"{k}: {v}" for k,v in counts.items() if k not in ("requested", "valid")) or "none"])
         if rows:
             out += ["### Coverage", "", _rows_table(["Test", "Declared candidates" if source_search or voltage_sweep else "Requested", "Valid", "Other outcomes"], rows), ""]
-    out += ["", f"**Qualification:** {_md(evidence.lower())} observations; uncertainty unquantified. "
+    budget = model.get("uncertainty") or {}
+    qualification_text = ("uncertainty unquantified" if not budget.get("evaluated_point_ids") else
+                          f"uncertainty {str(budget.get('status', 'not_evaluated')).replace('_', ' ')} from declared readback "
+                          f"specifications ({budget.get('metrology', 'unquantified')}); ± values use k = "
+                          f"{_number(budget.get('coverage_factor'))} and are not validated 95 % intervals")
+    out += ["", f"**Qualification:** {_md(evidence.lower())} observations; {_md(qualification_text)}. "
             "This partial-power DC grid does not qualify rated power, temperature, ripple or transient behavior.", ""]
     stages = list(dict.fromkeys(point.get("phase_label") for point in model["points"] if point.get("phase_label")))
     if stages or voltage_sweep or model.get("execution", {}).get("startup_descent"):
@@ -881,8 +891,8 @@ def _body(model: dict) -> str:
     else:
         out += ["No attempted measurements were excluded." if source_search or voltage_sweep else
                 "No excluded points are recorded in this analysis.", ""]
-    out += ["Uncertainty: " + _md(model.get("uncertainty_note", "No applicable validated uncertainty budget "
-            "is supplied. Bands and difference-resolution conclusions are not fabricated.")), "",
+    out += ["Uncertainty: " + _md((model.get("uncertainty") or {}).get("note") or "No applicable validated uncertainty budget "
+            "is supplied. Bands and difference-resolution conclusions are not fabricated."), "",
             "**Run:** " + _md(model["run_id"]) + "  ",
             "**Analysis:** " + _md(model["analysis_id"]) + "  ",
             "**Report revision:** " + _md(model.get("report_revision", "not supplied")), "",

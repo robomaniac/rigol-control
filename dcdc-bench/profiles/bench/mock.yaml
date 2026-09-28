@@ -28,6 +28,9 @@ load:
   remote_sense_required: true
   mode: CC
   min_current_A: 0.0
+# Every readback_specification below is a SYNTHETIC EXAMPLE (status synthetic_example).
+# The numbers describe no instrument; they exist so the mock path demonstrates an
+# evaluated budget end to end. The evaluator refuses them on any real bench.
 measurements:
   Vin_V:
     instrument_id: synthetic-source
@@ -38,6 +41,23 @@ measurements:
     resolution: null
     accuracy: null
     programming_accuracy: null
+    readback_specification:
+      role: readback
+      status: synthetic_example
+      source: synthetic mock plant, not an instrument
+      unit: V
+      percent_of_reading: 0.05
+      percent_of_range: 0.02
+      range_value: 60.0
+      absolute_offset: 0.0
+      resolution: 0.001
+      calibration:
+        status: within_interval
+        certificate: synthetic-none
+        note: synthetic plant; no instrument or certificate exists
+      applicable_conditions: synthetic; no environmental conditions apply
+      distribution: rectangular
+      distribution_justification: synthetic error limit treated as a rectangular bound for demonstration
   Iin_A:
     instrument_id: synthetic-source
     quantity: Iin_A
@@ -47,6 +67,23 @@ measurements:
     resolution: null
     accuracy: null
     programming_accuracy: null
+    readback_specification:
+      role: readback
+      status: synthetic_example
+      source: synthetic mock plant, not an instrument
+      unit: A
+      percent_of_reading: 0.1
+      percent_of_range: 0.05
+      range_value: 1.0
+      absolute_offset: 0.0
+      resolution: 0.0001
+      calibration:
+        status: within_interval
+        certificate: synthetic-none
+        note: synthetic plant; no instrument or certificate exists
+      applicable_conditions: synthetic; no environmental conditions apply
+      distribution: rectangular
+      distribution_justification: synthetic error limit treated as a rectangular bound for demonstration
   Vout_V:
     instrument_id: synthetic-load
     quantity: Vout_V
@@ -56,6 +93,23 @@ measurements:
     resolution: null
     accuracy: null
     programming_accuracy: null
+    readback_specification:
+      role: readback
+      status: synthetic_example
+      source: synthetic mock plant, not an instrument
+      unit: V
+      percent_of_reading: 0.05
+      percent_of_range: 0.01
+      range_value: 150.0
+      absolute_offset: 0.0
+      resolution: 0.001
+      calibration:
+        status: within_interval
+        certificate: synthetic-none
+        note: synthetic plant; no instrument or certificate exists
+      applicable_conditions: synthetic; no environmental conditions apply
+      distribution: rectangular
+      distribution_justification: synthetic error limit treated as a rectangular bound for demonstration
   Iout_A:
     instrument_id: synthetic-load
     quantity: Iout_A
@@ -65,11 +119,35 @@ measurements:
     resolution: null
     accuracy: null
     programming_accuracy: null
+    readback_specification:
+      role: readback
+      status: synthetic_example
+      source: synthetic mock plant, not an instrument
+      unit: A
+      percent_of_reading: 0.1
+      percent_of_range: 0.02
+      range_value: 4.0
+      absolute_offset: 0.0
+      resolution: 0.0001
+      calibration:
+        status: within_interval
+        certificate: synthetic-none
+        note: synthetic plant; no instrument or certificate exists
+      applicable_conditions: synthetic; no environmental conditions apply
+      distribution: rectangular
+      distribution_justification: synthetic error limit treated as a rectangular bound for demonstration
+uncertainty_policy:
+  coverage_factor: 2.0
+  linear_model_relative_uncertainty_bound: 0.1
+  include_repeatability_in_combined: true
+  policy_origin: draft default; adjust with a recorded justification
+readback_correlations: []
 measurement_boundary: source-to-DUT-output path
 notes:
 - SYNTHETIC profiles model a coupled converter and source/load. These are not observations
   of the physical DUT.
 - The synthetic source uses the published CH1 voltage/current envelope; the synthetic
   load capabilities are simulation assumptions.
-- Readback uncertainty is unquantified. Programming accuracy is not substituted.
+- Readback specifications are SYNTHETIC EXAMPLES so the mock path demonstrates an evaluated
+  budget; they describe no instrument. Programming accuracy is not substituted for readback.
 - Source-terminal input measurements include input wiring losses in path efficiency.

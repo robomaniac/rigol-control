@@ -16,7 +16,7 @@ import signal
 import time
 import uuid
 
-from .domain import BenchProfile, Plan, RawSample
+from .domain import BenchProfile, Plan, RawSample, unknown_readback_specification
 from .planning import _hash_payload, build_plan
 from .services import default_plan
 from .storage import RunStore, atomic_json
@@ -227,6 +227,8 @@ def pilot_plan(*, loaded_only: bool = False):
         binding.instrument_id = "source" if name in ("Vin_V", "Iin_A") else "load"
         if name == "Vout_V": binding.location = "load_input_terminals_local_sense"
         if name == "Iout_A": binding.location = "load_input"
+        # A real bench never inherits the mock profile's synthetic readback terms.
+        binding.readback_specification = unknown_readback_specification(name)
     bench.protective_controls.policy_id = POLICY_ID
     bench.protective_controls.source_current_limit_A = ILIMIT
     bench.protective_controls.dut_input_overvoltage_V = SOURCE_OVP
