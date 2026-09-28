@@ -44,10 +44,8 @@ SPEC_RAW_FIELDS = frozenset({
     "quality_flags",
 })
 
-# Exact gap between bringup.RigolPilot and the source/load contracts. A partial fix must
-# update this ledger; a complete fix flips the strict xfail below into a failure to remove.
-RIGOL_PILOT_GAPS = frozenset({"identify", "configure", "status", "close", "source_capabilities", "source_on",
-                              "source_off", "load_capabilities", "load_on", "load_off"})
+# bringup.RigolPilot conforms to the source/load contracts; any regression reappears here.
+RIGOL_PILOT_GAPS = frozenset()
 
 
 def protocol_members(protocol) -> set[str]:
@@ -158,8 +156,6 @@ def test_an_incomplete_fake_is_rejected_by_the_source_contract():
     assert not isinstance(object(), MeasurementProvider)
 
 
-@pytest.mark.xfail(strict=True, reason="RigolPilot lacks identify, configure, status, close, source_capabilities, "
-                   "source_on, source_off, load_capabilities, load_on, load_off; owned by the hardware-adapter workstream")
 def test_rigol_pilot_conforms_to_the_source_and_load_contracts():
     pilot = rigol_pilot()
     gaps = missing_members(pilot, SourceAdapter) | missing_members(pilot, LoadAdapter)
@@ -167,8 +163,6 @@ def test_rigol_pilot_conforms_to_the_source_and_load_contracts():
     assert isinstance(pilot, SourceAdapter) and isinstance(pilot, LoadAdapter)
 
 
-@pytest.mark.xfail(strict=True, reason="RigolPilot.read(quantity) does not accept the acquisition clock `now`; "
-                   "owned by the hardware-adapter workstream")
 def test_rigol_pilot_read_matches_the_measurement_provider_signature():
     assert parameters(rigol_pilot().read)[:2] == parameters(MeasurementProvider.read)
 

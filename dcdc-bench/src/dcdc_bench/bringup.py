@@ -58,9 +58,64 @@ class RigolPilot:
     """
     abort = BringupAbort
 
-    def __init__(self, supply, load, supply_transport, load_transport):
+    def __init__(self, supply, load, supply_transport, load_transport, *, bench: BenchProfile | None = None):
         self.supply, self.load = supply, load
         self.st, self.lt = supply_transport, load_transport
+        self.bench = bench
+
+    # -- SourceAdapter / LoadAdapter contract (domain.py section 5.2) --------
+
+    def identify(self):
+        def describe(identity):
+            return asdict(identity) if hasattr(identity, "__dataclass_fields__") else dict(vars(identity))
+        return {"source": describe(self.supply.identify()), "load": describe(self.load.identify())}
+
+    def _capabilities(self, role):
+        if self.bench is None:
+            raise self.abort("No bench profile is bound to this adapter; capabilities are unknown")
+        return getattr(self.bench, role)
+
+    def source_capabilities(self):
+        return self._capabilities("source")
+
+    def load_capabilities(self):
+        return self._capabilities("load")
+
+    def configure(self, vin=None, iout=None, now=None):
+        """Program protections and setpoints while both outputs are OFF."""
+        self.configure_protections()
+
+    def source_on(self):
+        self.require_outputs_off("immediately before enabling the source")
+        self.supply.output_on(1)
+
+    def source_off(self):
+        self.supply.output_off(1)
+
+    def load_on(self):
+        if not self.supply.get_output_enabled(1):
+            raise self.abort("Load input stays OFF until the source output is verified ON")
+        self.load.input_on()
+
+    def load_off(self):
+        self.load.input_off()
+
+    def status(self):
+        return {"source_output_on": self.supply.get_output_enabled(1),
+                "load_input_on": self.load.get_input_enabled(),
+                "source_mode": self.st.query(":OUTP:CVCC? CH1").strip(),
+                "remote_sense_verified": False}
+
+    def close(self):
+        """Release both transports independently; never touches output state."""
+        first = None
+        for transport in (self.st, self.lt):
+            try:
+                transport.close()
+            except Exception as exc:  # noqa: BLE001 - one failed close must not skip the other
+                first = first or exc
+        if first is not None:
+            raise first
 
     def _write_source(self, command):
         self.st.write(command)
@@ -129,7 +184,7 @@ class RigolPilot:
     def mode(self):
         mode = self.st.query(":OUTP:CVCC? CH1").strip()
         if mode != "CV":
-            raise BringupAbort(f"Source mode {mode}; nominal input voltage is not established")
+            raise self.abort(f"Source mode {mode}; nominal input voltage is not established")
         return mode
 
     def load_status(self, enabled):
@@ -139,12 +194,12 @@ class RigolPilot:
         # voltage, overvoltage, shutdown. RUN/VON/RS are not fault bits.
         mask = 15883
         if status & mask:
-            raise BringupAbort(f"Load questionable condition {status}; stopping rather than clearing it")
+            raise self.abort(f"Load questionable condition {status}; stopping rather than clearing it")
         if self.load.get_input_enabled() != enabled:
-            raise BringupAbort("Load input state no longer matches the requested phase")
+            raise self.abort("Load input state no longer matches the requested phase")
         return status
 
-    def read(self, quantity):
+    def read(self, quantity, now=None):
         return {"Vin_V": lambda: self.supply.measure_voltage(1),
                 "Iin_A": lambda: self.supply.measure_current(1),
                 "Vout_V": self.load.measure_voltage,

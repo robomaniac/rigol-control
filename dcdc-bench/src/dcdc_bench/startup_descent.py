@@ -42,11 +42,16 @@ class StartupDescentRigol(SourceLimitRigol):
             raise ExtendedAbort("Source must be in CV before a live voltage change")
         _number(self.supply.get_current_limit(1), 1., "Live source current limit", .0005)
         _number(self.load.get_current_setpoint(), LOAD_A, "Live load current request", .0005)
+        _number(self.supply.get_voltage_setpoint(1), self.voltage, "Live voltage setpoint before the step")
+        from benchctl.interfaces import ReadbackMismatchError, ScpiError
         try:
             self.supply.set_voltage_live(1, target, max_step_v=1.)
+        except (ScpiError, ReadbackMismatchError):
+            raise  # instrument faults keep their own type and the error status
         except (RuntimeError, ValueError) as exc:
             raise ExtendedAbort(f"Live voltage change refused by the driver: {exc}") from exc
-        self.supply.check_errors()
+        # This bench requires 1 mV setpoint agreement, tighter than the driver's 10 mV.
+        _number(self.supply.get_voltage_setpoint(1), target, "Live voltage request")
         self.voltage = target
 
 

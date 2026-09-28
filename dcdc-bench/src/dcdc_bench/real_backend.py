@@ -137,13 +137,13 @@ class ConfiguredProcedure:
                     procedure.check_cancel()
                 super()._write_source(command)
 
-            def configure(self):
+            def configure(self, *args, **kwargs):
                 procedure.check_cancel()
                 for transport, wanted in ((self.st, "DP821A"), (self.lt, "DL3031A")):
                     fields = transport.query("*IDN?").strip().split(",")
                     if len(fields) < 3 or fields[1].strip().upper() != wanted:
                         raise ExtendedAbort(f"This backend requires the verified {wanted} model")
-                super().configure()
+                super().configure(*args, **kwargs)
 
         self.adapter = ProfileRigol
 

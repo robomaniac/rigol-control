@@ -78,7 +78,11 @@ class ExtendedRigol(RigolPilot):
     initial_current = INITIAL_IOUT
     abort = ExtendedAbort
 
-    def configure(self):
+    def configure(self, vin=None, iout=None, now=None):
+        if vin is not None:
+            self.voltage = vin
+        if iout is not None:
+            self.initial_current = iout
         self.require_outputs_off()
         self.require_local_sense()
         self._write_source(":INST:NSEL 1")
@@ -119,6 +123,15 @@ class ExtendedRigol(RigolPilot):
             raise ExtendedAbort(f"Unexpected delayer stop condition: {stop!r}")
         if _delay_parameter(self.st.query(":DELAY:PARAMETER? 0,1")) != (0, "ON", HARDWARE_DEADLINE_S):
             raise ExtendedAbort("Delayer ON duration does not match the fixed hardware deadline")
+
+    def source_on(self):
+        self.start()
+
+    def cancel_deadline(self):
+        """Disarm the independent delayer only after the caller verified source OFF."""
+        self._write_source(":DELAY OFF")
+        if self.st.query(":DELAY?").strip().upper() != "OFF":
+            raise self.abort("Source delayer OFF was not verified")
 
     def start(self):
         if self.supply.get_output_enabled(1) or self.load.get_input_enabled():
@@ -288,7 +301,7 @@ def _run_fixed_unlocked(config_path: Path, out: Path, *, arm: bool = False, proc
               note="Residual load voltage is retained as an off-state observation, not a no-load result")
         if not math.isfinite(off_source) or abs(off_source) > .5 or not -.05 <= off_load <= adapter.output_voltage_limit:
             raise ExtendedAbort("Unexpected external/residual voltage while outputs are OFF")
-        pilot = adapter(supply, load, transports["source"], transports["load"])
+        pilot = adapter(supply, load, transports["source"], transports["load"], bench=plan.bench)
         pilot.configure()
         event("protection_verified", source_current_limit_A=pilot.current_limit, source_OVP_V=pilot.source_ovp,
               source_OCP_A=pilot.source_ocp, output_guard_V=[getattr(procedure, "lower_output", VOUT_MIN), pilot.output_voltage_limit], output_guard_A=pilot.output_current_limit,

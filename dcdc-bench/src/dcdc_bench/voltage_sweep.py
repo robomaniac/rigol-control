@@ -164,9 +164,7 @@ class VoltageSweepProcedure:
         pilot.supply.output_off(1)
         if pilot.supply.get_output_enabled(1):
             raise ExtendedAbort("Source OFF was not verified before voltage transition; timer left active")
-        pilot._write_source(":DELAY OFF")
-        if pilot.st.query(":DELAY?").strip().upper() != "OFF":
-            raise ExtendedAbort("Source timer OFF was not verified before voltage transition")
+        pilot.cancel_deadline()
         pilot.supply.output_off(1)
         if pilot.supply.get_output_enabled(1):
             raise ExtendedAbort("Source OFF was not verified after cancelling its timer")

@@ -188,7 +188,8 @@ def test_protection_programming_scpi_lives_only_in_the_shared_adapter():
     from pathlib import Path
     import dcdc_bench
     package = Path(dcdc_bench.__file__).parent
-    literals = (":OUTP:OVP:VAL CH1,", ":OUTP:OCP:VAL CH1,", ":SOUR:CURR:VLIM ", ":SOUR:CURR:ILIM ", ":SYST:OTP ON")
+    literals = (":OUTP:OVP:VAL CH1,", ":OUTP:OVP CH1,ON", ":OUTP:OCP:VAL CH1,", ":OUTP:OCP CH1,ON",
+                ":SOUR:CURR:RANG MIN", ":SOUR:CURR:SLEW:BOTH MIN", ":SOUR:CURR:VLIM ", ":SOUR:CURR:ILIM ", ":SYST:OTP ON")
     owners = {literal: sorted(path.name for path in package.rglob("*.py") if literal in path.read_text(encoding="utf-8"))
               for literal in literals}
     assert owners == {literal: ["bringup.py"] for literal in literals}, owners
