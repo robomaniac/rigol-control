@@ -51,43 +51,80 @@ class RecordingTransport:
 
 
 class RigolPilot:
-    """Thin driver adapter plus the verified protection/status extensions."""
+    """Thin driver adapter plus the verified protection/status extensions.
+
+    Every protection-setting SCPI sequence lives here once; the fixed
+    procedures only supply values. Subclasses set `abort` to their own error.
+    """
+    abort = BringupAbort
+
     def __init__(self, supply, load, supply_transport, load_transport):
         self.supply, self.load = supply, load
         self.st, self.lt = supply_transport, load_transport
 
-    def configure_protections(self):
+    def _write_source(self, command):
+        self.st.write(command)
+        self.supply.check_errors()
+
+    def _write_load(self, command):
+        self.lt.write(command)
+        self.load.check_errors()
+
+    def _readback(self, transport, query, wanted, description, tolerance=.001):
+        response = transport.query(query)
+        try:
+            actual = float(response)
+        except (TypeError, ValueError):
+            raise self.abort(f"{description}: malformed readback {response!r}") from None
+        if not math.isclose(actual, wanted, rel_tol=0., abs_tol=tolerance):
+            raise self.abort(f"{description}: expected {wanted:g}, read {response!r}")
+
+    def require_outputs_off(self, context="before configuration"):
         if self.supply.get_output_enabled(1) or self.load.get_input_enabled():
-            raise BringupAbort("Both outputs must be verified OFF before configuration")
-        if self.lt.query(":SOUR:SENS?").strip() not in ("0", "OFF"):
-            raise BringupAbort("This pilot requires local load sensing; separate sense wiring has not been confirmed")
-        for command in (f":OUTP:OVP:VAL CH1,{SOURCE_OVP}", ":OUTP:OVP CH1,ON",
-                        f":OUTP:OCP:VAL CH1,{SOURCE_OCP}", ":OUTP:OCP CH1,ON"):
-            self.st.write(command)
-            self.supply.check_errors()
-        for kind, wanted in (("OVP", SOURCE_OVP), ("OCP", SOURCE_OCP)):
-            actual = float(self.st.query(f":OUTP:{kind}:VAL? CH1"))
-            enabled = self.st.query(f":OUTP:{kind}? CH1").strip()
-            alarm = self.st.query(f":OUTP:{kind}:QUES? CH1").strip()
-            if not math.isclose(actual, wanted, abs_tol=.001) or enabled not in ("ON", "1") or alarm != "NO":
-                raise BringupAbort(f"Source {kind} protection verification failed")
+            raise self.abort(f"Both outputs must be verified OFF {context}")
+
+    def require_local_sense(self):
+        if self.lt.query(":SOUR:SENS?").strip().upper() not in ("0", "OFF"):
+            raise self.abort("Local load sensing is required; this pilot requires local load sensing "
+                             "and separate sense wiring has not been confirmed")
+
+    def apply_source_protections(self, ovp_V, ocp_A):
+        """Program and verify CH1 OVP/OCP; never touches output state."""
+        for command in (f":OUTP:OVP:VAL CH1,{ovp_V}", ":OUTP:OVP CH1,ON",
+                        f":OUTP:OCP:VAL CH1,{ocp_A}", ":OUTP:OCP CH1,ON"):
+            self._write_source(command)
+        for kind, wanted in (("OVP", ovp_V), ("OCP", ocp_A)):
+            self._readback(self.st, f":OUTP:{kind}:VAL? CH1", wanted, f"Source {kind} protection verification failed")
+            enabled = self.st.query(f":OUTP:{kind}? CH1").strip().upper()
+            alarm = self.st.query(f":OUTP:{kind}:QUES? CH1").strip().upper()
+            if enabled not in ("ON", "1") or alarm != "NO":
+                raise self.abort(f"Source {kind} protection verification failed: disabled or tripped")
+
+    def apply_load_cc_limits(self, vlim_V, ilim_A):
+        """Tighten CC range/slew and program verified voltage/current limits."""
+        for command in (":SOUR:CURR:RANG MIN", ":SOUR:CURR:SLEW:BOTH MIN",
+                        f":SOUR:CURR:VLIM {vlim_V}", f":SOUR:CURR:ILIM {ilim_A}"):
+            self._write_load(command)
+        for query, wanted in ((":SOUR:CURR:VLIM?", vlim_V), (":SOUR:CURR:ILIM?", ilim_A)):
+            self._readback(self.lt, query, wanted, "Load CC limit readback verification failed")
+
+    def enable_source_otp(self):
+        self._write_source(":SYST:OTP ON")
+        if self.st.query(":SYST:OTP?").strip().upper() not in ("1", "ON"):
+            raise self.abort("Source thermal protection was not verified enabled")
+
+    def configure_protections(self):
+        self.require_outputs_off()
+        self.require_local_sense()
+        self.apply_source_protections(SOURCE_OVP, SOURCE_OCP)
         self.supply.set_voltage(1, VIN)
         self.supply.set_current_limit(1, ILIMIT)
         self.load.set_mode("cc")
         # The instrument rejects an upper current limit below its retained
         # setpoint, even while input is OFF. Lower the request first.
         self.load.set_current(IOUT)
-        for command in (":SOUR:CURR:RANG MIN", ":SOUR:CURR:SLEW:BOTH MIN",
-                        f":SOUR:CURR:VLIM {VOUT_MAX}", ":SOUR:CURR:ILIM 0.15"):
-            self.lt.write(command)
-            self.load.check_errors()
-        for command, value in ((":SOUR:CURR:VLIM?", VOUT_MAX), (":SOUR:CURR:ILIM?", .15)):
-            if not math.isclose(float(self.lt.query(command)), value, abs_tol=.001):
-                raise BringupAbort("Load CC limit readback verification failed")
-        self.st.write(":SYST:OTP ON")
-        self.supply.check_errors()
-        if self.st.query(":SYST:OTP?").strip() not in ("1", "ON"):
-            raise BringupAbort("Source thermal protection was not verified enabled")
+        self.apply_load_cc_limits(VOUT_MAX, .15)
+        self.enable_source_otp()
 
     def mode(self):
         mode = self.st.query(":OUTP:CVCC? CH1").strip()

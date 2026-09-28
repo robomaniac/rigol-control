@@ -76,33 +76,17 @@ class ExtendedRigol(RigolPilot):
     output_voltage_limit = VOUT_MAX
     output_current_limit = IOUT_MAX
     initial_current = INITIAL_IOUT
-
-    def _write_source(self, command):
-        self.st.write(command)
-        self.supply.check_errors()
-
-    def _write_load(self, command):
-        self.lt.write(command)
-        self.load.check_errors()
+    abort = ExtendedAbort
 
     def configure(self):
-        if self.supply.get_output_enabled(1) or self.load.get_input_enabled():
-            raise ExtendedAbort("Both outputs must be verified OFF before configuration")
-        if self.lt.query(":SOUR:SENS?").strip().upper() not in ("0", "OFF"):
-            raise ExtendedAbort("Local load sensing is required; remote sense wiring is unconfirmed")
+        self.require_outputs_off()
+        self.require_local_sense()
         self._write_source(":INST:NSEL 1")
         _number(self.st.query(":INST:NSEL?"), 1., "Selected source channel", 0.)
         for command in (":TIMER?", ":DELAY?"):
             if self.st.query(command).strip().upper() != "OFF":
                 raise ExtendedAbort("An existing source timer/delayer is active; no test was enabled")
-        for command in (f":OUTP:OVP:VAL CH1,{self.source_ovp}", ":OUTP:OVP CH1,ON",
-                        f":OUTP:OCP:VAL CH1,{self.source_ocp}", ":OUTP:OCP CH1,ON"):
-            self._write_source(command)
-        for kind, wanted in (("OVP", self.source_ovp), ("OCP", self.source_ocp)):
-            _number(self.st.query(f":OUTP:{kind}:VAL? CH1"), wanted, f"Source {kind}")
-            if (self.st.query(f":OUTP:{kind}? CH1").strip().upper() not in ("ON", "1")
-                    or self.st.query(f":OUTP:{kind}:QUES? CH1").strip().upper() != "NO"):
-                raise ExtendedAbort(f"Source {kind} protection is disabled or tripped")
+        self.apply_source_protections(self.source_ovp, self.source_ocp)
         self.supply.set_voltage(1, self.voltage)
         self.supply.set_current_limit(1, self.current_limit)
         # Driver tolerances cover multiple models. This fixed pilot requires
@@ -112,14 +96,8 @@ class ExtendedRigol(RigolPilot):
         self.load.set_mode("cc")
         # Lower retained request before tightening CC limits, while input OFF.
         self.load.set_current(self.initial_current)
-        for command in (":SOUR:CURR:RANG MIN", ":SOUR:CURR:SLEW:BOTH MIN",
-                        f":SOUR:CURR:VLIM {self.output_voltage_limit}", f":SOUR:CURR:ILIM {self.output_current_limit}"):
-            self._write_load(command)
-        for command, wanted in ((":SOUR:CURR:VLIM?", self.output_voltage_limit), (":SOUR:CURR:ILIM?", self.output_current_limit)):
-            _number(self.lt.query(command), wanted, "Load CC limit")
-        self._write_source(":SYST:OTP ON")
-        if self.st.query(":SYST:OTP?").strip().upper() not in ("1", "ON"):
-            raise ExtendedAbort("Source thermal protection is not enabled")
+        self.apply_load_cc_limits(self.output_voltage_limit, self.output_current_limit)
+        self.enable_source_otp()
         # Configuration alone never enables output. Only start() does that.
         for command in (":DELAY:GROUPS 1", ":DELAY:CYCLES N,1", ":DELAY:ENDSTATE OFF",
                         ":DELAY:STOP NONE", f":DELAY:PARAMETER 0,ON,{HARDWARE_DEADLINE_S}"):

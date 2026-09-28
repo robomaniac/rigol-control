@@ -178,6 +178,17 @@ def test_recording_transport_preserves_numeric_scpi_text_without_reformatting():
     assert underlying.writes == [":SOUR:INP:STAT OFF"]
 
 
+def test_protection_programming_scpi_lives_only_in_the_shared_adapter():
+    """A protection fix must propagate to every fixed procedure automatically."""
+    from pathlib import Path
+    import dcdc_bench
+    package = Path(dcdc_bench.__file__).parent
+    literals = (":OUTP:OVP:VAL CH1,", ":OUTP:OCP:VAL CH1,", ":SOUR:CURR:VLIM ", ":SOUR:CURR:ILIM ", ":SYST:OTP ON")
+    owners = {literal: sorted(path.name for path in package.rglob("*.py") if literal in path.read_text(encoding="utf-8"))
+              for literal in literals}
+    assert owners == {literal: ["bringup.py"] for literal in literals}, owners
+
+
 def test_retained_current_request_is_lowered_before_tightening_current_limit():
     pilot, _, lt, calls = pilot_fixture()
     state = {"setpoint": .25}
