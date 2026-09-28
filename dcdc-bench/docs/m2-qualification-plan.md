@@ -151,7 +151,7 @@ kept separate from programming accuracy and from display resolution (brief
   startup Iin down to 0.0013 A, startup Vout up to 12.146 V. Displayed resolution of the raw SCPI
   responses: source 1 mV / 0.1 mA (`12.009`, `0.0016`), load 1 µV / 1 µA
   (`12.145664`, `0.011009`). Resolution is not accuracy.
-- Calibration: no calibration record for DP8G223300053 or DL3A222600546 exists
+- Calibration: no calibration record for (supply serial: private inventory) or (load serial: private inventory) exists
   in the repository; status **unknown**.
 - Two recorded readback anomalies that must be explained before an accuracy
   claim at light load:
@@ -302,7 +302,7 @@ not evidence of a higher certified rating"; §17 "usable ratings and ranges".
 ### Evidence that exists now
 
 - Identity from `*IDN?` in every run: `RIGOL TECHNOLOGIES,DL3031A,
-  DL3A222600546,00.01.04.00.05`. No label photo, no modification record.
+  (load serial: private inventory),00.01.04.00.05`. No label photo, no modification record.
 - The bench profile declares `max_current_A 2.55`, `max_voltage_V 15.0`,
   `max_power_W 34.0`, `min_voltage_V 0.15`, `mode CC`,
   `remote_sense_supported true`, `remote_sense_required false`,

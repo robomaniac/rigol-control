@@ -84,8 +84,8 @@ automated attempt and one unrecorded operator observation".
 
 | Item | Value | Source |
 | --- | --- | --- |
-| Source | RIGOL DP821A, serial DP8G223300053, firmware 00.01.16, CH1 | `raw/events.jsonl` `identity_verified` |
-| Load | RIGOL DL3031A, serial DL3A222600546, firmware 00.01.04.00.05 | same |
+| Source | RIGOL DP821A, serial (supply serial: private inventory), firmware 00.01.16, CH1 | `raw/events.jsonl` `identity_verified` |
+| Load | RIGOL DL3031A, serial (load serial: private inventory), firmware 00.01.04.00.05 | same |
 | Programmed input | 12.000 V (readback `12.000`) | `scpi.jsonl` 34–36 |
 | Source current setting | 1.000 A (readback `1.0000`) | `scpi.jsonl` 38–40 |
 | Source OVP / OCP | 13.0 V ON / 1.05 A ON, both `QUES? → NO` | `scpi.jsonl` 19–32 |
