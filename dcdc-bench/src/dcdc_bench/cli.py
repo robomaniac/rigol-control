@@ -50,7 +50,18 @@ def parser() -> argparse.ArgumentParser:
     command.add_argument("--report-root", type=Path, help="Existing saved report directory; preserve its /Runs links")
     command.add_argument("--host", default="127.0.0.1", choices=("127.0.0.1", "localhost", "::1"))
     command.add_argument("--port", type=int, default=8082)
-    for name in ("doctor", "compare"):
+    command = sub.add_parser("compare", help="Compare stored analyses of two finalized runs; commands no instrument")
+    command.add_argument("run_a", type=Path)
+    command.add_argument("run_b", type=Path)
+    command.add_argument("--out", required=True, type=Path)
+    command.add_argument("--analysis-a", help="Analysis revision of run A (default: its single or current revision)")
+    command.add_argument("--analysis-b", help="Analysis revision of run B (default: its single or current revision)")
+    command.add_argument("--tolerance-vin", type=float, default=.01, help="Requested input-voltage pairing tolerance (V)")
+    command.add_argument("--tolerance-iout", type=float, default=.001, help="Requested output-current pairing tolerance (A)")
+    command.add_argument("--interpolate", action="store_true", help="Add labeled INTERPOLATED rows; off by default")
+    command.add_argument("--covariance", type=Path, help="JSON covariance model between runs A and B")
+    command.add_argument("--overwrite", action="store_true", help="Replace an existing comparison folder")
+    for name in ("doctor",):
         sub.add_parser(name, help="Reserved for a later milestone").add_argument("arguments", nargs=argparse.REMAINDER)
     return root
 
@@ -97,6 +108,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "report":
             profile = load_profile(args.profile, ReportProfile) if args.profile else None
             print(report_run(args.run_dir, formats=args.formats, profile=profile))
+            return 0
+        if args.command == "compare":
+            from .comparison import compare_runs
+            print(compare_runs([args.run_a, args.run_b], args.out, analysis_ids=[args.analysis_a, args.analysis_b],
+                               requested_input_tolerance_V=args.tolerance_vin, requested_load_tolerance_A=args.tolerance_iout,
+                               interpolate=args.interpolate, covariance_path=args.covariance, overwrite=args.overwrite))
             return 0
         raise ValueError(f"{args.command} is deferred; this increment provides the mock CLI and offline reports")
     except ImportError as exc:

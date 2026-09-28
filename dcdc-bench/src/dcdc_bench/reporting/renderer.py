@@ -369,6 +369,9 @@ def _figure_references(model: dict) -> dict[str, dict]:
 
 
 def _plot_figure(model: dict, spec: dict, number: int):
+    if model.get("kind") == "comparison":
+        from .comparison import plot_comparison_figure
+        return plot_comparison_figure(model, spec, number)
     import plotly.graph_objects as go
 
     points = {p["point_id"]: p for p in model["points"]}
@@ -509,6 +512,9 @@ def _phase_outcome(value: Any) -> str:
 
 
 def _body(model: dict) -> str:
+    if model.get("kind") == "comparison":
+        from .comparison import comparison_body
+        return comparison_body(model)
     evidence = str(model.get("evidence_label", "Evidence type unknown"))
     out = ["## Summary {#summary}", "", f"**{_md(evidence)} — {_md(model.get('boundary', 'Boundary not supplied'))}.**",
         "", "This issued summary is fixed. Reader filters change exploratory views only.", ""]
@@ -1244,7 +1250,11 @@ def _render_report(report_model: dict, out_dir: Path, formats=("html", "pdf")) -
     try:
         # The numerical export needs no document toolchain; write it first so
         # a failed document build still leaves the issued selection inspectable.
-        manifest["exports"] = write_exports(model, out)
+        if model.get("kind") == "comparison":
+            from .comparison import write_comparison_exports
+            manifest["exports"] = write_comparison_exports(model, out)
+        else:
+            manifest["exports"] = write_exports(model, out)
         from plotly.offline import get_plotlyjs, get_plotlyjs_version
 
         manifest["versions"]["plotly_js"] = get_plotlyjs_version()

@@ -247,6 +247,9 @@ def test_real_cli_arm_and_future_commands_fail_without_touching_hardware(tmp_pat
     assert "mock execution only" in capsys.readouterr().err
     assert main(["run", "--plan", missing, "--arm"]) == 2
     assert "not implemented or approved" in capsys.readouterr().err
-    assert main(["compare"]) == 2
-    assert "deferred" in capsys.readouterr().err
+    with pytest.raises(SystemExit) as stopped:
+        main(["compare"])
+    assert stopped.value.code == 2
+    assert main(["compare", missing, missing, "--out", str(tmp_path / "never-written")]) == 2
+    assert "finalized run folder" in capsys.readouterr().err
     assert not list(tmp_path.iterdir())

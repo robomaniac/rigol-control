@@ -57,6 +57,10 @@ class FigureSeries(Contract):
     iout_target_A: float | None = None
     selection_key: str | None = None
     connect_points: bool = True
+    # Comparison overlays: color follows the operating condition, line style
+    # and marker follow the run. Single-run reports leave both unset.
+    run_label: str | None = None
+    condition_key: str | None = None
 
 
 class FigureSpec(Contract):
