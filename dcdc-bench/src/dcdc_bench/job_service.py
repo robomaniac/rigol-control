@@ -17,18 +17,28 @@ import re
 import signal
 import subprocess
 import sys
+import time
 import uuid
 
 from filelock import FileLock
 
 from .domain import DutProfile, BenchProfile, TestRecipe, Plan
 from .planning import build_plan, _hash_payload, verify_plan_hash
+from .resources import MemoryGate, children_peak_rss_mib, session_survivors, terminate_group, try_log_event
 from .storage import atomic_json, verify_integrity
 
 MODELS = {"dut": DutProfile, "bench": BenchProfile, "recipe": TestRecipe}
 IDENTIFIERS = {"dut": "profile_id", "bench": "bench_id", "recipe": "recipe_id"}
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,100}$")
 ACTIVE = {"queued", "acquiring", "reporting"}
+# Pending, not active: measurements are saved and verified OFF, the render is
+# not yet dispatched. Acquisition may start while such jobs wait.
+REPORT_QUEUED = "report-queued"
+DEFERRAL_LOG_INTERVAL_S = 60
+
+
+def _utc_now():
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _read(path):
@@ -91,9 +101,10 @@ def _latest_cycle(path):
 
 
 class JobService:
-    def __init__(self, root: Path, inventory_path: Path | None = None):
+    def __init__(self, root: Path, inventory_path: Path | None = None, gate: MemoryGate | None = None):
         self.root = Path(root).resolve()
         self.inventory_path = Path(inventory_path).resolve() if inventory_path else None
+        self.gate = gate  # None: read the thresholds from the environment at each dispatch
         self.root.mkdir(parents=True, exist_ok=True)
         for name in ("profiles", "previews", "jobs"):
             (self.root / name).mkdir(exist_ok=True)
@@ -303,23 +314,90 @@ class JobService:
             return {"job_id": job_id, "state": "queued"}
 
     def retry_report(self, job_id):
-        """New report revision from existing evidence; never starts acquisition."""
+        """Queue a new report revision from existing evidence; never starts acquisition.
+
+        A busy bench queues the request instead of refusing it: dispatch_reports
+        launches the render once no job is active and the memory gate passes.
+        """
         with self.lock:
             job, state = self._job(job_id), self.status(job_id)
-            if state["state"] in ACTIVE or any(j["state"] in ACTIVE for j in self.list_jobs()):
+            if state["state"] in ACTIVE:
                 raise ValueError("An acquisition/report job is already active")
             if not state.get("run_dir"):
                 raise ValueError("No finalized acquisition exists")
             path = _inside(job, state["run_dir"])
             _verified_off(path)
+            record = _read(job / "job.json")
+            record.update(state=REPORT_QUEUED, pid=None, error=None, action="report-only", run_dir=str(path),
+                          queued_utc=_utc_now(), deferred_reason=None, deferred_utc=None)
+            atomic_json(job / "job.json", record)
+            return {"job_id": job_id, "state": REPORT_QUEUED}
+
+    def _report_queue(self):
+        """Raw job.json states, oldest queued first; cheap enough for a 2 s timer."""
+        queued = []
+        for entry in (self.root / "jobs").iterdir():
+            try:
+                record = _read(entry / "job.json")
+            except (OSError, ValueError):
+                continue
+            if record.get("state") == REPORT_QUEUED:
+                queued.append((record.get("queued_utc") or "", entry.name))
+        return [name for _, name in sorted(queued)]
+
+    def dispatch_reports(self):
+        """Launch at most one report-only worker, only when the bench is idle and memory allows.
+
+        Called from the UI's periodic timer, never from a request handler. A
+        job that is queued/acquiring/reporting, a held bench lease, or a failed
+        memory gate leaves the queue untouched; the deferral is recorded on the
+        oldest queued job so the operator can see why nothing is rendering.
+        """
+        with self.lock:
+            queue = self._report_queue()
+            if not queue or any(job["state"] in ACTIVE for job in self.list_jobs()):
+                return None
+            job_id = queue[0]
+            directory = self._job(job_id)
+            record = _read(directory / "job.json")
+            if record.get("state") != REPORT_QUEUED:
+                return None
+            logs = (directory / "resources.jsonl", self.root / "resource-log.jsonl")
             from .activity import bench_activity
-            with bench_activity("report"):
-                pass
-            (job / "cancel.request").unlink(missing_ok=True)
-            state.update(state="queued", pid=None, error=None, action="report-only")
-            atomic_json(job / "job.json", state)
-            self._launch(job, report_only=True)
+            try:
+                with bench_activity("report"):
+                    pass
+            except RuntimeError as exc:
+                return self._defer(directory, record, f"bench lease held: {exc}", None, logs)
+            gate = self.gate if self.gate is not None else MemoryGate()
+            ok, reason, snap = gate.check()
+            if not ok:
+                return self._defer(directory, record, reason, snap, logs)
+            (directory / "cancel.request").unlink(missing_ok=True)
+            record.update(state="queued", pid=None, error=None, action="report-only",
+                          deferred_reason=None, deferred_utc=None, dispatched_utc=_utc_now())
+            atomic_json(directory / "job.json", record)
+            for path in logs:
+                try_log_event(path, "dispatch", "start", job_id=job_id, snap=snap, gate_reason=reason)
+            self._launch(directory, report_only=True)
             return {"job_id": job_id, "state": "queued"}
+
+    @staticmethod
+    def _defer(directory, record, reason, snap, logs):
+        job_id = record.get("job_id", directory.name)
+        previous = record.get("deferred_utc")
+        try:
+            stale = previous is None or (datetime.now(timezone.utc) - datetime.fromisoformat(previous)).total_seconds() > DEFERRAL_LOG_INTERVAL_S
+        except (TypeError, ValueError):
+            stale = True
+        # The reason text is stable (numbers live in the snapshot), so a 2 s
+        # timer does not rewrite job.json or append a log line on every tick.
+        if record.get("deferred_reason") != reason or stale:
+            record.update(deferred_reason=reason, deferred_utc=_utc_now())
+            atomic_json(directory / "job.json", record)
+            for path in logs:
+                try_log_event(path, "dispatch", "deferred", job_id=job_id, reason=reason, snap=snap)
+        return {"job_id": job_id, "state": REPORT_QUEUED, "deferred_reason": reason}
 
     def status(self, job_id):
         job = self._job(job_id)
@@ -361,6 +439,10 @@ class JobService:
         elif value["state"] == "queued" and launch.get("requested_utc"):
             if (datetime.now(timezone.utc)-datetime.fromisoformat(launch["requested_utc"])).total_seconds() > 120:
                 value.update(state="failed", error="Worker launch expired before acquisition; no automatic restart")
+        elif value["state"] == REPORT_QUEUED:
+            value["pid"] = None  # the acquisition worker has exited; no process owns this job yet
+        value.setdefault("deferred_reason", None)
+        value["report_pending"] = value["state"] == REPORT_QUEUED
         value["cancel_requested"] = (job / "cancel.request").exists()
         return value
 
@@ -370,6 +452,13 @@ class JobService:
     def cancel(self, job_id):
         job = self._job(job_id)
         value = self.status(job_id)
+        if value["state"] == REPORT_QUEUED:
+            # Nothing is running: leave the queue without signalling any process.
+            record = _read(job / "job.json")
+            record.update(state="cancelled", pid=None, deferred_reason=None,
+                          error="Report generation was removed from the queue; saved measurements are preserved")
+            atomic_json(job / "job.json", record)
+            return self.status(job_id)
         if value["state"] not in ACTIVE:
             return value
         (job / "cancel.request").touch()
@@ -411,11 +500,42 @@ def _verified_off(path):
     return run
 
 
-def _render_process(path):
-    child = subprocess.Popen([sys.executable, "-m", "dcdc_bench", "report", str(path), "--formats", "html,pdf"],
-        stdin=subprocess.DEVNULL, start_new_session=True)
+def _report_command(path):
+    return [sys.executable, "-m", "dcdc_bench", "report", str(path), "--formats", "html,pdf"]
+
+
+def _job_resource_log(path):
+    """<job>/resources.jsonl when ``path`` is a run directory inside a job; else None."""
+    job = Path(path).resolve().parent.parent
+    return job / "resources.jsonl" if (job / "job.json").is_file() else None
+
+
+def _sweep_report_group(pgid, log_path, started, returncode):
+    """After the report child exits, on every path: find, log and stop what it left behind."""
     try:
-        return child.wait(timeout=1800)
+        survivors = session_survivors(pgid)
+        try_log_event(log_path, "report-process", "survivors", child_pid=pgid, count=len(survivors), processes=survivors)
+        if survivors:
+            outcome = terminate_group(pgid, grace_s=5.)
+            try_log_event(log_path, "report-process", "survivors", child_pid=pgid, count=len(outcome["remaining"]),
+                          processes=outcome["remaining"], terminated=outcome["signalled"], killed=outcome["killed"])
+        try_log_event(log_path, "report-process", "end", child_pid=pgid, duration_s=round(time.monotonic() - started, 3),
+                      returncode=returncode, child_peak_rss_mib=children_peak_rss_mib())
+    except Exception as exc:  # hygiene never masks the report outcome
+        try_log_event(log_path, "report-process", "end", child_pid=pgid, duration_s=round(time.monotonic() - started, 3),
+                      returncode=returncode, error=f"{type(exc).__name__}: {exc}")
+
+
+def _render_process(path, log_path=None):
+    """Run the report CLI in its own session and sweep that session when it ends."""
+    log_path = log_path or _job_resource_log(path)
+    started = time.monotonic()
+    child = subprocess.Popen(_report_command(path), stdin=subprocess.DEVNULL, start_new_session=True)
+    try_log_event(log_path, "report-process", "start", child_pid=child.pid)
+    returncode = None
+    try:
+        returncode = child.wait(timeout=1800)
+        return returncode
     except BaseException:
         # Own only this report process group. No instrument process belongs to it.
         try:
@@ -432,15 +552,24 @@ def _render_process(path):
             pass
         child.wait(timeout=10)
         raise
+    finally:
+        _sweep_report_group(child.pid, log_path, started, returncode)
 
 
 def worker(directory: Path, *, report_only=False):
     directory = Path(directory).resolve()
     state = _read(directory / "job.json")
     state["pid"] = os.getpid()
+    task = "report-only" if report_only else "acquisition"
+    logs = (directory / "resources.jsonl", directory.parent.parent / "resource-log.jsonl")
+    started = time.monotonic()
     def save(**changes):
         state.update(changes)
         atomic_json(directory / "job.json", state)
+    def record(phase, **fields):
+        for path in logs:
+            try_log_event(path, task, phase, job_id=state.get("job_id"), **fields)
+    record("start")
     save(state="reporting" if report_only else "acquiring")
     try:
         launch = _read(directory / "launch.json") if (directory / "launch.json").exists() else {}
@@ -471,6 +600,13 @@ def worker(directory: Path, *, report_only=False):
         run = _verified_off(path)
         save(run_dir=str(path))
         cancelled_acquisition = (directory / "cancel.request").exists()
+        if not report_only:
+            # Outputs are verified OFF. Exit now so drivers and acquisition state
+            # leave RAM before the heaviest phase; the UI dispatcher launches a
+            # fresh report-only worker once the bench is idle and memory allows.
+            save(state=REPORT_QUEUED, pid=None, queued_utc=_utc_now(), acquisition_cancelled=cancelled_acquisition,
+                 deferred_reason=None, deferred_utc=None)
+            return
         save(state="reporting")
         # A separate process owns all optional/heavy reporting dependencies.
         returncode = _render_process(path)
@@ -481,11 +617,14 @@ def worker(directory: Path, *, report_only=False):
             save(state="failed", error="Acquisition preserved; report generation failed. See worker.log and build manifest.",
                  report_dir=str(report) if report else None)
         else:
-            save(state="cancelled" if cancelled_acquisition else "completed" if run["execution_status"] == "completed" else "aborted", report_dir=str(report))
+            cancelled = cancelled_acquisition or state.get("acquisition_cancelled") is True
+            save(state="cancelled" if cancelled else "completed" if run["execution_status"] == "completed" else "aborted", report_dir=str(report))
     except KeyboardInterrupt:
         save(state="cancelled", error="Operator cancelled the job; inspect recorded shutdown status")
     except BaseException as exc:
         save(state="failed", error=f"{type(exc).__name__}: {exc}")
+    finally:
+        record("end", duration_s=round(time.monotonic() - started, 3), state=state.get("state"))
 
 
 if __name__ == "__main__":

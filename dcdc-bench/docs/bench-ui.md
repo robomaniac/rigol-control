@@ -61,11 +61,17 @@ restore the tunnel after reconnecting.
 5. **Run** shows measured voltage/current, progress, measurement age and shutdown
    status. **Stop test safely** requests shutdown; wait for both outputs to be
    reported as verified OFF before changing wiring.
-6. After acquisition, the worker creates the reports. Open **interactive HTML**
-   to inspect points and export plots, or **PDF** for a printable report.
-   **Reports** retains completed and interrupted runs. If rendering fails,
-   **Retry report generation** uses the preserved measurements without running
-   the instruments again.
+6. After acquisition the worker exits with both outputs verified OFF and the
+   job shows **Measurements saved — report queued**. The page starts a
+   separate report process automatically when no test is running and enough
+   memory is free; while it waits, the reason (for example
+   `MemAvailable below 150 MiB`) is shown on the Run tab. A new test may be
+   started while reports are queued; they are generated afterwards. Open
+   **interactive HTML** to inspect points and export plots, or **PDF** for a
+   printable report. **Reports** retains completed and interrupted runs. If
+   rendering fails, **Retry report generation** queues the preserved
+   measurements for a new report without running the instruments again. See
+   [the process model](pi-process-model.md) for the thresholds and logs.
 
 Changing any setting clears the preview and its confirmation. Preview again
 before starting. Enter a different profile name to save a reusable variant.

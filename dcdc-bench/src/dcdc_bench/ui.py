@@ -7,6 +7,7 @@ from __future__ import annotations
 import copy
 import ipaddress
 import json
+import sys
 from pathlib import Path
 
 from .ui_models import artifact_url, edited_dut, edited_recipe, job_title, plan_rows, quantity, shutdown_label, state_label
@@ -79,6 +80,24 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
     # NiceGUI's generic default permits every WebSocket origin. Bench control
     # uses Engine.IO's same-origin policy; SSH forwards retain their Host port.
     core.sio.eio.cors_allowed_origins = None
+
+    dispatcher = {'busy': False}
+
+    async def dispatch_reports():
+        """One app-level dispatcher, not per client or per request: a queued report
+        starts only when no job is active and the memory gate passes."""
+        if dispatcher['busy']:
+            return
+        dispatcher['busy'] = True
+        try:
+            await run.io_bound(service.dispatch_reports)
+        except (ValueError, OSError, RuntimeError) as exc:
+            print(f'Report dispatcher: {exc}', file=sys.stderr, flush=True)
+        finally:
+            dispatcher['busy'] = False
+
+    app.on_startup(dispatch_reports)
+    app.timer(2.0, dispatch_reports)
 
     def file_response(path):
         headers = {'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-store'}
@@ -522,6 +541,9 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                          else 'Real equipment test').classes('bench-message')
                 if snapshot.get('state') == 'reporting':
                     ui.label('The measurements are saved. Preparing the interactive plots and PDF can take several minutes on a Raspberry Pi. You can reconnect later; this job continues independently.').classes('bench-message')
+                if snapshot.get('state') == 'report-queued':
+                    ui.label('The measurements are saved and both outputs are verified OFF. Report generation is queued and starts automatically when no test is running and enough memory is free.'
+                             + (' Waiting: ' + str(snapshot['deferred_reason']) + '.' if snapshot.get('deferred_reason') else '')).classes('bench-message')
                 ui.label('Run ' + str(snapshot.get('run_id') or snapshot['job_id'])).classes('bench-muted')
                 progress = snapshot.get('progress') or {}
                 complete, total = progress.get('completed', 0), progress.get('total', 0)
