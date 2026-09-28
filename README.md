@@ -7,6 +7,25 @@ Pi or Linux computer and inspect the results in an offline HTML report.
 
 **Status:** working bench prototype · **Python:** 3.11+ · **Verified bench:** DP821A + DL3031A
 
+**DC–DC converter work:** the separate [dcdc-bench project](dcdc-bench/README.md)
+provides saved converter profiles, a local test interface, bounded real DC sweeps,
+and interactive HTML/vector PDF reports. See [the bench workflow](dcdc-bench/docs/bench-ui.md).
+On the development Pi, **[open the bench interface](http://localhost:8081/)**
+using the existing port forward. Its [completed real workflow test](dcdc-bench/README.md#completed-test-through-the-interface)
+includes the automatically generated HTML and PDF.
+It also includes a [measured 12T12-4A converter test](dcdc-bench/README.md#longer-real-converter-test):
+24 V input, a 50–500 mA sweep, a three-minute hold, and a return sweep.
+The newer [test near the supply limit](dcdc-bench/README.md#test-near-the-supply-limit)
+reached **1.725 A output** while drawing **0.987 A from the 24 V supply**.
+The latest [efficiency comparison](dcdc-bench/README.md#efficiency-at-different-input-voltages)
+adds **24 V and near-36 V curves**, reaching **2.5 A output**. Its separate
+12 V startup attempt stopped without a qualified efficiency result.
+A later [startup experiment](dcdc-bench/docs/startup-descent-results-review.md)
+started at 15 V and kept the output at **12.134 V with a 100 mA load** while
+reducing measured input to **9.108 V**, without restarting the converter.
+Those converter artifacts are local; the published 5 V demo below is the
+existing supply-to-load test.
+
 ## Interactive demo
 
 ### [Open the interactive 5 V power test →](https://robomaniac.github.io/rigol-control/Data/power-test-report.html)

@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=78"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dcdc-bench"
+version = "0.1.0"
+description = "Evidence-preserving DC–DC characterization with a deterministic mock bench"
+requires-python = ">=3.11"
+dependencies = ["pydantic==2.13.4", "PyYAML==6.0.3", "filelock==4.0.4"]
+
+[project.optional-dependencies]
+ui = ["nicegui==3.17.1"]
+report = ["plotly==7.1.0", "kaleido==1.4.0"]
+test = ["pytest==9.1.1", "playwright==1.63.0", "pypdf==6.19.0", "pillow==12.3.0"]
+
+[project.scripts]
+dcdc-bench = "dcdc_bench.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"dcdc_bench.reporting" = ["*.js", "*.css", "*.qmd", "web/*", "templates/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["browser: real offline Chromium interaction", "pdf: Quarto/Typst vector PDF checks", "integration: subprocess integration"]

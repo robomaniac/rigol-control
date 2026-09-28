@@ -1,0 +1,36 @@
+schema_version: '1.0'
+profile_id: 12t12-4a
+identity:
+  model: 12T12-4A
+  brand_aliases:
+  - Cocar
+  - Ekylin
+  - Bgoodvision
+  actual_brand_on_label: null
+  sample_id: null
+  revision: null
+  label_photo_asset_id: null
+ratings:
+  origin: user_supplied
+  verified_from_sample_label: false
+  input_voltage_min_V: 9.0
+  input_voltage_max_V: 36.0
+  output_voltage_nominal_V: 12.0
+  output_current_rated_A: 4.0
+  output_power_rated_W: 48.0
+  derating_conditions: null
+construction:
+  topology: unknown
+  isolation: unknown
+  controller_part_number: null
+  switching_frequency_Hz: null
+  enable_interface: unknown
+  enclosure: unknown
+acceptance:
+  output_voltage_tolerance_pct: null
+  minimum_efficiency_pct: null
+  maximum_surface_temperature_C: null
+execution_approval:
+  real_hardware_enabled: false
+  wiring_and_polarity_confirmed: false
+  protective_policy_id: null

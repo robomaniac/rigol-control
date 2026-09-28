@@ -1,0 +1,490 @@
+"""Local UI facade and detached job owner. No UI request controls instruments.
+
+Profiles and previews are data; all hardware ownership lives in a fresh worker
+process. Saving a profile invalidates earlier previews. Reports are a separate
+process after acquisition has finalized and every output is verified OFF.
+"""
+from __future__ import annotations
+
+import argparse
+from datetime import datetime, timezone
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import re
+import signal
+import subprocess
+import sys
+import uuid
+
+from filelock import FileLock
+
+from .domain import DutProfile, BenchProfile, TestRecipe, Plan
+from .planning import build_plan, _hash_payload, verify_plan_hash
+from .storage import atomic_json, verify_integrity
+
+MODELS = {"dut": DutProfile, "bench": BenchProfile, "recipe": TestRecipe}
+IDENTIFIERS = {"dut": "profile_id", "bench": "bench_id", "recipe": "recipe_id"}
+NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,100}$")
+ACTIVE = {"queued", "acquiring", "reporting"}
+
+
+def _read(path):
+    return json.loads(Path(path).read_text())
+
+
+def _digest(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _name(value):
+    if not isinstance(value, str) or not NAME.fullmatch(value) or value in (".", ".."):
+        raise ValueError("Invalid local identifier")
+    return value
+
+
+def _inside(root, path):
+    root, path = Path(root).resolve(), Path(path).resolve()
+    if not path.is_relative_to(root):
+        raise ValueError("Path escapes the local workspace")
+    return path
+
+
+def _pid_matches(pid, job):
+    if not isinstance(pid, int) or pid <= 1:
+        return False
+    try:
+        command = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
+        return b"dcdc_bench.job_service" in command and os.fsencode(str(job)) in command
+    except OSError:
+        return False
+
+
+def _latest_cycle(path):
+    """Read a bounded tail, never reload the whole streaming evidence file."""
+    try:
+        with Path(path).open("rb") as handle:
+            handle.seek(0, 2)
+            handle.seek(max(0, handle.tell()-32768))
+            lines = handle.read().splitlines()
+        cycles = {}
+        for line in reversed(lines):
+            try:
+                row = json.loads(line)
+            except (ValueError, UnicodeDecodeError):
+                continue
+            if row.get("status") != "ok" or row.get("quality_flags"):
+                continue
+            value = row.get("value")
+            if not isinstance(value, (int, float)) or not math.isfinite(value):
+                continue
+            group = cycles.setdefault(row["acquisition_cycle_id"], {})
+            group[row["quantity"]] = row
+            if {"Vin_V", "Iin_A", "Vout_V", "Iout_A"} <= set(group):
+                latest = max(group.values(), key=lambda item: item["query_end_utc"])
+                return {k: group[k]["value"] for k in ("Vin_V", "Iin_A", "Vout_V", "Iout_A")}, latest["query_end_utc"]
+    except OSError:
+        pass
+    return {}, None
+
+
+class JobService:
+    def __init__(self, root: Path, inventory_path: Path | None = None):
+        self.root = Path(root).resolve()
+        self.inventory_path = Path(inventory_path).resolve() if inventory_path else None
+        self.root.mkdir(parents=True, exist_ok=True)
+        for name in ("profiles", "previews", "jobs"):
+            (self.root / name).mkdir(exist_ok=True)
+        self.lock = FileLock(self.root / ".service.lock")
+        self._seed()
+
+    def _profile(self, kind, name):
+        if kind not in MODELS:
+            raise ValueError("Unknown profile kind")
+        return _inside(self.root, self.root / "profiles" / kind / (_name(name)+".json"))
+
+    def _seed(self):
+        from .services import default_plan
+        with self.lock:
+            base = default_plan()
+            for kind, profile in (("dut", base.dut), ("bench", base.bench), ("recipe", base.recipe)):
+                path = self._profile(kind, getattr(profile, IDENTIFIERS[kind]))
+                if not path.exists():
+                    atomic_json(path, profile.model_dump())
+            # Purpose-limited local bench preset, requiring fresh serial/wiring
+            # confirmation on every start. It contains no endpoint or secrets.
+            from .extended import extended_plan
+            real = extended_plan()
+            real.bench.bench_id = "rigol-local-limited"
+            real.bench.source.max_current_A = real.bench.protective_controls.source_current_limit_A = 1.
+            real.bench.source.max_voltage_V, real.bench.source.max_power_W = 35.8, 35.8
+            real.bench.load.max_current_A = real.bench.protective_controls.output_overcurrent_A = 2.55
+            real.bench.load.max_power_W = 34.
+            real.bench.protective_controls.approved = False
+            real.recipe.recipe_id = "real-24v-small-grid"
+            real.recipe.tests = [real.recipe.tests[0].model_copy(update={"output_current_targets_A": [.1, .25, .5]})]
+            real.recipe.acquisition.duration_s = 8.
+            real.recipe.acquisition.target_poll_interval_s = 1.
+            real.bench.notes = ["Purpose-limited DP821A CH1/local-load configuration; not certification of physical ratings.",
+                                "Fresh physical confirmation and the private instrument inventory are required for each run."]
+            for kind, profile in (("bench", real.bench), ("recipe", real.recipe)):
+                path = self._profile(kind, getattr(profile, IDENTIFIERS[kind]))
+                if not path.exists():
+                    atomic_json(path, profile.model_dump())
+
+    def list_profiles(self):
+        return {kind: sorted(p.stem for p in (self.root / "profiles" / kind).glob("*.json")) for kind in MODELS}
+
+    def load_profile(self, kind, name):
+        return MODELS[kind].model_validate(_read(self._profile(kind, name))).model_dump()
+
+    def save_profile(self, kind, data):
+        if kind not in MODELS:
+            raise ValueError("Unknown profile kind")
+        if len(json.dumps(data)) > 2_000_000:
+            raise ValueError("Profile exceeds 2 MB")
+        profile = MODELS[kind].model_validate(data)
+        name = getattr(profile, IDENTIFIERS[kind])
+        with self.lock:
+            atomic_json(self._profile(kind, name), profile.model_dump())
+        return name
+
+    def _inventory(self):
+        if self.inventory_path is None or not self.inventory_path.is_file():
+            raise ValueError("Configure the private bench inventory before a real run")
+        if self.inventory_path.stat().st_size > 2_000_000:
+            raise ValueError("Inventory exceeds 2 MB")
+        from benchctl.config import load_config
+        config = load_config(self.inventory_path)
+        result = {}
+        for role, name, driver, model in (("source", "psu_rigol_1", "rigol_dp800", "DP821A"),
+                                        ("load", "load_rigol_1", "rigol_dl3000", "DL3031A")):
+            device = config.devices.get(name)
+            if device is None or device.driver != driver or not device.expected_serial:
+                raise ValueError(f"Private inventory needs {name}, {driver} and its expected serial")
+            result[role] = {"model": model, "serial": device.expected_serial}
+        return result
+
+    def preview(self, dut, bench, recipe):
+        with self.lock:
+            names = {"dut": dut, "bench": bench, "recipe": recipe}
+            profiles = {kind: self.load_profile(kind, name) for kind, name in names.items()}
+            plan = build_plan(DutProfile.model_validate(profiles["dut"]), BenchProfile.model_validate(profiles["bench"]),
+                              TestRecipe.model_validate(profiles["recipe"]))
+            errors, seconds, inventory = [], None, {}
+            if plan.bench.mode == "real":
+                from .real_backend import prepare_real_plan
+                plan, errors, seconds = prepare_real_plan(plan)
+                try:
+                    inventory = self._inventory()
+                except (ValueError, OSError) as exc:
+                    errors.append(str(exc))
+            counts = {}
+            for point in plan.points:
+                counts[point.status] = counts.get(point.status, 0)+1
+            if not any(p.status == "executable" for p in plan.points):
+                errors.append("No feasible point is available")
+            value = {"plan_hash": plan.plan_hash, "mode": plan.bench.mode, "plan": plan.model_dump(),
+                "points": [p.model_dump() for p in plan.points], "counts": counts,
+                "warnings": plan.warnings, "supported": not errors, "errors": errors,
+                "estimated_seconds": seconds, "inventory": inventory,
+                "confirmation_required": ["wiring_and_polarity", "channel1", "protections_reviewed", "source_serial", "load_serial", "plan_hash"] if plan.bench.mode == "real" else [],
+                "profiles": names, "profile_hashes": {k: _hash_payload(v) for k, v in profiles.items()},
+                "inventory_sha256": _digest(self.inventory_path) if inventory else None}
+            atomic_json(self.root / "previews" / (plan.plan_hash+".json"), value)
+            return value
+
+    def _job(self, job_id):
+        return _inside(self.root, self.root / "jobs" / _name(job_id))
+
+    @staticmethod
+    def _launch(directory, *, report_only=False):
+        command = [sys.executable, "-m", "dcdc_bench.job_service", "--worker", str(directory)]
+        if report_only:
+            command.append("--report-only")
+        launch = {"requested_utc": datetime.now(timezone.utc).isoformat(), "pid": None}
+        atomic_json(directory / "launch.json", launch)
+        try:
+            launcher = os.environ.get("DCDC_JOB_LAUNCHER", "detached")
+            if launcher == "systemd":
+                unit = "dcdc-job-" + directory.name + "-" + uuid.uuid4().hex[:8]
+                environment = [f"--setenv={key}={os.environ[key]}" for key in
+                    ("DCDC_ACTIVITY_LOCK", "QUARTO_PATH", "BROWSER_PATH", "PATH") if key in os.environ]
+                command = ["systemd-run", "--user", "--quiet", "--collect", "--unit="+unit,
+                    "--property=Restart=no", "--property=RuntimeMaxSec=2700",
+                    "--property=KillMode=control-group", "--property=TimeoutStopSec=20",
+                    "--property=StandardOutput=append:"+str(directory / "worker.log"),
+                    "--property=StandardError=append:"+str(directory / "worker.log"),
+                    "--working-directory="+str(directory), *environment, *command]
+                launched = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True,
+                                          text=True, timeout=15)
+                if launched.returncode:
+                    raise OSError(launched.stderr.strip() or "systemd rejected the worker service")
+                launch["unit"] = unit
+                atomic_json(directory / "launch.json", launch)
+                return
+            if launcher != "detached":
+                raise OSError("DCDC_JOB_LAUNCHER must be detached or systemd")
+            with (directory / "worker.log").open("ab", buffering=0) as log:
+                process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                    start_new_session=True, close_fds=True)
+                launch["pid"] = process.pid
+                atomic_json(directory / "launch.json", launch)
+        except (OSError, subprocess.SubprocessError) as exc:
+            # The service may have been created before a launcher timeout.
+            # Late workers must see cancellation even when launch reports failure.
+            (directory / "cancel.request").touch()
+            state = _read(directory / "job.json")
+            state.update(state="failed", error=f"Worker could not start: {exc}")
+            atomic_json(directory / "job.json", state)
+            raise RuntimeError(state["error"]) from exc
+
+    def start(self, plan_hash, confirmation=None, notes="", attachments=None):
+        if not re.fullmatch(r"[0-9a-f]{64}", plan_hash):
+            raise ValueError("Invalid plan hash")
+        attachments = list(attachments or [])
+        if len(attachments) > 20:
+            raise ValueError("At most 20 attachment references are supported")
+        for item in attachments:
+            if not isinstance(item, dict) or set(item) != {"role", "name", "caption", "location"}:
+                raise ValueError("Attachment references need role, name, caption and location")
+            if any(not isinstance(v, str) or len(v) > 2000 for v in item.values()):
+                raise ValueError("Attachment reference fields must be text of at most 2000 characters")
+            if item["role"] not in {"schematic", "board_photo", "setup_photo", "temperature_location", "other"}:
+                raise ValueError("Unknown attachment role")
+        with self.lock:
+            preview = _read(self.root / "previews" / (plan_hash+".json"))
+            if not preview["supported"]:
+                raise ValueError("Unsupported plan: " + "; ".join(preview["errors"]))
+            for kind, name in preview["profiles"].items():
+                if _hash_payload(self.load_profile(kind, name)) != preview["profile_hashes"][kind]:
+                    raise ValueError("A saved profile changed; preview and confirm the new plan")
+            plan = Plan.model_validate(preview["plan"])
+            if not verify_plan_hash(plan) or plan.plan_hash != plan_hash:
+                raise ValueError("Saved plan was changed")
+            confirmation = dict(confirmation or {})
+            if plan.bench.mode == "real":
+                inventory = self._inventory()
+                if _digest(self.inventory_path) != preview["inventory_sha256"]:
+                    raise ValueError("Instrument inventory changed; preview again")
+                if confirmation.get("plan_hash") != plan_hash or not all(confirmation.get(k) is True for k in
+                        ("wiring_and_polarity", "channel1", "protections_reviewed")):
+                    raise ValueError("Confirm wiring, CH1, protections and this exact plan before arming")
+                if any(confirmation.get(role+"_serial") != data["serial"] for role, data in inventory.items()):
+                    raise ValueError("Confirmed instrument serials do not match the preview")
+            if any(job["state"] in ACTIVE for job in self.list_jobs()):
+                raise ValueError("A job is already acquiring or reporting; no automatic hardware queue")
+            from .activity import bench_activity
+            with bench_activity("acquisition"):
+                pass  # Busy now means no queued surprise activation later.
+            job_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")+"_"+uuid.uuid4().hex[:8]
+            directory = self._job(job_id)
+            directory.mkdir()
+            atomic_json(directory / "plan.json", plan.model_dump())
+            atomic_json(directory / "request.json", {"confirmation": confirmation, "notes": str(notes)[:10000],
+                "attachments": attachments, "profile_hashes": preview["profile_hashes"],
+                "inventory_sha256": preview["inventory_sha256"]})
+            if plan.bench.mode == "real":
+                (directory / "inventory.yaml").write_bytes(self.inventory_path.read_bytes())
+                (directory / "inventory.yaml").chmod(0o600)
+            atomic_json(directory / "job.json", {"job_id": job_id, "state": "queued", "mode": plan.bench.mode,
+                "dut_model": plan.dut.identity.model,
+                "pid": None, "created_utc": datetime.now(timezone.utc).isoformat(), "error": None,
+                "run_dir": None, "report_dir": None})
+            self._launch(directory)
+            return {"job_id": job_id, "state": "queued"}
+
+    def retry_report(self, job_id):
+        """New report revision from existing evidence; never starts acquisition."""
+        with self.lock:
+            job, state = self._job(job_id), self.status(job_id)
+            if state["state"] in ACTIVE or any(j["state"] in ACTIVE for j in self.list_jobs()):
+                raise ValueError("An acquisition/report job is already active")
+            if not state.get("run_dir"):
+                raise ValueError("No finalized acquisition exists")
+            path = _inside(job, state["run_dir"])
+            _verified_off(path)
+            from .activity import bench_activity
+            with bench_activity("report"):
+                pass
+            (job / "cancel.request").unlink(missing_ok=True)
+            state.update(state="queued", pid=None, error=None, action="report-only")
+            atomic_json(job / "job.json", state)
+            self._launch(job, report_only=True)
+            return {"job_id": job_id, "state": "queued"}
+
+    def status(self, job_id):
+        job = self._job(job_id)
+        value = _read(job / "job.json")
+        launch = _read(job / "launch.json") if (job / "launch.json").exists() else {}
+        if not value.get("pid"):
+            value["pid"] = launch.get("pid")
+        value.update(progress={"completed": 0, "total": 0, "current": None}, latest={}, shutdown={},
+                     report_artifacts={}, elapsed_s=None, latest_age_s=None, latest_kind="unqualified live readings")
+        candidates = sorted((job / "runs").glob("*/run.json"))
+        if candidates:
+            run = _read(candidates[-1])
+            value["run_dir"] = str(candidates[-1].parent)
+            value["progress"] = {"completed": sum(p.get("qualification") == "valid" for p in run["points"]),
+                "total": sum(p.get("status", p.get("planning_status")) == "executable" for p in run["points"]), "current": run.get("current_point_id")}
+            value["latest"], value["shutdown"] = run.get("latest", {}), run.get("shutdown", {})
+            value["execution_status"] = run.get("execution_status")
+            current = next((p for p in run["points"] if p["point_id"] == run.get("current_point_id")), {})
+            value["progress"].update(requested_input_V=current.get("vin_target_V"), requested_output_A=current.get("iout_target_A"))
+            now = datetime.now(timezone.utc)
+            value["elapsed_s"] = run.get("duration_s", (now-datetime.fromisoformat(run["created_utc"])).total_seconds())
+            latest, timestamp = _latest_cycle(candidates[-1].parent / "raw/samples.jsonl")
+            if latest:
+                value["latest"] = latest
+                value["latest_age_s"] = max(0., (now-datetime.fromisoformat(timestamp)).total_seconds())
+        if value.get("report_dir"):
+            report = _inside(job, value["report_dir"])
+            if (report / "build_manifest.json").is_file():
+                manifest = _read(report / "build_manifest.json")
+                for fmt in ("html", "pdf"):
+                    artifact = dict(manifest.get("artifacts", {}).get(fmt, {"status": "unavailable"}))
+                    if artifact.get("status") == "success" and not (report / ("report."+fmt)).is_file():
+                        artifact["status"] = "missing"
+                    value["report_artifacts"][fmt] = artifact
+                value["report_artifacts"]["model"] = {
+                    "status": "success" if (report / "report_model.json").is_file() else "missing"}
+        if value["state"] in ACTIVE and value.get("pid") and not _pid_matches(value["pid"], job):
+            value.update(state="failed", error="Worker exited unexpectedly; inspect shutdown evidence before another real run")
+        elif value["state"] == "queued" and launch.get("requested_utc"):
+            if (datetime.now(timezone.utc)-datetime.fromisoformat(launch["requested_utc"])).total_seconds() > 120:
+                value.update(state="failed", error="Worker launch expired before acquisition; no automatic restart")
+        value["cancel_requested"] = (job / "cancel.request").exists()
+        return value
+
+    def list_jobs(self):
+        return [self.status(p.name) for p in sorted((self.root / "jobs").iterdir(), reverse=True) if (p / "job.json").is_file()]
+
+    def cancel(self, job_id):
+        job = self._job(job_id)
+        value = self.status(job_id)
+        if value["state"] not in ACTIVE:
+            return value
+        (job / "cancel.request").touch()
+        pid = value.get("pid")
+        if _pid_matches(pid, job):
+            try:
+                # Pin the process identity while checking and signalling it.
+                fd = os.pidfd_open(pid)
+                try:
+                    if _pid_matches(pid, job):
+                        signal.pidfd_send_signal(fd, signal.SIGINT)
+                finally:
+                    os.close(fd)
+            except ProcessLookupError:
+                pass
+        return self.status(job_id)
+
+    def resolve_file(self, job_id, relative):
+        value, job = self.status(job_id), self._job(job_id)
+        head, _, tail = relative.partition("/")
+        base = value.get("report_dir") if head == "report" else value.get("run_dir") if head == "run" else None
+        if not base or not tail:
+            raise ValueError("No matching job artifact")
+        path = _inside(job, _inside(base, Path(base) / tail))
+        if not path.is_file():
+            raise FileNotFoundError(path.name)
+        return path
+
+
+def _verified_off(path):
+    verify_integrity(path)
+    manifest = _read(Path(path) / "integrity.json")
+    if not {"run.json", "plan.json", "request.json", "raw/samples.jsonl"} <= set(manifest.get("files", {})):
+        raise ValueError("Integrity manifest does not cover required report evidence")
+    run = _read(Path(path) / "run.json")
+    required = {"source", "load", "source_deadline"} if run.get("data_source") == "measured" else {"source", "load"}
+    if not required <= set(run.get("shutdown", {})) or not all(s.get("state") == "OFF" and s.get("verified") is True for s in run["shutdown"].values()):
+        raise RuntimeError("Shutdown is not fully verified OFF; report job was not started")
+    return run
+
+
+def _render_process(path):
+    child = subprocess.Popen([sys.executable, "-m", "dcdc_bench", "report", str(path), "--formats", "html,pdf"],
+        stdin=subprocess.DEVNULL, start_new_session=True)
+    try:
+        return child.wait(timeout=1800)
+    except BaseException:
+        # Own only this report process group. No instrument process belongs to it.
+        try:
+            os.killpg(child.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            child.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        child.wait(timeout=10)
+        raise
+
+
+def worker(directory: Path, *, report_only=False):
+    directory = Path(directory).resolve()
+    state = _read(directory / "job.json")
+    state["pid"] = os.getpid()
+    def save(**changes):
+        state.update(changes)
+        atomic_json(directory / "job.json", state)
+    save(state="reporting" if report_only else "acquiring")
+    try:
+        launch = _read(directory / "launch.json") if (directory / "launch.json").exists() else {}
+        if launch.get("requested_utc") and (datetime.now(timezone.utc)-datetime.fromisoformat(launch["requested_utc"])).total_seconds() > 120:
+            raise RuntimeError("Worker launch expired; start a fresh confirmed job")
+        if (directory / "cancel.request").exists():
+            save(state="cancelled")
+            return
+        plan = Plan.model_validate(_read(directory / "plan.json"))
+        if not verify_plan_hash(plan):
+            raise ValueError("Job plan changed")
+        request = _read(directory / "request.json")
+        if report_only:
+            path = _inside(directory, state["run_dir"])
+        elif plan.bench.mode == "real":
+            if _digest(directory / "inventory.yaml") != request["inventory_sha256"]:
+                raise ValueError("Saved job inventory changed")
+            from .real_backend import run_real
+            path = run_real(plan, directory / "inventory.yaml", directory / "runs",
+                confirmation=request["confirmation"], cancel=directory / "cancel.request",
+                notes=request.get("notes", ""), attachments=request.get("attachments", []))
+        else:
+            from .activity import bench_activity
+            from .runner import run_mock
+            with bench_activity("acquisition"):
+                path = run_mock(plan, directory / "runs", operator_observations=[request["notes"]] if request.get("notes") else [],
+                                attachment_descriptors=request.get("attachments", []))
+        run = _verified_off(path)
+        save(run_dir=str(path))
+        cancelled_acquisition = (directory / "cancel.request").exists()
+        save(state="reporting")
+        # A separate process owns all optional/heavy reporting dependencies.
+        returncode = _render_process(path)
+        reports = sorted((path / "reports").glob("r*"))
+        report = reports[-1] if reports else None
+        manifest = _read(report / "build_manifest.json") if report and (report / "build_manifest.json").exists() else {}
+        if returncode or manifest.get("status") != "success":
+            save(state="failed", error="Acquisition preserved; report generation failed. See worker.log and build manifest.",
+                 report_dir=str(report) if report else None)
+        else:
+            save(state="cancelled" if cancelled_acquisition else "completed" if run["execution_status"] == "completed" else "aborted", report_dir=str(report))
+    except KeyboardInterrupt:
+        save(state="cancelled", error="Operator cancelled the job; inspect recorded shutdown status")
+    except BaseException as exc:
+        save(state="failed", error=f"{type(exc).__name__}: {exc}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--worker", type=Path, required=True)
+    parser.add_argument("--report-only", action="store_true")
+    args = parser.parse_args()
+    worker(args.worker, report_only=args.report_only)

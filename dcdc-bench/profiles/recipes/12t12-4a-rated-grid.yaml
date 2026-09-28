@@ -1,0 +1,61 @@
+schema_version: '1.0'
+recipe_id: 12t12-4a-rated-grid
+dut_profile_id: 12t12-4a
+execution_mode: mock
+tests:
+- id: steady-load
+  type: steady_state_load_sweep
+  input_voltage_targets_V:
+  - 9.0
+  - 10.0
+  - 11.0
+  - 11.5
+  - 12.0
+  - 12.5
+  - 13.0
+  - 15.0
+  - 18.0
+  - 24.0
+  - 30.0
+  - 36.0
+  output_current_targets_A:
+  - 0.0
+  - 0.05
+  - 0.1
+  - 0.25
+  - 0.5
+  - 0.75
+  - 1.0
+  - 1.5
+  - 2.0
+  - 3.0
+  - 4.0
+  derived_results:
+  - efficiency
+  - power_loss
+  - load_regulation
+  - enabled_no_load_consumption
+  - line_regulation_on_common_valid_grid
+planning:
+  efficiency_estimate_fraction: 0.8
+  source_current_budget_fraction: 0.9
+  infeasible_point_policy: record_and_skip
+  assumption_status: planning_only_not_measured
+settling:
+  policy: electrical
+  settings_origin: draft_requires_bench_validation
+  minimum_dwell_s: 5.0
+  window_s: 5.0
+  minimum_fresh_samples: 5
+  maximum_vout_span_V: 0.05
+  timeout_s: 30.0
+acquisition:
+  duration_s: 5.0
+  target_poll_interval_s: 0.5
+  minimum_complete_cycles: 5
+  maximum_interchannel_skew_s: 0.5
+  settings_origin: draft_requires_driver_timing_validation
+authorization:
+  require_operator_arming: true
+  allow_unattended: false
+  protective_policy_id: null

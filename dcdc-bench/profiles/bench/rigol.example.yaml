@@ -1,0 +1,77 @@
+schema_version: '1.0'
+bench_id: rigol-example-unconfirmed
+mode: real
+source:
+  instrument_id: source
+  adapter: benchctl_dp800
+  physical_model: null
+  reported_identity: null
+  channel: 1
+  capabilities_confirmed: false
+  min_voltage_V: 0.0
+  max_voltage_V: 60.0
+  max_current_A: 1.0
+  max_power_W: 60.0
+  remote_sense_supported: false
+  remote_sense_required: false
+load:
+  instrument_id: load
+  adapter: benchctl_dl3000
+  physical_model: null
+  reported_identity: null
+  capabilities_confirmed: false
+  min_voltage_V: 0.0
+  max_voltage_V: null
+  max_current_A: null
+  max_power_W: null
+  remote_sense_supported: true
+  remote_sense_required: true
+  mode: CC
+  min_current_A: 0.0
+measurements:
+  Vin_V:
+    instrument_id: source
+    quantity: Vin_V
+    unit: V
+    location: source_terminals
+    measurement_range: null
+    resolution: null
+    accuracy: null
+    programming_accuracy: null
+  Iin_A:
+    instrument_id: source
+    quantity: Iin_A
+    unit: A
+    location: source_output
+    measurement_range: null
+    resolution: null
+    accuracy: null
+    programming_accuracy: null
+  Vout_V:
+    instrument_id: load
+    quantity: Vout_V
+    unit: V
+    location: dut_output_sense
+    measurement_range: null
+    resolution: null
+    accuracy: null
+    programming_accuracy: null
+  Iout_A:
+    instrument_id: load
+    quantity: Iout_A
+    unit: A
+    location: dut_output
+    measurement_range: null
+    resolution: null
+    accuracy: null
+    programming_accuracy: null
+measurement_boundary: source-to-DUT-output path
+notes:
+- TEMPLATE ONLY. Confirm physical source/load model, firmware, identity, capabilities
+  and wiring before live operation.
+- DP821-family CH1 has 60 V / 1 A envelope and no CH1 remote sense. Physical unit
+  identity remains unconfirmed.
+- The actual load model and ratings remain unknown; a reported or modified ID string
+  does not establish physical ratings.
+- No endpoints, serials, readback accuracy, or safety approval are provided. All real
+  execution remains unavailable in M0/M1.

@@ -1,0 +1,10 @@
+.venv/
+.tools/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+runs/
+examples/generated/
+test-artifacts/
+*.local.yaml
+workspace/
