@@ -218,15 +218,25 @@ Consequences the operator must know before the next real run:
   readbacks alone. An external current measurement (DMM/shunt on the output
   lead, ideally the input lead too) is a hardware decision for the owner.
 
+Also done on 2026-09-29: review follow-ups merged; **M2 plan step 4 run by the
+owner** through the UI with the data-only pass-through profiles
+(`passthrough-check` / `rigol-local-passthrough-12v` / `passthrough-12v-check`,
+saved in `dcdc-bench/workspace/profiles/`): the load's current readback reads
++11.0…11.3 mA above the source's at every loaded level
+(`docs/m2-freshness-and-readback-evidence.md` §F). The report now draws
+flagged (implausible) points as open markers with a computed explanation and
+a readback cross-check metric; the bench page shows a header activity
+spinner, refreshes Reports automatically and displays bench-local time.
+
 Remaining, in order:
-1. Merge the review follow-ups (extra fake-SCPI cases, no-load sign exemption,
-   time-estimate margin, per-sample load-input readback) — in progress on
-   2026-09-29.
-2. **Bench, converter disconnected** (M2 plan step 4, owner authorization):
-   freshness burst/step tests, plausibility cross-check, zero/offset check per
-   `docs/m2-freshness-and-readback-evidence.md` §D.
-3. **Bench, DUT at 24 V** (step 5, owner authorization): one enabled-no-load
-   window then one 0.1 A point through the UI's approvals and confirmation.
+1. **Owner hardware decision:** an external current reference (DMM + shunt on
+   the output lead, ideally the input lead too) is the only way to resolve the
+   ≈11 mA readback disagreement and qualify light-load efficiency.
+2. **Bench, DUT at 24 V** (M2 plan step 5, owner authorization): reconnect the
+   converter, re-Preview (plan hashes changed), one enabled-no-load window
+   then one 0.1 A point through the UI's approvals and confirmation.
+3. Optional step-4 extras not yet run: the sub-second freshness burst test
+   (needs a new read-only probe with outputs ON) and the source 24 → 23 V step.
 4. Only then revisit the M3 exit criteria; then the owner decides on the 12 V
    cold-start test plan (`docs/cold-start-hypothesis.md`).
 
