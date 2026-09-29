@@ -39,6 +39,7 @@ started at 15 V and kept the output at **12.134 V with a 100 mA load** while
 reducing measured input to **9.108 V**, without restarting the converter.
 Those converter artifacts are local; the published 5 V demo below is the
 existing supply-to-load test.
+Its documents are indexed in [dcdc-bench/docs/README.md](dcdc-bench/docs/README.md), and its module map is [dcdc-bench/docs/architecture.md](dcdc-bench/docs/architecture.md).
 
 ## Interactive demo
 

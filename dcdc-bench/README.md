@@ -3,43 +3,13 @@
 Configure a converter test, preserve the readings, and produce an interactive
 engineering report and a matching vector PDF.
 
-**Status as of 2026-09-28 (branch dcdc-bench-hardening): M0 reached; M1 substantially reached; M2 partial (software side implemented: structured uncertainty budget, read-only `doctor`, outputs-OFF readback-cadence probe; the real bench's freshness, readback accuracy and uncertainty stay unquantified until datasheet/calibration terms are entered and qualified on the bench; enabled-no-load unqualified); an M3 workflow slice demonstrated but M3 not complete by the spec's exit criteria; M4 software implemented on mock and stored data (paired-run comparison, sensor-placement editor with attachment hygiene, synthetic thermal channel with thermal settling) but M4 exit not met (no real temperature adapter; no comparison document rendered); M5 partial (UVLO input-ramp procedure on the synthetic plant only; full-power source, scope tests and public examples not started).** The first
-profile describes your **12T12-4A: 9–36 V input, 12 V / 4 A output**, with ratings
-marked as user supplied. The normal demonstration uses simulated instruments.
-A separate, explicitly armed pilot measured the connected converter at
-24 V input and 100 mA output. A subsequent fixed test completed a 50–500 mA
-sweep, a three-minute hold, and a return sweep at 24 V.
-The latest [input-voltage comparison](#efficiency-at-different-input-voltages)
-measured 27 load points at 24 V and near 36 V, reaching 2.5 A output.
-The separately preserved 12 V startup attempt stopped without a valid efficiency
-result; the retained evidence holds one automated attempt, in which the load was enabled at about 8 V output one second before the input collapsed, and the cause is unestablished (see the [cold-start hypothesis](docs/cold-start-hypothesis.md)). The local bench interface runs bounded real recipes for the
-reviewed DP821A CH1 / DL3031A setup, with automatic HTML/PDF reports. A bounded
-three-point real job completed through the UI's application services and
-continued after the client disconnected; a browser-click acquisition is not
-claimed. Saved DUT and bench profiles must now carry explicit approvals before
-any real plan is feasible. M2 qualification remains the gate before M3 can be
-called complete. The older generic CLI `run --mode real` remains disabled.
-The complete mock demo produces all three HTML/PDF reports. All 15 mock PDF
-pages passed visual review, and the offline browser/PDF gates passed at the
-initial checkpoint; on this aarch64 Pi they now run on a laptop or CI. For
-current test totals see the branch's final verification record.
-
-## Contents
-
-- [Start here](#start-here)
-- [Use the bench interface](#use-the-bench-interface)
-- [Start at 15 V, then reduce the input](#start-at-15-v-then-reduce-the-input)
-- [Try the demonstration](#try-the-demonstration)
-- [What the demonstration does](#what-the-demonstration-does)
-- [First real measurement](#first-real-measurement)
-- [Longer real converter test](#longer-real-converter-test)
-- [Test near the supply limit](#test-near-the-supply-limit)
-- [Efficiency at different input voltages](#efficiency-at-different-input-voltages)
-- [More commands](#more-commands)
-- [Profiles and planning](#profiles-and-planning)
-- [Evidence and reports](#evidence-and-reports)
-- [Architecture and verification](#architecture-and-verification)
-- [What comes next](#what-comes-next)
+[Start here](#start-here) · [Status](#status) ·
+[What it does and what it does not do](#what-it-does-and-what-it-does-not-do) ·
+[Use the bench interface](#use-the-bench-interface) · [Try the demonstration](#try-the-demonstration) ·
+[More commands](#more-commands) · [Measured results so far](#measured-results-so-far) ·
+[Profiles and planning](#profiles-and-planning) · [Evidence and reports](#evidence-and-reports) ·
+[Architecture and verification](#architecture-and-verification) · [What comes next](#what-comes-next) ·
+[Documentation](#documentation)
 
 ## Start here
 
@@ -68,329 +38,141 @@ Then start the page with `--inventory Software/config/lab.yaml` and follow
 **Select → Preview → Confirm → Start → Stop**. On a 1 GB Pi the demo and report
 rendering take several minutes and have needed extra swap; acquisition is light.
 
+## Status
+
+**Status as of 2026-09-28 (branch dcdc-bench-hardening): M0 reached; M1 substantially reached; M2 partial (software side implemented: structured uncertainty budget, read-only `doctor`, outputs-OFF readback-cadence probe; the real bench's freshness, readback accuracy and uncertainty stay unquantified until datasheet/calibration terms are entered and qualified on the bench; enabled-no-load unqualified); an M3 workflow slice demonstrated but M3 not complete by the spec's exit criteria; M4 software implemented on mock and stored data (paired-run comparison, sensor-placement editor with attachment hygiene, synthetic thermal channel with thermal settling) but M4 exit not met (no real temperature adapter; no comparison document rendered); M5 partial (UVLO input-ramp procedure on the synthetic plant only; full-power source, scope tests and public examples not started).**
+This position is stated identically in [acceptance coverage](docs/acceptance.md)
+and [implementation status](docs/implementation_status.md). For current test
+totals see the branch's final verification record.
+
+## What it does and what it does not do
+
+It describes the converter and the bench as data (the first profile describes
+your **12T12-4A: 9–36 V input, 12 V / 4 A output**, with ratings marked as user
+supplied; another converter is another profile, not a Python class), plans a
+grid of input voltages and output loads against explicit capabilities and
+guards while retaining every requested point with its reason, acquires settled
+DC readings from a deterministic simulated bench (the normal demonstration) or,
+when explicitly armed, from the reviewed DP821A CH1 / DL3031A bench through
+bounded real recipes, appends the evidence during acquisition and hashes it at
+finalization, calculates path efficiency, power loss, regulation and
+enabled-no-load consumption with a structured uncertainty budget, and renders
+an offline interactive HTML report and a matching vector PDF from one report
+model after verified shutdown.
+
+It does not claim a browser-click acquisition: a bounded three-point real job
+completed through the UI's application services and continued after the
+client disconnected. It energizes nothing without the three saved approvals in
+the DUT and bench profiles, a read-only `doctor` pass and a fresh wiring / CH1
+/ protection / serial confirmation at every Start; the older generic CLI
+`run --mode real` remains disabled. Current readback uncertainty, calibration
+and ADC freshness have not been independently established, every efficiency
+figure includes input and output wiring losses, and M2 qualification remains
+the gate before M3 can be called complete. The available 1 A supply cannot
+test the stated 48 W rating anywhere within 9–36 V. Real temperature
+acquisition, a real UVLO run, a rendered comparison document and published
+measured artifacts are future work.
+
 ## Use the bench interface
 
 **Select converter → choose voltages and loads → preview limits → Start → watch progress → open HTML/PDF.**
 
 From the parent repository root, install both the existing instrument drivers
-and the interface dependencies:
+and the interface dependencies, then start the page:
 
 ```sh
 python -m pip install -e . -e './dcdc-bench[ui,report,real]'
 dcdc-bench ui --root dcdc-bench/workspace --inventory Software/config/lab.yaml
 ```
 
-The default local URL is `http://localhost:8082`. When the server is on a Pi,
-forward that port through SSH. Omit `--inventory` to use simulated equipment.
-The report toolchain also needs Quarto/Typst and Chromium, described below.
+The default local URL is `http://localhost:8082`; forward that port through
+SSH when the server is on a Pi, and omit `--inventory` to use simulated
+equipment. The report toolchain also needs Quarto/Typst and Chromium, described
+below. On this development bench, the persistent service uses the already
+forwarded **[port 8081](http://localhost:8081/)** and preserves existing
+`/Runs/` report links. Real jobs run in separate services with automatic
+restart disabled; browser or UI-server reconnection does not restart
+acquisition, and **Stop test safely** asks the worker to switch both outputs
+off and record the resulting states. The current real procedure starts
+separately at each input voltage; it does not apply the continuously powered
+startup sequence of the
+[15 V start and input descent](docs/measured-results.md#start-at-15-v-then-reduce-the-input).
+Report generation takes several minutes on this Pi; its **Reporting** state
+follows acquisition and verified shutdown.
 
-On this development bench, the persistent service uses the already forwarded
-**[port 8081](http://localhost:8081/)** and preserves existing `/Runs/` report links.
-Real jobs run in separate services with automatic restart disabled. Browser or
-UI-server reconnection does not restart acquisition. **Stop test safely** asks
-the worker to switch both outputs off and record the resulting states.
-
-Profiles and job evidence are local and ignored by Git. Each run keeps its own
-configuration snapshot. A report-only retry uses those stored measurements.
-The current real procedure starts separately at each input voltage; it does
-not apply the continuously powered startup sequence described below.
-
-Read the [bench interface guide](docs/bench-ui.md) and
-[supported real procedure](docs/configured-runs.md) for limits and deployment.
-
-### Completed test through the interface
-
-The saved 12T12-4A profile was tested at **24 V input** with **100, 250 and
-500 mA** output loads. All three points qualified in **57.4 seconds**. The
-worker continued after the client disconnected, verified the source, load and
-source timer OFF, then automatically generated both report formats.
-
-| Requested load | Output voltage | Path efficiency, including wiring |
-| --- | ---: | ---: |
-| 100 mA | 12.134 V | 72.65% |
-| 250 mA | 12.117 V | 79.12% |
-| 500 mA | 12.089 V | 84.19% |
-
-[Interactive report](http://localhost:8081/Runs/12t12-workflow/report.html) ·
-[PDF](http://localhost:8081/Runs/12t12-workflow/report.pdf) ·
-[Agent-role results review](docs/configured-workflow-results-review.md) ·
-[Interface verification](docs/bench-ui-verification.md)
-
-Report figures use standard engineering labels and consistent colors, line
-patterns and markers. See [figure terminology and voltage definitions](docs/engineering-figure-labels.md)
+Evidence lands under `workspace/`, which is local and ignored by Git: saved
+profiles as JSON in `workspace/profiles/<kind>/`, and one folder per job,
+`workspace/jobs/<job_id>/`, holding `job.json`, `plan.json`, `request.json`,
+`launch.json`, `worker.log`, `resources.jsonl`, a private `inventory.yaml`
+for a real job, and the run folder `runs/<run_id>/` laid out as in
+[Evidence and reports](#evidence-and-reports). Each run keeps its own
+configuration snapshot; a report-only retry uses those stored measurements.
+Read the [bench interface guide](docs/bench-ui.md) and the
+[supported real procedure](docs/configured-runs.md) for limits and
+deployment. Report figures use standard engineering labels and consistent
+colors, line patterns and markers; see
+[figure terminology and voltage definitions](docs/engineering-figure-labels.md)
 for load regulation, line regulation, and the separate meaning of dropout voltage.
-
-This short run verifies the configurable workflow. The wider measured sweeps
-and their limits are documented below. Report generation takes several minutes
-on this Pi; its **Reporting** state follows acquisition and verified shutdown.
-
-## Start at 15 V, then reduce the input
-
-The connected converter failed the earlier direct 12 V startup. Following the
-operator's observation, this test started **unloaded at 15 V**, waited for five
-stable output readings, enabled a **100 mA load**, then reduced input through
-15, 14, 13, 12, 11, 10 and **9.1 V** without turning the supply off.
-
-All seven conditions produced qualified readings. At measured **12.009 V input**,
-the output was **12.134 V at 99.5 mA**. At the lowest measured **9.108 V input**,
-it was still **12.134 V at 99.5 mA**. Source, load and the source timer were
-verified OFF afterward. The independent audit passed 51 checks.
-
-On the development bench: [interactive report](http://localhost:8081/Runs/12t12-startup/report.html)
-· [PDF](http://localhost:8081/Runs/12t12-startup/report.pdf).
-These are local results, not public GitHub Pages links.
-
-This demonstrates continued operation after that startup sequence at light
-load. It does not determine the cold-start threshold or full-load capability
-at low input. See [the measurements and complete method](docs/startup-descent-results-review.md).
 
 ## Try the demonstration
 
-Use Python 3.11 or later. From this directory, set up the local environment:
+Use Python 3.11 or later. From this directory:
 
 ```sh
+sudo apt-get install --no-install-recommends chromium-headless-shell poppler-utils   # Debian/Pi, once
 python3 tools/setup.py
 .venv/bin/dcdc-bench demo --out examples/generated
 ```
 
-On Windows, use `py tools/setup.py`, then
-`.venv\Scripts\dcdc-bench.exe demo --out examples/generated`.
-The Windows instructions are provided for contributors; release verification
-for this increment is on Debian 13 ARM64. A source checkout is required for
-the included profiles and templates.
+The setup command installs the Python dependencies and downloads the pinned
+official Quarto release, verifying its published SHA-256; Quarto includes
+Typst. Chrome/Chromium renders the vector figures before both the HTML and the
+PDF build (the renderer prefers `chromium-headless-shell`, an installed
+`chromium` or `google-chrome` also works, and `BROWSER_PATH` selects another
+executable; `poppler-utils` serves the PDF inspection tests, not acquisition).
+A source checkout is required for the included profiles and templates. The
+Windows commands (`py tools/setup.py`, then
+`.venv\Scripts\dcdc-bench.exe demo --out examples/generated`) are provided for
+contributors; release verification for this increment is on Debian 13 ARM64.
 
-The setup command installs Python dependencies and downloads the pinned official
-Quarto release, verifying its published SHA-256. Quarto includes Typst. Static figures require Chrome/Chromium for both the HTML and the PDF build, because the vector figures are rendered before either document. On Debian/Pi, install these system packages
-once before setup:
+The demo asks a simulated supply for **12, 24 and 30 V** and a simulated load
+for **0, 0.05, 0.1, 0.25, 0.5, 0.75 and 1 A**. At each feasible point it waits
+for a stable output, records several complete sets of readings and calculates
+path efficiency, the power lost between the measured boundaries, how close the
+output stays to nominal as load and input change, and input consumption while
+enabled with no external load. The planner retains all **21 requested
+points**; with a 1 A source, an assumed 80% efficiency and a 90% current
+budget, two 12 V points are excluded by the planning budget. These assumptions
+are not measured efficiency or an approved protective policy. Three examples
+are produced: **Normal** (valid acquired points, planning exclusions, graphs
+and evidence), **Setup limited** (a simulated source enters current limiting;
+that point cannot support a nominal efficiency claim) and **Aborted** (an early
+stop preserves completed points, unrun points and shutdown evidence).
 
-```sh
-sudo apt-get install --no-install-recommends chromium-headless-shell poppler-utils
-```
-
-The renderer prefers `chromium-headless-shell`, which avoids loading the desktop
-browser interface. An installed `chromium` or `google-chrome` also works; set
-`BROWSER_PATH` to select another executable. `poppler-utils` is needed for PDF
-inspection tests, not acquisition. On a Pi with limited RAM, run rendering and
-browser tests sequentially. Acquisition can run
-with just `pip install -e .`; the optional `report` dependencies and Quarto can
-be installed on a separate computer that receives the run folder.
-
-The 1 GB verification Pi needed **768 MiB of temporary disk swap in addition to
-its existing 904 MiB zram swap** while VS Code was connected. The setup script
-does not change swap settings. For that configuration, provide the extra memory
-before a full document build, or copy the run folder to a computer with more RAM
-and use `dcdc-bench report` there. Acquisition is much lighter than rendering.
-
-Open **`examples/generated/index.html`** in a browser after the command completes.
-Every report works offline after copying it to your computer. HTML plots need
-JavaScript enabled; no Python server is required when opening a local file.
-
-For a report still on the Pi:
-
-```sh
-python3 -m http.server 8082 --bind 127.0.0.1 --directory examples/generated
-```
-
-In VS Code's **Ports** panel, forward **8082** and open the displayed local URL.
-SSH must remain connected while using this tunnel. Download the report to view
-it without a tunnel. This server serves static files only.
-
-For this Pi's existing report server on port 8081 and prepared offline bundles, see
-[Open a report from the Pi](../Documentation/Viewing-Local-Reports.md): download
-the HTML/PDF bundle, restore forwarding, or find the actual local port.
-
-The prepared mock examples are at **`/Runs/dcdc-mock-demo/index.html`** on that
-server. To avoid another SSH tunnel, download
-**`Data/Runs/dcdc-mock-demo-download.zip`** from the parent project's Explorer,
-extract it locally, and open `index.html`. It includes all three reports, PDFs,
-CSV results and acquisition evidence. This bundle is local to this checkout;
-the demo command creates equivalent examples in a fresh clone.
-
-## What the demonstration does
-
-It asks a simulated supply for **12, 24 and 30 V**, and asks a simulated load to
-draw **0, 0.05, 0.1, 0.25, 0.5, 0.75 and 1 A** from the converter output.
-At each feasible point it waits for a stable output, records several complete
-sets of voltage/current readings, and calculates:
-
-- How much input power reaches the output: **path efficiency**.
-- How much power is lost between the measured boundaries.
-- How close the output stays to its nominal voltage as load/input changes.
-- Input consumption while enabled with no external load.
-
-The planner retains all **21 requested points**. With a 1 A source, an assumed
-80% efficiency and a 90% current budget, two 12 V points are excluded by the
-planning budget. These assumptions are not measured efficiency or an approved
-protective policy.
-
-The command creates three examples:
-
-| Example | What to inspect |
-|---|---|
-| Normal | Valid acquired points, planning exclusions, graphs and evidence |
-| Setup limited | A simulated source enters current limiting; that point cannot support a nominal efficiency claim |
-| Aborted | An early stop preserves completed points, unrun points and shutdown evidence |
-
-Use the graph controls to choose input curves and quantities, hover over actual
-markers, inspect raw readings, zoom, export CSV/SVG/PNG, and save a view.
-**Reset zoom** keeps your selections; **Restore default view** resets them.
-The issued summary remains unchanged while you explore. A current-view print
-is exploratory; `report.pdf` is the canonical report revision.
-
-## First real measurement
-
-After you confirmed the wiring, polarity and CH1 connection and requested a
-live test, the separate supervised pilot ran the **12T12-4A at 24 V input with
-a 100 mA output load**. The supply current limit was **150 mA**. It collected
-five accepted sets of readings after startup and settling:
-
-| Measurement | Mean reading |
-|---|---:|
-| Supply voltage | 24.006 V |
-| Supply current | 68.84 mA |
-| Voltage at the load | 12.136 V |
-| Load current | 99.33 mA |
-| Input power | 1.653 W |
-| Output power | 1.205 W |
-| Approximate path efficiency | **72.95%** |
-
-Both the **load input and supply output were verified OFF** at the end.
-This is one operating point, not a sweep or a test of the 48 W rating.
-The voltage measurements are at the instrument terminals, so the efficiency
-includes input and output wiring losses. Current readback uncertainty,
-calibration and ADC freshness have not been independently established; the
-displayed digits do not imply that level of accuracy.
-
-The local evidence is in
-`runs/real-bringup/20260927T061038.184185Z_real_578d4f/`, with derived results in
-`analysis/a-5e0e50434006/` inside that folder. Earlier stopped attempts are kept
-separately. These run folders are ignored by Git and have not been published.
-Your multimeter and front-panel observations are recorded separately from the
-automatically acquired samples. Off-state readings were not used to claim
-no-load power or efficiency.
-
-## Test near the supply limit
-
-How much can this converter deliver using the existing supply? The real test
-increased the output load from **100 mA to 1.725 A**, while the DP821A CH1 stayed
-at **24 V with a 1.000 A current setting**. It used smaller load steps near the
-supply limit, observed the highest load for **30 seconds**, then checked the
-return to 100 mA. Both outputs were verified **OFF** afterward.
-
-At the highest load, the measured means were **0.987 A supply current**,
-**1.725 A output current**, and **11.886 V at the load**—about **20.5 W output**.
-Its measured path efficiency was **86.5%**. The run completed **22 observation
-windows** (21 increasing loads and one direct return to 100 mA) in **6 min 46 s**.
-The supply's 1 A input-side limit does not mean a 1 A converter output limit.
-This test approaches the bench's available input power; it does not test the
-converter's stated 12 V / 4 A rating.
-
-**[Open the interactive report](http://localhost:8081/Runs/12t12-source-limit/report.html)** ·
-[PDF](http://localhost:8081/Runs/12t12-source-limit/report.pdf) ·
-[Download the complete offline report](http://localhost:8081/Runs/12t12-source-limit-download.zip)
-
-These are local Pi links using your forwarded port. Download and extract the
-ZIP to view the report without SSH. Use the local port shown in VS Code if it
-differs from 8081. These measured artifacts have not been published to GitHub.
-
-[Procedure and commands](docs/source-limit-test.md) ·
-[Actual YAML specification](profiles/recipes/12t12-4a-source-limit.yaml) ·
-[Independent measurement review](docs/source-limit-results-review.md) ·
-[Code review](docs/source-limit-code-review.md)
-
-The report plots input current separately from output demand, retains the raw
-readings, and distinguishes unused conditional load settings from failed
-measurements. Dotted lines connect qualified stage boundaries on the time
-graph; they add no measured samples. Hover, point inspection and CSV exports
-remain available. Efficiency includes wiring losses, and measurement
-uncertainty has not been quantified.
-
-## Longer real converter test
-
-The **12T12-4A** completed an **8 minute 24 second** test at **24 V input**:
-increase demand from **50 to 500 mA**, hold 500 mA for **185.7 seconds**, then
-step back down to 50 mA. It asks whether voltage stays near 12 V, how efficiency
-changes with demand, and whether the output returns to a similar value.
-
-**[Test procedure and commands](docs/extended-test.md)** ·
-**[Actual YAML specification](profiles/recipes/12t12-4a-extended.yaml)** ·
-[Agent-role results review](docs/extended-results-review.md)
-
-On this Pi's forwarded report server:
-**[Open the interactive converter report](http://localhost:8081/Runs/12t12-extended/report.html)** ·
-[PDF](http://localhost:8081/Runs/12t12-extended/report.pdf) ·
-[Offline ZIP](http://localhost:8081/Runs/12t12-extended-download.zip).
-Use the actual local port displayed in VS Code's **Ports** panel if it differs.
-To read without SSH, download `Data/Runs/12t12-extended-download.zip`, extract
-it on your own computer, and open `report.html`.
-These links serve local measured artifacts; they have not been published to GitHub.
-
-| Result | Measured observation |
-| --- | ---: |
-| Completed observation windows | 37 of 37, across 10 distinct load settings |
-| Accepted complete reading cycles | 331 |
-| Mean output voltage across windows | 12.080–12.139 V |
-| Observed path efficiency | 65.06–84.25% |
-| Largest mean output power | 6.034 W |
-| Voltage change across hold-bin endpoint means | −0.841 mV |
-| Voltage difference after returning to 50 mA | −1.748 mV |
-
-Both outputs and the supply's automatic shutoff program were verified **OFF**.
-The tiny voltage differences are observations with **unquantified uncertainty**;
-they do not establish statistical significance, hysteresis, or thermal equilibrium.
-Efficiency includes wiring losses. This is a partial-power test, not qualification
-of the 48 W rating. No temperature, ripple, transient, or no-load test was performed.
-
-The successful run is
-`runs/real-extended/20260927T093948.075493Z_real_42e971/`.
-An earlier attempt stopped safely on host-side query timing; its evidence is
-preserved separately. The persistence ordering was corrected without widening
-the timing or electrical limits. See the [verification record](docs/extended-verification.md),
-[agent-role code review](docs/extended-code-review.md), and
-[report UI/UX review](docs/extended-ui-review.md).
-
-## Efficiency at different input voltages
-
-**[Open the interactive efficiency report](http://localhost:8081/Runs/12t12-efficiency/report.html)** ·
-[PDF](http://localhost:8081/Runs/12t12-efficiency/report.pdf) ·
-[Offline ZIP](http://localhost:8081/Runs/12t12-efficiency-download.zip) ·
-[Test YAML](profiles/recipes/12t12-4a-voltage-efficiency.yaml) ·
-[Procedure](docs/voltage-efficiency-test.md)
-
-Does the converter waste more power when its input voltage changes? This test
-raises the electronic load at each input condition and compares measured output
-power with measured input power. Shared load points let you compare the same
-output demand. **Teal means 24 V; purple means near 36 V** across every graph.
-Hover for readings, hide a voltage curve, or export the selected graph and data.
-
-| Input condition | Path efficiency at 500 mA requested output | Highest qualified output current |
-| --- | ---: | ---: |
-| 12 V | No qualified result: startup stopped | — |
-| 24 V | 84.24% | 1.725 A |
-| 36 V nominal, **35.8 V programmed** | 81.99% | 2.499 A |
-
-The upper setting leaves margin below the stated 36 V operating limit. Measured
-input was **24.006 V and 35.797 V** at the comparison points; calculations use
-those readings. At its highest tested load, the upper-voltage condition delivered
-**29.75 W** at **11.904 V**, drawing **0.966 A** from the supply.
-
-The earlier 12 V startup produced about 8 V output during its unloaded startup window; the load was then enabled at that output voltage and, one second later, the input collapsed to **2.661 V** with input current at **1.0005 A**. It produced no qualified efficiency window. Its cause is not established (see the [cold-start hypothesis](docs/cold-start-hypothesis.md)), and these results do not verify the full stated 9–36 V range. The continuation did not repeat that startup; both original runs are in the ZIP.
-
-The continuation completed **27 qualified windows and 204 accepted reading
-cycles in 428 seconds**, with a **1.000 A supply setting**. Both outputs and the
-source timer were verified **OFF**, including a separate query afterward.
-Efficiency includes wiring losses. These short DC windows do not establish
-thermal equilibrium, measurement uncertainty, or the converter's 4 A rating.
-
-The report has separate equipment model, serial, firmware and manufacturer
-columns, aligned DUT tables, and a clearly labeled account of the earlier
-startup stop. See the [code review](docs/voltage-efficiency-code-review.md),
-[agent-role results review](docs/voltage-efficiency-results-review.md), and
-[report UI review](docs/voltage-efficiency-ui-review.md).
-
-These are **local Pi reports**, using the forwarded port shown in VS Code.
-Download and extract the ZIP to read without SSH. They are not yet published
-GitHub Pages examples.
+Open **`examples/generated/index.html`** when the command completes. Every
+report works offline with JavaScript enabled and no Python server: choose
+input curves and quantities, hover the actual markers, inspect raw readings,
+zoom, export CSV/SVG/PNG and save a view; **Reset zoom** keeps your selections
+and **Restore default view** resets them; the issued summary does not change
+while you explore, a current-view print is exploratory, and `report.pdf` is
+the canonical report revision. On the 1 GB verification Pi the demo and
+rendering take several minutes and needed **768 MiB of temporary disk swap in
+addition to its existing 904 MiB zram swap** while VS Code was connected; the
+setup script does not change swap settings, so provide that memory first, run
+rendering and browser tests sequentially, or copy the run folder to a computer
+with more RAM and use `dcdc-bench report` there. Acquisition is much lighter
+than rendering and runs with just `pip install -e .`; the optional `report`
+dependencies and Quarto can live on a separate computer that receives the run
+folder. Step-by-step commands, what to expect from each, and how to serve a
+report still on the Pi over a forwarded port are in
+[Getting started, section 4](docs/getting-started.md#4-first-run-with-no-hardware);
+for this Pi's report server on port 8081 and prepared offline bundles see
+[Open a report from the Pi](../Documentation/Viewing-Local-Reports.md). The
+prepared mock examples are at `/Runs/dcdc-mock-demo/index.html` on that
+server, or download `Data/Runs/dcdc-mock-demo-download.zip` from the parent
+project's Explorer and open its `index.html` (all three reports, PDFs, CSV
+results and acquisition evidence; local to this checkout, and the demo command
+creates the equivalent in a fresh clone).
 
 ## More commands
 
@@ -416,6 +198,27 @@ and the thermal recipe (`profiles/recipes/12t12-4a-thermal-mock.yaml`). See
 [the Pi process model](docs/pi-process-model.md),
 [the cold-start hypothesis](docs/cold-start-hypothesis.md) and
 [the M2 qualification plan](docs/m2-qualification-plan.md).
+
+## Measured results so far
+
+<a name="first-real-measurement"></a><a name="longer-real-converter-test"></a><a name="test-near-the-supply-limit"></a><a name="efficiency-at-different-input-voltages"></a><a name="start-at-15-v-then-reduce-the-input"></a><a name="completed-test-through-the-interface"></a>
+
+Every real run so far measured the connected 12T12-4A on the reviewed DP821A
+CH1 / DL3031A bench on 2026-09-27 (UTC). Efficiency is path efficiency at the
+instrument terminals and includes wiring losses; measurement uncertainty is
+unquantified; none of these tests exercises the stated 12 V / 4 A rating. The
+full narratives, run-folder paths and local report links are in
+[Measured results](docs/measured-results.md); those report links are local to
+the owner's bench and need the SSH port forward.
+
+| Date (UTC) | Run | Headline numbers | Review |
+| --- | --- | --- | --- |
+| 2026-09-27 06:10 | Supervised pilot: 24 V input, 100 mA load, 150 mA supply limit; one operating point | 12.136 V at 99.33 mA; 1.653 W in, 1.205 W out; **72.95%** | No separate review; [narrative and evidence path](docs/measured-results.md#first-real-measurement) |
+| 2026-09-27 09:39 | Longer test: 24 V; 50→500 mA ramp, 185.7 s hold at 500 mA, return to 50 mA; 8 min 24 s | 37 of 37 windows, 331 accepted cycles; 12.080–12.139 V; **65.06–84.25%**; −1.748 mV after the return | [Results review](docs/extended-results-review.md) |
+| 2026-09-27 17:30 | Near the supply limit: 24 V with a 1.000 A supply setting; load raised from 100 mA to 1.725 A; 22 windows in 6 min 46 s | 0.987 A supply current; **1.725 A at 11.886 V (about 20.5 W)**; **86.5%** | [Results review](docs/source-limit-results-review.md) |
+| 2026-09-27 18:49 / 18:56 | Efficiency versus input voltage: the 12 V startup attempt stopped without a qualified result; continuation at 24 V and 35.8 V programmed (near 36 V), 27 windows, 204 cycles, 428 s | At 500 mA: **84.24%** (24 V) and **81.99%** (35.8 V); highest qualified output 2.499 A; 29.75 W at 11.904 V drawing 0.966 A | [Results review](docs/voltage-efficiency-results-review.md) |
+| 2026-09-27 21:22 | Start unloaded at 15 V, enable 100 mA, reduce the input through 15 … 9.1 V without switching off; seven conditions | **12.134 V at 99.5 mA** at both 12.009 V and 9.108 V measured input; 51 audit checks passed | [Results review](docs/startup-descent-results-review.md) |
+| 2026-09-27 22:38 | Configured three-point run through the bench interface: 24 V; 100, 250 and 500 mA; 57.4 s; worker continued after the client disconnected | 12.134 / 12.117 / 12.089 V; **72.65 / 79.12 / 84.19%** | [Results review](docs/configured-workflow-results-review.md) · [Interface verification](docs/bench-ui-verification.md) |
 
 ## Profiles and planning
 
@@ -505,28 +308,31 @@ existing parent `benchctl` instrument drivers. Acquisition and rendering share
 a process lock; reports start after verified shutdown. On this Pi, each UI job
 has its own service, so restarting the interface does not restart a test.
 The mock pipeline imports no real transport and opens no instruments. The
-general `run --mode real` path remains disabled while M2 is incomplete.
+general `run --mode real` path remains disabled while M2 is incomplete. The
+module-by-module map, with each module's entry points, forbidden dependencies
+and covering tests, is in [Architecture](docs/architecture.md); the
+acquisition/report process separation is in [the Pi process model](docs/pi-process-model.md).
 
 On 2026-09-28 the ordinary suite passed **653 tests**, with 15 browser/PDF tests deselected (Raspberry Pi, 478 s). At an earlier checkpoint it passed 378 tests with 13 deselected, and a focused UI, job and report regression passed 57; overlapping counts are not added. The configured real run passed a
 separate **67-check evidence audit**, and the startup/descent run passed 51 checks.
-See [interface verification](docs/bench-ui-verification.md) for browser coverage
-and the actual UI-callback hardware check.
-
-At an earlier checkpoint, the ordinary suite passed **214 tests**. One complete mock demo command
-finished successfully, and each of its three PDFs has five visually reviewed
-pages. All **10 browser/PDF gates** also passed: offline operation, actual hover
-and controls, data/figure downloads, escaped text, vector PDFs and shared report
-identities in the earlier M1 verification. The extended report receives its
-own browser/PDF review; those earlier ten gates are not claimed as rerun here.
+At the earlier M1 checkpoint the ordinary suite passed **214 tests**, one
+complete mock demo command finished successfully with five visually reviewed
+pages in each of its three PDFs, and all **10 browser/PDF gates** passed:
+offline operation, actual hover and controls, data/figure downloads, escaped
+text, vector PDFs and shared report identities. Later reports receive their
+own browser/PDF reviews; those ten gates are not claimed as rerun for them.
+On this aarch64 Pi the browser/PDF tests now run on a laptop or CI.
 
 ```sh
 python -m pytest tests -m 'not browser and not pdf'
 python -m pytest tests -m 'browser or pdf'
 ```
 
-See [implementation status](docs/implementation_status.md) for executed commands,
-platform, acceptance coverage and limitations. The complete
-[implementation brief](docs/implementation-brief.md) remains the design contract.
+See [interface verification](docs/bench-ui-verification.md) for browser
+coverage and the actual UI-callback hardware check,
+[implementation status](docs/implementation_status.md) for executed commands,
+platform, acceptance coverage and limitations, and the
+[implementation brief](docs/implementation-brief.md), which remains the design contract.
 
 ## What comes next
 
@@ -547,3 +353,10 @@ recorded method, plan and DUT profile. Also on this branch, on mock or stored da
 branch's final verification record. No repository push or report publication
 has been performed for this increment. The original project's license has not
 been changed or extended by this subproject.
+
+## Documentation
+
+Every file in `docs/` is listed once, with a one-line description, in the
+[documentation index](docs/README.md). Start with
+[Getting started](docs/getting-started.md); read [Architecture](docs/architecture.md)
+before changing the code.
