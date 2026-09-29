@@ -160,16 +160,20 @@ laptop's SSH config, not the repository. Nothing else needs migration.
 
 ## 7. Parked work in progress (do not delete blindly)
 
-Two agent worktrees from the parallel sessions were still present on
-2026-09-28 under `.claude/worktrees/` (`git worktree list`):
+Resolved on 2026-09-28 (Pi 4 session):
 
-- `worktree-agent-a6546934fb2137254` — **unmerged** commit `cf55c66`
-  "WIP: report themes and efficiency-vs-input figure" plus two uncommitted
-  files. Review it (`git diff dcdc-bench-hardening...worktree-agent-a6546934fb2137254`)
-  and either finish and merge it or drop it deliberately.
-- `worktree-agent-abeda9ea0e90c6eb4` — merged, but ten uncommitted files in
-  its worktree. Inspect with `git -C .claude/worktrees/agent-abeda9ea0e90c6eb4 status`
-  before removing the worktree.
+- The ten uncommitted files left in the `agent-abeda9ea` worktree were the
+  security-review fixes (upload/PDF budgets, publish allowlist and EXIF
+  stripping, request-body limits, doctor `--out` guard) that had never reached
+  the branch; they were salvaged, tested per file and **merged** (`bcdc58f`).
+  Worktree and branch removed.
+- `worktree-agent-a6546934fb2137254` (tip `c150360`, two commits) is kept as a
+  **branch only**: four selectable report themes plus a new
+  efficiency-vs-input figure, ~415 lines over 9 files, no tests, and it
+  pre-empts the owner's open questions in
+  [report-aesthetics-options.md](dcdc-bench/docs/report-aesthetics-options.md).
+  Finish it only after the owner picks a theme direction; otherwise delete
+  the branch deliberately (`git branch -D`, it is unmerged).
 
 ## 8. Decisions waiting for the owner
 
