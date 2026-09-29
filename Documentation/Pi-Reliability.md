@@ -43,8 +43,8 @@ If a future render needs the same headroom, create the file again for that
 session only. Do not delete an active swap file; after use, run:
 
 ```bash
-sudo swapoff /home/jerome/rigol-control/dcdc-bench/test-artifacts/report-render.swap && \
-  rm /home/jerome/rigol-control/dcdc-bench/test-artifacts/report-render.swap
+sudo swapoff ~/rigol-control/dcdc-bench/test-artifacts/report-render.swap && \
+  rm ~/rigol-control/dcdc-bench/test-artifacts/report-render.swap
 ```
 
 ## Restart on 28 September at 01:07
@@ -124,16 +124,16 @@ On a dedicated bench Pi, the following reversible setting keeps the user's
 enabled services running after logout and starts that user manager at boot:
 
 ```sh
-sudo loginctl enable-linger jerome
-loginctl show-user jerome -p Linger
+sudo loginctl enable-linger <user>
+loginctl show-user <user> -p Linger
 ```
 
-Undo with `sudo loginctl disable-linger jerome`. This affects all enabled
+Undo with `sudo loginctl disable-linger <user>`. This affects all enabled
 services for that user. It does not keep an SSH tunnel connected. See the
 installed `loginctl(1)` manual, `enable-linger`.
 
 Applied on this bench on 27 September 2026 at approximately 02:21 PDT:
-`loginctl show-user jerome -p Linger` returned `Linger=yes`, and
+`loginctl show-user <user> -p Linger` returned `Linger=yes`, and
 `benchctl-report.service` remained active. No reboot or network change was
 needed. The client still needs its forwarded port after reconnecting.
 
@@ -143,7 +143,7 @@ In VS Code on **your computer**, open **Remote–SSH: Open SSH Configuration
 File** and add these options to the existing block for the Pi:
 
 ```sshconfig
-Host rigol.local
+Host <pi-hostname>
     ServerAliveInterval 30
     ServerAliveCountMax 6
 ```
@@ -173,7 +173,7 @@ vmstat 1 5
 vcgencmd get_throttled
 vcgencmd measure_temp
 systemctl --user status benchctl-report.service --no-pager
-loginctl show-user jerome -p Linger
+loginctl show-user <user> -p Linger
 ```
 
 If the boot ID changes, the host restarted. If uptime continues but VS Code

@@ -89,7 +89,7 @@ The default local URL is `http://localhost:8082`; forward that port through
 SSH when the server is on a Pi, and omit `--inventory` to use simulated
 equipment. The report toolchain also needs Quarto/Typst and Chromium, described
 below. On this development bench, the persistent service uses the already
-forwarded **[port 8081](http://localhost:8081/)** and preserves existing
+forwarded **[port 8081](http://localhost:8081/)** *(local bench only; reachable through an SSH port forward)* and preserves existing
 `/Runs/` report links. Real jobs run in separate services with automatic
 restart disabled; browser or UI-server reconnection does not restart
 acquisition, and **Stop test safely** asks the worker to switch both outputs
