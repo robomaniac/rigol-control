@@ -1,0 +1,134 @@
+# Conditional candidates for the fixed, explicitly armed source_limit worker.
+# See docs/source-limit-test.md; generic real recipe execution is disabled.
+schema_version: '1.0'
+recipe_id: 12t12-24v-source-limit
+dut_profile_id: 12t12-4a
+execution_mode: real
+tests:
+- id: increasing-load
+  type: steady_state_load_sweep
+  input_voltage_targets_V:
+  - 24.0
+  output_current_targets_A:
+  - 0.1
+  - 0.125
+  - 0.15
+  - 0.175
+  - 0.2
+  - 0.225
+  - 0.25
+  - 0.275
+  - 0.3
+  - 0.325
+  - 0.35
+  - 0.375
+  - 0.4
+  - 0.425
+  - 0.45
+  - 0.475
+  - 0.5
+  - 0.525
+  - 0.55
+  - 0.575
+  - 0.6
+  - 0.625
+  - 0.65
+  - 0.675
+  - 0.7
+  - 0.725
+  - 0.75
+  - 0.775
+  - 0.8
+  - 0.825
+  - 0.85
+  - 0.875
+  - 0.9
+  - 0.925
+  - 0.95
+  - 0.975
+  - 1.0
+  - 1.025
+  - 1.05
+  - 1.075
+  - 1.1
+  - 1.125
+  - 1.15
+  - 1.175
+  - 1.2
+  - 1.225
+  - 1.25
+  - 1.275
+  - 1.3
+  - 1.325
+  - 1.35
+  - 1.375
+  - 1.4
+  - 1.425
+  - 1.45
+  - 1.475
+  - 1.5
+  - 1.525
+  - 1.55
+  - 1.575
+  - 1.6
+  - 1.625
+  - 1.65
+  - 1.675
+  - 1.7
+  - 1.725
+  - 1.75
+  - 1.775
+  - 1.8
+  - 1.825
+  - 1.85
+  - 1.875
+  - 1.9
+  - 1.925
+  - 1.95
+  - 1.975
+  - 2.0
+  derived_results: []
+  required_quantities:
+  - Vin_V
+  - Iin_A
+  - Vout_V
+  - Iout_A
+  optional_quantities: []
+- id: decreasing-load
+  type: steady_state_load_sweep
+  input_voltage_targets_V:
+  - 24.0
+  output_current_targets_A:
+  - 0.1
+  derived_results: []
+  required_quantities:
+  - Vin_V
+  - Iin_A
+  - Vout_V
+  - Iout_A
+  optional_quantities: []
+planning:
+  efficiency_estimate_fraction: 1.0
+  source_current_budget_fraction: 1.0
+  infeasible_point_policy: record_and_skip
+  assumption_status: planning_only_not_measured
+  auxiliary_input_power_estimate_W: 0.0
+  input_wiring_drop_allowance_V: 0.0
+settling:
+  policy: electrical
+  settings_origin: draft_requires_bench_validation
+  minimum_dwell_s: 5.0
+  window_s: 4.0
+  minimum_fresh_samples: 5
+  maximum_vout_span_V: 0.05
+  timeout_s: 30.0
+acquisition:
+  duration_s: 10.0
+  target_poll_interval_s: 1.0
+  minimum_complete_cycles: 5
+  maximum_interchannel_skew_s: 0.75
+  settings_origin: draft_requires_driver_timing_validation
+authorization:
+  require_operator_arming: true
+  allow_unattended: false
+  protective_policy_id: supervised-24V-source1A-adaptive-v1

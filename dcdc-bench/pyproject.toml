@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=78"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dcdc-bench"
+version = "0.1.0"
+description = "Evidence-preserving DC–DC characterization with a deterministic mock bench"
+readme = "README.md"
+requires-python = ">=3.11"
+# No `license` field yet: the repository owner has not chosen a license (see the root README).
+keywords = ["dc-dc", "converter", "characterization", "efficiency", "rigol", "scpi", "quarto", "plotly", "bench-automation"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Environment :: Web Environment",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering",
+    "Topic :: System :: Hardware",
+]
+dependencies = ["pydantic==2.13.4", "PyYAML==6.0.3", "filelock==4.0.4"]
+
+[project.optional-dependencies]
+# The editor validates uploaded photographs and PDF pages by content (Pillow, pypdf).
+ui = ["nicegui==3.17.1", "pillow==12.3.0", "pypdf==6.19.0"]
+# pypdf reads page boxes, tagged structure and drawing geometry for the PDF-02
+# pagination check; poppler-utils (pdftohtml) is the system-package counterpart.
+report = ["plotly==7.1.0", "kaleido==1.4.0", "pypdf==6.19.0"]
+# The real-hardware path wraps the owner's driver package from the repository
+# root (`pip install -e .` there provides `benchctl`); mock runs never need it.
+real = ["benchctl"]
+test = ["pytest==9.1.1", "playwright==1.63.0", "pypdf==6.19.0", "pillow==12.3.0"]
+
+[project.urls]
+Homepage = "https://github.com/robomaniac/rigol-control/tree/main/dcdc-bench"
+Repository = "https://github.com/robomaniac/rigol-control"
+Issues = "https://github.com/robomaniac/rigol-control/issues"
+Documentation = "https://github.com/robomaniac/rigol-control/tree/main/dcdc-bench/docs"
+"Implementation status" = "https://github.com/robomaniac/rigol-control/blob/main/dcdc-bench/docs/implementation_status.md"
+
+[project.scripts]
+dcdc-bench = "dcdc_bench.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"dcdc_bench.reporting" = ["*.js", "*.css", "*.qmd", "web/*", "templates/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["browser: real offline Chromium interaction", "pdf: Quarto/Typst vector PDF checks", "integration: subprocess integration"]

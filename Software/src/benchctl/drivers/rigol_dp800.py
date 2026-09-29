@@ -120,6 +120,43 @@ class RigolDP800:
                 f"(tolerance {VOLTAGE_PROGRAMMING_RESOLUTION_V} V)"
             )
 
+    def set_voltage_live(self, channel: int, voltage_v: float, *, max_step_v: float) -> None:
+        """Change the setpoint of an energized channel by at most ``max_step_v``.
+
+        The ordinary ``set_voltage`` refuses while output is ON. This method is
+        the single sanctioned exception for supervised procedures that must keep
+        a DUT energized; it requires output ON and bounds the step size.
+        """
+        self._validate_channel(channel)
+        step_limit = float(max_step_v)
+        if not math.isfinite(step_limit) or step_limit <= 0:
+            raise ValueError("max_step_v must be a positive finite voltage")
+        if not self.get_output_enabled(channel):
+            raise RuntimeError(
+                f"CH{channel} output is OFF; use set_voltage for a de-energized channel"
+            )
+        requested = float(voltage_v)
+        current = self.get_voltage_setpoint(channel)
+        if abs(requested - current) > step_limit + VOLTAGE_PROGRAMMING_RESOLUTION_V:
+            raise ValueError(
+                f"CH{channel} live voltage step {current} V -> {requested} V exceeds "
+                f"the permitted {step_limit} V"
+            )
+        self._transport.write(f":SOUR{channel}:VOLT {requested}")
+        self.check_errors()
+        actual = self.get_voltage_setpoint(channel)
+        if not math.isclose(
+            actual,
+            requested,
+            rel_tol=0.0,
+            abs_tol=VOLTAGE_PROGRAMMING_RESOLUTION_V,
+        ):
+            raise ReadbackMismatchError(
+                f"CH{channel} live voltage setpoint readback mismatch: "
+                f"requested {requested} V, got {actual} V "
+                f"(tolerance {VOLTAGE_PROGRAMMING_RESOLUTION_V} V)"
+            )
+
     def set_current_limit(self, channel: int, current_a: float) -> None:
         self._validate_channel(channel)
         self._require_output_off(channel)

@@ -309,6 +309,59 @@ def test_set_current_readback_mismatch_does_not_retry_write(driver, transport):
     assert transport.writes == [":SOUR2:CURR 1.5"]
 
 
+# -- live voltage change: the single sanctioned exception to the OFF interlock --
+
+
+def test_set_voltage_live_scpi_requires_on_and_verifies_readback(driver, transport):
+    transport.responses[":OUTP? CH1"] = "ON"
+    transport.responses[":SOUR1:VOLT?"] = ["15.000", "14.000"]
+    driver.set_voltage_live(1, 14.0, max_step_v=1.0)
+    assert transport.commands == [
+        ":OUTP? CH1",
+        ":SOUR1:VOLT?",
+        ":SOUR1:VOLT 14.0",
+        "SYST:ERR?",
+        ":SOUR1:VOLT?",
+    ]
+
+
+def test_set_voltage_live_refuses_de_energized_channel_before_any_write(driver, transport):
+    transport.responses[":SOUR1:VOLT?"] = "15.000"
+    with pytest.raises(RuntimeError, match="OFF; use set_voltage"):
+        driver.set_voltage_live(1, 14.0, max_step_v=1.0)
+    assert transport.writes == []
+
+
+@pytest.mark.parametrize("target", [13.5, 16.5])
+def test_set_voltage_live_refuses_oversized_step_before_any_write(driver, transport, target):
+    transport.responses[":OUTP? CH1"] = "ON"
+    transport.responses[":SOUR1:VOLT?"] = "15.000"
+    with pytest.raises(ValueError, match="exceeds the permitted 1.0 V"):
+        driver.set_voltage_live(1, target, max_step_v=1.0)
+    assert transport.writes == []
+
+
+def test_set_voltage_live_accepts_one_programming_increment_over_the_step(driver, transport):
+    transport.responses[":OUTP? CH1"] = "ON"
+    transport.responses[":SOUR1:VOLT?"] = ["15.009", "14.000"]
+    driver.set_voltage_live(1, 14.0, max_step_v=1.0)
+
+
+@pytest.mark.parametrize("bad_step", [0, -1.0, float("nan"), float("inf")])
+def test_set_voltage_live_rejects_invalid_step_limit(driver, transport, bad_step):
+    with pytest.raises(ValueError, match="positive finite"):
+        driver.set_voltage_live(1, 14.0, max_step_v=bad_step)
+    assert transport.commands == []
+
+
+def test_set_voltage_live_readback_mismatch_does_not_retry_write(driver, transport):
+    transport.responses[":OUTP? CH1"] = "ON"
+    transport.responses[":SOUR1:VOLT?"] = ["15.000", "14.500"]
+    with pytest.raises(ReadbackMismatchError, match="live voltage setpoint"):
+        driver.set_voltage_live(1, 14.0, max_step_v=1.0)
+    assert transport.writes == [":SOUR1:VOLT 14.0"]
+
+
 @pytest.mark.parametrize(
     "method_name, expected, response",
     [("output_on", "ON", "OFF"), ("output_off", "OFF", "ON")],

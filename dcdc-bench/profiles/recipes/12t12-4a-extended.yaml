@@ -1,0 +1,105 @@
+# Recorded specification for the fixed supervised extended procedure.
+# The general real recipe runner remains disabled; see docs/extended-test.md.
+schema_version: '1.0'
+recipe_id: 12t12-24v-extended
+dut_profile_id: 12t12-4a
+execution_mode: real
+tests:
+- id: increasing-load
+  type: steady_state_load_sweep
+  input_voltage_targets_V:
+  - 24.0
+  output_current_targets_A:
+  - 0.05
+  - 0.1
+  - 0.15
+  - 0.2
+  - 0.25
+  - 0.3
+  - 0.35
+  - 0.4
+  - 0.45
+  - 0.5
+  derived_results: []
+  required_quantities:
+  - Vin_V
+  - Iin_A
+  - Vout_V
+  - Iout_A
+  optional_quantities: []
+- id: sustained-load
+  type: steady_state_load_sweep
+  input_voltage_targets_V:
+  - 24.0
+  output_current_targets_A:
+  - 0.5
+  - 0.5
+  - 0.5
+  - 0.5
+  - 0.5
+  - 0.5
+  - 0.5
+  - 0.5
+  - 0.5
+  - 0.5
+  - 0.5
+  - 0.5
+  - 0.5
+  - 0.5
+  - 0.5
+  - 0.5
+  - 0.5
+  - 0.5
+  derived_results: []
+  required_quantities:
+  - Vin_V
+  - Iin_A
+  - Vout_V
+  - Iout_A
+  optional_quantities: []
+- id: decreasing-load
+  type: steady_state_load_sweep
+  input_voltage_targets_V:
+  - 24.0
+  output_current_targets_A:
+  - 0.45
+  - 0.4
+  - 0.35
+  - 0.3
+  - 0.25
+  - 0.2
+  - 0.15
+  - 0.1
+  - 0.05
+  derived_results: []
+  required_quantities:
+  - Vin_V
+  - Iin_A
+  - Vout_V
+  - Iout_A
+  optional_quantities: []
+planning:
+  efficiency_estimate_fraction: 0.65
+  source_current_budget_fraction: 0.9
+  infeasible_point_policy: record_and_skip
+  assumption_status: planning_only_not_measured
+  auxiliary_input_power_estimate_W: 0.0
+  input_wiring_drop_allowance_V: 0.0
+settling:
+  policy: electrical
+  settings_origin: draft_requires_bench_validation
+  minimum_dwell_s: 5.0
+  window_s: 4.0
+  minimum_fresh_samples: 5
+  maximum_vout_span_V: 0.05
+  timeout_s: 30.0
+acquisition:
+  duration_s: 10.0
+  target_poll_interval_s: 1.0
+  minimum_complete_cycles: 5
+  maximum_interchannel_skew_s: 0.75
+  settings_origin: draft_requires_driver_timing_validation
+authorization:
+  require_operator_arming: true
+  allow_unattended: false
+  protective_policy_id: supervised-24V-450mA-500mA-720s-v1

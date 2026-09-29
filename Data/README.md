@@ -11,6 +11,53 @@ forwarding. Opening an HTML file in GitHub's repository view shows its source
 code. You can also download any report and open the file in your browser;
 each report works offline.
 
+### Local converter measurements
+
+The **[configured workflow test](http://localhost:8081/Runs/12t12-workflow/report.html)**
+used the new interface to test the 12T12-4A at 24 V input and 100, 250 and
+500 mA loads. All three points qualified, the source and load were verified
+OFF, and HTML/PDF reports were generated automatically. Path efficiency was
+72.65%, 79.12% and 84.19%, including wiring losses.
+
+[PDF](http://localhost:8081/Runs/12t12-workflow/report.pdf) ·
+[Independent results review](../dcdc-bench/docs/configured-workflow-results-review.md) ·
+[Open the local bench interface](http://localhost:8081/)
+
+The **[15 V startup and input-descent test](http://localhost:8081/Runs/12t12-startup/report.html)**
+started the converter at 15 V, then kept it powered while lowering input under a
+100 mA load. All seven steps completed. At measured **9.108 V input**, the output
+remained **12.134 V at 99.5 mA**. Both outputs were verified OFF afterward.
+
+[PDF](http://localhost:8081/Runs/12t12-startup/report.pdf) ·
+[Independent results review](../dcdc-bench/docs/startup-descent-results-review.md) ·
+[Open the local bench interface](http://localhost:8081/)
+
+The **[12T12-4A efficiency comparison](http://localhost:8081/Runs/12t12-efficiency/report.html)**
+shows 27 measured load points at 24 V and near 36 V input, with a different color
+for each voltage. At 500 mA output demand, path efficiency was **84.24%** and
+**81.99%**, respectively. The upper-voltage sweep reached **2.5 A output**.
+The 36 V nominal condition uses a **35.8 V setpoint**; actual voltage is measured.
+The earlier 12 V startup stopped without a qualified efficiency result and is
+documented separately in the same report.
+
+[PDF](http://localhost:8081/Runs/12t12-efficiency/report.pdf) ·
+[Offline ZIP, including both original runs](http://localhost:8081/Runs/12t12-efficiency-download.zip) ·
+[Procedure and YAML](../dcdc-bench/README.md#efficiency-at-different-input-voltages)
+
+The earlier **12T12-4A test near the supply limit** reached **1.725 A output**
+while drawing **0.987 A from the 24 V supply**. It delivered about **20.5 W**
+at **86.5% path efficiency**, including wiring losses.
+
+[Interactive report](http://localhost:8081/Runs/12t12-source-limit/report.html) ·
+[PDF](http://localhost:8081/Runs/12t12-source-limit/report.pdf) ·
+[Offline ZIP](http://localhost:8081/Runs/12t12-source-limit-download.zip) ·
+[Procedure and YAML](../dcdc-bench/README.md#test-near-the-supply-limit)
+
+These are local Pi artifacts using your forwarded port, not published GitHub
+Pages examples. Download and extract the ZIP to read it without SSH. See
+[viewing local reports](../Documentation/Viewing-Local-Reports.md) if the port
+shown in VS Code differs from 8081.
+
 ## Saved files
 
 | File or folder | Contents |

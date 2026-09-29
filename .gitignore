@@ -14,3 +14,10 @@ Data/Runs/*
 .DS_Store
 Thumbs.db
 .browser-check/
+# Pinned document tools if installed at the root instead of dcdc-bench/.tools/.
+.tools/
+# AI coding-assistant scratch directories; they never hold project sources.
+.claude/worktrees/
+.claude/settings.local.json
+.codex/
+.agents/

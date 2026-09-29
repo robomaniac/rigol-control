@@ -1,0 +1,164 @@
+# Continuous integration for benchctl (Software/) and dcdc-bench (dcdc-bench/).
+#
+# No instrument is ever contacted: both suites use fake transports or the mock
+# bench. The first job is the required check. The second job renders the mock
+# demo with the real document toolchain (Quarto 1.10.18, Chromium, poppler) and
+# runs the browser/PDF release gates; it is informational (continue-on-error)
+# because it depends on downloads from outside GitHub Actions.
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Fake-instrument tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install benchctl and dcdc-bench with its extras
+        # `real` requires benchctl, which the editable install of `.` provides
+        # in the same resolver pass; nothing here opens an instrument session.
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e . -e './dcdc-bench[ui,report,real,test]'
+
+      - name: benchctl tests
+        run: python -m pytest Software/tests -q
+
+      - name: dcdc-bench tests without the document toolchain
+        # browser/pdf need Chromium and Quarto; integration needs the bundled
+        # Typst binary or detached subprocess workers. All three run in the
+        # documents job or locally.
+        run: python -m pytest dcdc-bench/tests -q -m 'not browser and not pdf and not integration'
+
+  documents:
+    name: Browser and PDF gates (Quarto + Chromium, informational)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    continue-on-error: true
+    env:
+      # Pinned in dcdc-bench/tools/setup.py (QUARTO = "1.10.18");
+      # tests/test_documents.py asserts this exact version in build_manifest.json.
+      QUARTO_VERSION: "1.10.18"
+      # tests/test_documents.py reads the completed demo from here instead of
+      # rebuilding it inside the session fixture.
+      DCDC_DEMO_DIR: ${{ github.workspace }}/dcdc-bench/examples/generated
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # Matches the recorded verification platform (Debian 13, Python 3.13).
+          python-version: "3.13"
+
+      - name: Install system packages for PDF inspection and Typst fonts
+        # pdftohtml (poppler-utils) feeds the PDF-02 pagination check; without
+        # it the renderer records the PDF as failed-validation and
+        # test_pdf_build_manifest_reports_real_success fails. The Typst header
+        # asks for DejaVu Sans / Liberation Sans.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends poppler-utils fonts-dejavu-core fonts-liberation
+
+      - name: Install benchctl and dcdc-bench with its extras
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e . -e './dcdc-bench[ui,report,real,test]'
+
+      - name: Install Playwright Chromium and point the renderer at it
+        # Mirrors dcdc-bench/tools/setup.py: Playwright downloads its tested
+        # Chromium; the renderer's _browser_path() honours BROWSER_PATH first,
+        # so Kaleido static figures and the Playwright viewer use the same build.
+        run: |
+          python -m playwright install --with-deps chromium
+          python - >> "$GITHUB_ENV" <<'PY'
+          from playwright.sync_api import sync_playwright
+          with sync_playwright() as p:
+              print("BROWSER_PATH=" + p.chromium.executable_path)
+          PY
+
+      - name: Install the pinned Quarto release with checksum verification
+        # Same procedure as dcdc-bench/tools/setup.py: read the official release
+        # metadata, take the linux-amd64 tarball, require the published sha256
+        # digest, verify it, then extract under dcdc-bench/.tools/ where the
+        # renderer (.tools/quarto-*/bin/quarto) and test_pdf_check (bundled
+        # Typst) already look. GH_TOKEN is the workflow's built-in read-only
+        # token, used only to avoid the anonymous API rate limit; no stored
+        # secret is involved.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import hashlib, json, os, shutil, sys, tarfile, urllib.request
+          from pathlib import Path
+
+          version = os.environ["QUARTO_VERSION"]
+          tools = Path("dcdc-bench/.tools")
+          tools.mkdir(exist_ok=True)
+          headers = {"Accept": "application/vnd.github+json"}
+          if os.environ.get("GH_TOKEN"):
+              headers["Authorization"] = "Bearer " + os.environ["GH_TOKEN"]
+          url = f"https://api.github.com/repos/quarto-dev/quarto-cli/releases/tags/v{version}"
+          with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=60) as response:
+              release = json.load(response)
+          asset = next(item for item in release["assets"] if item["name"].endswith("linux-amd64.tar.gz"))
+          digest = asset.get("digest", "")
+          if not digest.startswith("sha256:"):
+              sys.exit("Official release checksum unavailable; refusing to install an unverified Quarto")
+          archive = tools / asset["name"]
+          with urllib.request.urlopen(asset["browser_download_url"], timeout=120) as source, archive.open("wb") as target:
+              shutil.copyfileobj(source, target)
+          with archive.open("rb") as source:
+              if hashlib.file_digest(source, "sha256").hexdigest() != digest.split(":", 1)[1]:
+                  sys.exit("Quarto checksum mismatch")
+          with tarfile.open(archive) as source:
+              source.extractall(tools, filter="data")
+          archive.unlink()
+          print("Installed", asset["name"], "into", tools)
+          PY
+          echo "QUARTO_PATH=$GITHUB_WORKSPACE/dcdc-bench/.tools/quarto-$QUARTO_VERSION/bin/quarto" >> "$GITHUB_ENV"
+
+      - name: Check the tool versions the tests will assert
+        run: |
+          test "$("$QUARTO_PATH" --version)" = "$QUARTO_VERSION"
+          "$BROWSER_PATH" --version
+          pdftohtml -v 2>&1 | head -n 1
+
+      - name: Render the three mock demo reports (HTML and vector PDF)
+        # Simulated instruments only. Writes normal/, setup-limited/ and
+        # aborted/ runs plus index.html under DCDC_DEMO_DIR.
+        run: dcdc-bench demo --out dcdc-bench/examples/generated
+
+      - name: Browser and PDF release gates
+        # faulthandler_timeout mirrors the recorded verification command in
+        # dcdc-bench/docs/implementation_status.md.
+        run: python -m pytest dcdc-bench/tests -q -m 'browser or pdf' -o faulthandler_timeout=240
+
+      - name: Keep build manifests, render logs and PDFs for inspection
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dcdc-bench-demo-documents
+          retention-days: 7
+          if-no-files-found: ignore
+          path: |
+            dcdc-bench/examples/generated/index.html
+            dcdc-bench/examples/generated/**/build_manifest.json
+            dcdc-bench/examples/generated/**/render-*.log
+            dcdc-bench/examples/generated/**/report.pdf

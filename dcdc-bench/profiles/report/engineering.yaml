@@ -1,0 +1,20 @@
+schema_version: '1.0'
+profile_id: engineering
+title: "DC\u2013DC converter characterization"
+theme: engineering
+language: en
+units: SI
+formats:
+- html
+- pdf
+selected_sections:
+- summary
+- dut
+- setup
+- results
+- interpretation
+- appendix
+default_metric: efficiency_pct
+publication_enabled: false
+embed_assets: true
+noindex: true

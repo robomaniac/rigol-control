@@ -7,6 +7,40 @@ Pi or Linux computer and inspect the results in an offline HTML report.
 
 **Status:** working bench prototype · **Python:** 3.11+ · **Verified bench:** DP821A + DL3031A
 
+**Hardware:** Rigol DP800-series supplies and DL3000-series electronic loads over
+LXI/VXI-11 (LAN); verified on a DP821A and a DL3031A. **Safety stance:** every
+setpoint is checked against explicit, hand-maintained limits before a VISA
+session opens; limits are never inferred from a model name; software limits
+complement, never replace, the instruments' own OVP/OCP/OPP; tests and CI use
+fake instruments only. **Start:** [Getting started](dcdc-bench/docs/getting-started.md)
+· [Contributing](CONTRIBUTING.md).
+
+**DC–DC converter work:** the separate [dcdc-bench project](dcdc-bench/README.md)
+provides saved converter profiles, a local test interface, bounded real DC sweeps,
+and interactive HTML/vector PDF reports. See [the bench workflow](dcdc-bench/docs/bench-ui.md)
+and its milestone position in [implementation status](dcdc-bench/docs/implementation_status.md)
+(M0 reached; M1 substantially reached; M2 partial; an M3 workflow slice
+demonstrated; M4 and M5 software present on mock and stored data only). Real
+converter runs additionally require saved-profile approvals and a fresh
+wiring/serial confirmation at each Start. The bench interface listens only on
+the bench computer's loopback interface (`http://localhost:8081/` on the
+development Pi through an SSH port forward; that address does not work from
+GitHub). Its [completed real workflow test](dcdc-bench/README.md#completed-test-through-the-interface)
+includes the automatically generated HTML and PDF.
+It also includes a [measured 12T12-4A converter test](dcdc-bench/README.md#longer-real-converter-test):
+24 V input, a 50–500 mA sweep, a three-minute hold, and a return sweep.
+The newer [test near the supply limit](dcdc-bench/README.md#test-near-the-supply-limit)
+reached **1.725 A output** while drawing **0.987 A from the 24 V supply**.
+The latest [efficiency comparison](dcdc-bench/README.md#efficiency-at-different-input-voltages)
+adds **24 V and near-36 V curves**, reaching **2.5 A output**. Its separate
+12 V startup attempt stopped without a qualified efficiency result.
+A later [startup experiment](dcdc-bench/docs/startup-descent-results-review.md)
+started at 15 V and kept the output at **12.134 V with a 100 mA load** while
+reducing measured input to **9.108 V**, without restarting the converter.
+Those converter artifacts are local; the published 5 V demo below is the
+existing supply-to-load test.
+Its documents are indexed in [dcdc-bench/docs/README.md](dcdc-bench/docs/README.md), and its module map is [dcdc-bench/docs/architecture.md](dcdc-bench/docs/architecture.md).
+
 ## Interactive demo
 
 ### [Open the interactive 5 V power test →](https://robomaniac.github.io/rigol-control/Data/power-test-report.html)
@@ -353,12 +387,17 @@ binds to localhost by default. Use SSH forwarding for remote access.
 Folders are named for their contents:
 
 ```text
-Documentation/   Architecture, limitations and GitHub publishing guide
+Documentation/   benchctl architecture, GitHub publishing guide, the DC–DC plan,
+                 and bench-operator notes about the development Pi
 Electrical/      Bench wiring and protection settings
 Media/           README chart
 Data/            Reports/CSV and Example_Run/; ignored local Runs/ and Logs/
-Software/        src/, tests/, config/, recipes/, developer guide
-pyproject.toml   Install and test entry point from the repository root
+Software/        benchctl: src/, tests/, config/, recipes/, developer guide
+dcdc-bench/      DC–DC characterization subproject: own pyproject, tests, docs/
+.github/         CI: fake-instrument tests on Python 3.11 and 3.13
+index.html       GitHub Pages entry; redirects to the measured 5 V report
+.nojekyll        Lets GitHub Pages serve the saved HTML reports unchanged
+pyproject.toml   benchctl install and test entry point from the repository root
 ```
 
 See the [developer guide](Software/README.md) and
@@ -367,13 +406,25 @@ See the [developer guide](Software/README.md) and
 ## Verify and publish
 
 ```bash
-python -m pytest
+python -m pytest Software/tests -q
+python -m pytest dcdc-bench/tests -q -m 'not browser and not pdf and not integration'
 ```
 
-Tests use fake instruments. See the [verification record](Data/Verification.md).
-[Publishing to GitHub](Documentation/Publishing.md)
+Tests use fake instruments; the same commands run in
+[GitHub Actions](.github/workflows/ci.yml) on Python 3.11 and 3.13. The
+browser/PDF gates need Chromium and Quarto and run in a separate, non-blocking
+CI job. See the [verification record](Data/Verification.md) and
+[CONTRIBUTING.md](CONTRIBUTING.md). [Publishing to GitHub](Documentation/Publishing.md)
 explains commit identity, ignored files, authentication and the first push.
-Choose a license before inviting others to reuse the code.
+
+## License
+
+**To be chosen by the repository owner.** There is no `LICENSE` file yet, so no
+reuse permission is granted beyond viewing on GitHub. Before inviting reuse,
+check whether any code was adapted from the GPL-3.0 project referenced in
+[the DC–DC plan](Documentation/DC-DC-Characterization-Plan.md), then add the
+chosen license text as `LICENSE` and the matching `license` field to both
+`pyproject.toml` files.
 
 ## Next experiments
 

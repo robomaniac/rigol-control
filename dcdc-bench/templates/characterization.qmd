@@ -1,0 +1,31 @@
+---
+title: __TITLE__
+subtitle: __SUBTITLE__
+lang: en
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-location: left
+    toc-title: "In this report"
+    theme: default
+    format-links: false
+    css: report.css
+    include-after-body: interactions.html
+    include-in-header: metadata.html
+    anchor-sections: true
+    number-sections: false
+  typst:
+    papersize: a4
+    fontsize: 9.5pt
+    margin:
+      x: 18mm
+      y: 16mm
+    toc: false
+    keep-typ: true
+    include-in-header: print-header.typ
+execute:
+  enabled: false
+---
+
+__BODY__
