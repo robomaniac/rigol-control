@@ -329,3 +329,27 @@ def test_doctor_never_uses_the_write_paths_of_the_real_drivers(tmp_path, monkeyp
     _, diagnosis = run_doctor(bench_file(tmp_path), fake.inventory, cadence=True, seconds=1)
     assert diagnosis["exit_code"] == 0
     assert_read_only(fake, diagnosis)
+
+
+def test_mid_run_refusal_keeps_the_partial_diagnosis_and_exits_nonzero(tmp_path, monkeypatch):
+    """m7: a refusal after the source was read must not discard what was gathered."""
+    import dcdc_bench.doctor as doctor
+    fake = make_fake(tmp_path, monkeypatch)
+    original = doctor._identity_checks
+
+    def refusing(role, identity, device, capability, findings):
+        if role == "load":
+            raise DoctorRefusal("simulated refusal while diagnosing the load")
+        return original(role, identity, device, capability, findings)
+    monkeypatch.setattr(doctor, "_identity_checks", refusing)
+    with pytest.raises(DoctorRefusal, match="partial diagnosis saved to") as caught:
+        run_doctor(bench_file(tmp_path), fake.inventory)
+    path = next((tmp_path / "diagnostics").glob("doctor-*.json"))
+    assert str(path.resolve()) in str(caught.value)
+    saved = json.loads(path.read_text())
+    assert saved["exit_code"] == 2 and saved["refusal"].startswith("DoctorRefusal: simulated refusal")
+    assert saved["instruments"]["source"]["identity"]["model"] == "DP821A" and "load" not in saved["instruments"]
+    assert any(f["field"] == "refusal" and f["severity"] == "blocking" for f in saved["findings"])
+    assert saved["summary"]["queries"] == len(saved["transcript"]) > 0 and saved["summary"]["writes"] == 0
+    assert saved["close_errors"] == [] and all(s.opened and s.closed for s in fake.sessions.values())
+    assert not [c for c in fake.commands if c[1] == "write"]

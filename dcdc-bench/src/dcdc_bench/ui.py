@@ -10,7 +10,8 @@ import json
 import sys
 from pathlib import Path
 
-from .ui_models import artifact_url, edited_dut, edited_recipe, job_title, plan_rows, quantity, shutdown_label, state_label
+from .ui_models import (artifact_url, edited_dut, edited_recipe, job_actions, job_title, plan_rows, quantity,
+                        report_link_rows, shutdown_label, state_label)
 
 
 STYLE = '''
@@ -515,17 +516,23 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
             except (ValueError, OSError, RuntimeError) as exc:
                 notify_error(exc)
 
+        async def dequeue_report(job_id):
+            try:
+                await run.io_bound(service.cancel, job_id)
+                ui.notify('Report generation was removed from the queue. Saved measurements are preserved.', type='info')
+                await poll()
+            except (ValueError, OSError, RuntimeError) as exc:
+                notify_error(exc)
+
         def report_links(snapshot):
-            if not snapshot.get('report_dir'):
+            # Kept artifacts only: a PDF that is unverified (checker tool missing) or
+            # failed its layout check stays reachable, named as such in the label.
+            rows = report_link_rows(snapshot)
+            if not rows:
                 return
-            artifacts = snapshot.get('report_artifacts') or {}
             with ui.row().classes('gap-5'):
-                for filename, label in [('report.html', 'Open interactive HTML'), ('report.pdf', 'Open PDF'),
-                                        ('report_model.json', 'Report data JSON')]:
-                    artifact_kind = 'model' if filename == 'report_model.json' else filename.rsplit('.', 1)[1]
-                    if artifacts.get(artifact_kind, {}).get('status') != 'success':
-                        continue
-                    ui.link(label, artifact_url(snapshot['job_id'], 'report/' + filename), new_tab=True).classes('bench-artifact')
+                for label, relative in rows:
+                    ui.link(label, artifact_url(snapshot['job_id'], relative), new_tab=True).classes('bench-artifact')
 
         async def retry_report(job_id):
             try:
@@ -578,18 +585,23 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                     ui.label('Latest raw readings. Qualified averages and efficiency are available in the final report.').classes('bench-muted')
                 if snapshot.get('error'):
                     ui.label(str(snapshot['error'])).classes('bench-message bench-warning')
+                if snapshot.get('report_note'):
+                    ui.label(str(snapshot['report_note'])).classes('bench-message bench-warning')
                 ui.label(shutdown_label(snapshot)).classes('bench-message')
-                active = snapshot.get('state') in ('queued', 'starting', 'running', 'acquiring', 'stopping', 'cancel_requested')
-                if active:
+                actions = job_actions(snapshot)
+                if 'stop' in actions:
                     stop = ui.button('Stop test safely', on_click=lambda: stop_test(snapshot['job_id']),
                                      icon='stop', color='negative').props('outline no-caps aria-label="Stop test safely"')
                     if snapshot.get('cancel_requested'):
                         stop.disable()
+                if 'dequeue' in actions:
+                    ui.button('Remove from report queue', on_click=lambda: dequeue_report(snapshot['job_id']),
+                              icon='playlist_remove').props('outline no-caps aria-label="Remove from report queue"')
                 report_links(snapshot)
                 artifacts = snapshot.get('report_artifacts') or {}
                 terminal = snapshot.get('state') in ('completed', 'aborted', 'failed', 'cancelled')
                 failed_formats = [name.upper() for name in ('html', 'pdf')
-                                  if terminal and snapshot.get('run_dir') and artifacts.get(name, {}).get('status') != 'success']
+                                  if terminal and snapshot.get('run_dir') and artifacts.get(name, {}).get('status') not in ('success', 'unverified')]
                 if terminal and not snapshot.get('run_dir'):
                     ui.label('No measurements were acquired for this job.').classes('bench-muted')
                 if failed_formats:

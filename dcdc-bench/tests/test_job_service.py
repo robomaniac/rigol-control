@@ -2,6 +2,7 @@
 import json
 from pathlib import Path
 from types import SimpleNamespace
+import uuid
 
 import pytest
 
@@ -208,6 +209,11 @@ def test_stale_supported_preview_cannot_start_an_unapproved_real_job(service, mo
 def test_systemd_launch_preserves_shared_lease_and_render_paths(service, monkeypatch):
     monkeypatch.setenv("DCDC_JOB_LAUNCHER", "systemd")
     monkeypatch.setenv("QUARTO_PATH", "/opt/quarto with spaces/bin/quarto")
+    # M7: the memory-gate thresholds (and every DCDC_* variable) reach the worker,
+    # so services.report_run applies the same gate the dispatcher passed.
+    monkeypatch.setenv("DCDC_RENDER_MIN_AVAILABLE_MIB", "0")
+    monkeypatch.setenv("DCDC_RENDER_MIN_AVAILABLE_PLUS_SWAP_FREE_MIB", "0")
+    monkeypatch.setenv("PYTHONPATH", "/srv/dcdc/src")
     seen = []
     def launched(command, **kwargs):
         seen.append(command)
@@ -217,6 +223,10 @@ def test_systemd_launch_preserves_shared_lease_and_render_paths(service, monkeyp
     import os
     assert "--setenv=DCDC_ACTIVITY_LOCK="+os.environ["DCDC_ACTIVITY_LOCK"] in seen[0]
     assert "--setenv=QUARTO_PATH=/opt/quarto with spaces/bin/quarto" in seen[0]
+    assert "--setenv=DCDC_RENDER_MIN_AVAILABLE_MIB=0" in seen[0]
+    assert "--setenv=DCDC_RENDER_MIN_AVAILABLE_PLUS_SWAP_FREE_MIB=0" in seen[0]
+    assert "--setenv=DCDC_JOB_LAUNCHER=systemd" in seen[0]
+    assert "--setenv=PYTHONPATH=/srv/dcdc/src" in seen[0]
     assert json.loads((service._job(job_id) / "launch.json").read_text())["unit"].startswith("dcdc-job-")
 
 
@@ -237,3 +247,128 @@ def test_report_cancellation_terminates_only_owned_report_group(monkeypatch, tmp
         _render_process(tmp_path)
     assert kills == [(42424, signal.SIGTERM), (42424, signal.SIGKILL)]
     assert waits == [1800, 10, 10]
+
+
+# --- M3: dispatch by test type ------------------------------------------------------------------------
+
+def uvlo_mock_profiles(service, *, steps=(12., 9., 8.5, 9., 12.), extra_sweep=False):
+    """Save an approved mock UVLO bench/recipe pair the way the UI forms do; unique instrument ids keep the mock locks apart."""
+    catalog = service.list_profiles()
+    bench_name = next(n for n in catalog["bench"] if service.load_profile("bench", n)["mode"] == "mock")
+    recipe_name = next(n for n in catalog["recipe"] if service.load_profile("recipe", n)["execution_mode"] == "mock")
+    suffix = uuid.uuid4().hex[:8]
+    bench = service.load_profile("bench", bench_name)
+    bench["bench_id"] = "uvlo-bench-" + suffix
+    bench["source"]["instrument_id"] += suffix
+    bench["load"]["instrument_id"] += suffix
+    for quantity, binding in bench["measurements"].items():
+        binding["instrument_id"] = bench["source"]["instrument_id"] if quantity in ("Vin_V", "Iin_A") else bench["load"]["instrument_id"]
+    bench["protective_controls"].update(policy_id="synthetic-uvlo-ramp-v1", source_current_limit_A=.5,
+                                        dut_output_overvoltage_V=13.2, output_overcurrent_A=.15)
+    recipe = service.load_profile("recipe", recipe_name)
+    recipe["recipe_id"] = "uvlo-recipe-" + suffix
+    sweep = recipe["tests"][0]
+    ramp = {"id": "uvlo-ramp", "type": "uvlo_input_ramp", "input_voltage_targets_V": list(steps), "output_current_targets_A": [.1],
+            "uvlo": {"floor_V": 8., "startup_interval_s": .3, "output_on_minimum_V": 10.8, "output_off_maximum_V": 1.,
+                     "expected_off_below_V": 9., "expected_on_above_V": 10.}}
+    recipe["tests"] = [ramp, sweep] if extra_sweep else [ramp]
+    recipe["settling"].update(minimum_dwell_s=1.)
+    recipe["acquisition"].update(duration_s=.3, target_poll_interval_s=.25, minimum_complete_cycles=3)
+    recipe["authorization"].update(uvlo_approved=True, protective_policy_id="synthetic-uvlo-ramp-v1")
+    return catalog["dut"][0], service.save_profile("bench", bench), service.save_profile("recipe", recipe)
+
+
+def test_armed_mock_uvlo_job_runs_the_ramp_procedure_to_report_queued(service, monkeypatch):
+    """M3: an approved all-UVLO mock plan is dispatched to uvlo.run_uvlo_mock, never to runner.run_mock."""
+    preview = service.preview(*uvlo_mock_profiles(service))
+    assert preview["supported"] and preview["counts"] == {"executable": 5}, preview["errors"]
+    assert all(p["test_id"] == "uvlo-ramp" for p in preview["points"])
+    with pytest.MonkeyPatch.context() as launch:  # the worker runs below, in this process, and needs the real Popen
+        launch.setattr("dcdc_bench.job_service.subprocess.Popen", lambda *a, **k: SimpleNamespace(pid=None))
+        job_id = service.start(preview["plan_hash"], notes="synthetic ramp")["job_id"]
+    job = service._job(job_id)
+    monkeypatch.setattr("dcdc_bench.runner.run_mock", lambda *a, **k: pytest.fail("a UVLO plan must not run the load-sweep loop"))
+    monkeypatch.setattr("dcdc_bench.job_service._render_process", lambda *a, **k: pytest.fail("the acquisition worker must not render"))
+    worker(job)
+    snapshot = service.status(job_id)
+    assert snapshot["state"] == "report-queued", snapshot["error"]
+    assert snapshot["error"] is None and Path(snapshot["run_dir"]).is_dir()
+    run = json.loads((Path(snapshot["run_dir"]) / "run.json").read_text())
+    assert "uvlo_input_ramp" in run["method"] and run["scenario"].startswith("Approved UVLO input ramp")
+    assert run["execution_status"] == "completed", run["errors"]
+    assert run["operator_observations"] == ["synthetic ramp"] and run["real_hardware_opened"] is False
+    assert [p["output_state"] for p in run["points"]] == ["on", "on", "off", "off", "on"]
+    assert all(s["state"] == "OFF" and s["verified"] is True for s in run["shutdown"].values())
+
+
+def test_mixed_uvlo_and_sweep_recipe_is_unsupported_at_planning(service, tmp_path):
+    """M3: a recipe mixing the ramp with a load sweep has no executor; every point is refused with the reason."""
+    from dcdc_bench.domain import Plan
+    from dcdc_bench.services import acquire_mock
+    preview = service.preview(*uvlo_mock_profiles(service, extra_sweep=True))
+    assert not preview["supported"] and "No feasible point is available" in preview["errors"]
+    assert preview["counts"] == {"unsupported": len(preview["points"])}
+    assert all("mixes uvlo_input_ramp" in p["reason"] for p in preview["points"])
+    with pytest.raises(ValueError, match="Unsupported plan"):
+        service.start(preview["plan_hash"])
+    with pytest.raises(ValueError, match="mixes uvlo_input_ramp"):
+        acquire_mock(Plan.model_validate(preview["plan"]), tmp_path / "mixed-out")
+    assert not (tmp_path / "mixed-out").exists()
+
+
+# --- M5: an unverified PDF completes the job with a visible note; a failed layout check still fails it ----
+
+def report_only_job(service, monkeypatch):
+    """A finalized, verified-OFF job whose report-only worker is about to run in this process."""
+    p = mock_preview(service)
+    monkeypatch.setattr("dcdc_bench.job_service.subprocess.Popen", lambda *a, **k: SimpleNamespace(pid=None))
+    job_id = service.start(p["plan_hash"])["job_id"]
+    job = service._job(job_id)
+    path = finalized_fixture(job, p["plan"])
+    state = json.loads((job / "job.json").read_text())
+    state.update(state="queued", run_dir=str(path), action="report-only")
+    atomic_json(job / "job.json", state)
+    return job_id, job
+
+
+def fake_render(manifest_status, pdf_status, **pdf_fields):
+    def render(path, annotations=None):
+        revision = Path(path) / "reports" / "r0001"
+        revision.mkdir(parents=True)
+        (revision / "report.html").write_text("<html></html>")
+        (revision / "report.pdf").write_bytes(b"%PDF-1.7 fixture")
+        atomic_json(revision / "build_manifest.json", {"status": manifest_status, "artifacts": {
+            "html": {"status": "success"}, "pdf": {"status": pdf_status, **pdf_fields}}})
+        return 0
+    return render
+
+
+def test_unverified_pdf_check_completes_the_job_with_a_visible_note(service, monkeypatch):
+    from dcdc_bench.ui_models import report_link_rows
+    job_id, job = report_only_job(service, monkeypatch)
+    monkeypatch.setattr("dcdc_bench.job_service._render_process",
+                        fake_render("unverified", "unverified", note="PDF not verified: tool missing (pdftohtml-unavailable)"))
+    worker(job, report_only=True)
+    snapshot = service.status(job_id)
+    assert snapshot["state"] == "completed" and snapshot["error"] is None
+    assert snapshot["report_note"].startswith("PDF not verified: tool missing")
+    assert snapshot["report_artifacts"]["pdf"]["status"] == "unverified"
+    assert snapshot["report_artifacts"]["html"]["status"] == "success"
+    rows = report_link_rows(snapshot)
+    assert [relative for _, relative in rows] == ["report/report.html", "report/report.pdf"]
+    assert rows[1][0] == "Open PDF (not verified: checker tool missing)"
+
+
+def test_failed_pdf_validation_still_fails_the_job_but_keeps_the_pdf_reachable(service, monkeypatch):
+    from dcdc_bench.ui_models import report_link_rows
+    job_id, job = report_only_job(service, monkeypatch)
+    monkeypatch.setattr("dcdc_bench.job_service._render_process",
+                        fake_render("failed-validation", "failed-validation",
+                                    error="PDF pagination check (PDF-02) reported 1 error finding(s): p1: orphan-heading"))
+    worker(job, report_only=True)
+    snapshot = service.status(job_id)
+    assert snapshot["state"] == "failed" and "report generation failed" in snapshot["error"]
+    assert snapshot.get("report_note") is None
+    rows = report_link_rows(snapshot)
+    assert [relative for _, relative in rows] == ["report/report.html", "report/report.pdf"]
+    assert "failed the layout check" in rows[1][0]

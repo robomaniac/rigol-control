@@ -231,8 +231,12 @@ class JobService:
             launcher = os.environ.get("DCDC_JOB_LAUNCHER", "detached")
             if launcher == "systemd":
                 unit = "dcdc-job-" + directory.name + "-" + uuid.uuid4().hex[:8]
-                environment = [f"--setenv={key}={os.environ[key]}" for key in
-                    ("DCDC_ACTIVITY_LOCK", "QUARTO_PATH", "BROWSER_PATH", "PATH") if key in os.environ]
+                # The worker must see the same lease path, tool paths, import path
+                # and memory-gate thresholds as the dispatcher, or the child's
+                # gate (services.report_run) diverges from the one that launched it.
+                forwarded = sorted({"DCDC_ACTIVITY_LOCK", "QUARTO_PATH", "BROWSER_PATH", "PATH", "PYTHONPATH"}
+                                   | {key for key in os.environ if key.startswith("DCDC_")})
+                environment = [f"--setenv={key}={os.environ[key]}" for key in forwarded if key in os.environ]
                 command = ["systemd-run", "--user", "--quiet", "--collect", "--unit="+unit,
                     "--property=Restart=no", "--property=RuntimeMaxSec=2700",
                     "--property=KillMode=control-group", "--property=TimeoutStopSec=20",
@@ -351,17 +355,32 @@ class JobService:
             atomic_json(job / "job.json", record)
             return {"job_id": job_id, "state": REPORT_QUEUED}
 
-    def _report_queue(self):
-        """Raw job.json states, oldest queued first; cheap enough for a 2 s timer."""
-        queued = []
+    def _job_records(self):
+        """Raw job.json records by job name; no run.json or sample-tail reads (cheap for a 2 s timer)."""
+        records = {}
         for entry in (self.root / "jobs").iterdir():
             try:
-                record = _read(entry / "job.json")
+                records[entry.name] = _read(entry / "job.json")
             except (OSError, ValueError):
                 continue
-            if record.get("state") == REPORT_QUEUED:
-                queued.append((record.get("queued_utc") or "", entry.name))
+        return records
+
+    def _report_queue(self, records=None):
+        """Raw job.json states, oldest queued first; cheap enough for a 2 s timer."""
+        records = self._job_records() if records is None else records
+        queued = [(record.get("queued_utc") or "", name) for name, record in records.items()
+                  if record.get("state") == REPORT_QUEUED]
         return [name for _, name in sorted(queued)]
+
+    def _bench_busy(self, records):
+        """True while a job is queued/acquiring/reporting.
+
+        Only records whose raw state is ACTIVE are re-derived through status(),
+        which also detects a dead worker or an expired launch; the idle path
+        reads nothing but job.json files.
+        """
+        return any(self.status(name)["state"] in ACTIVE for name, record in records.items()
+                   if record.get("state") in ACTIVE)
 
     def dispatch_reports(self):
         """Launch at most one report-only worker, only when the bench is idle and memory allows.
@@ -372,11 +391,13 @@ class JobService:
         oldest queued job so the operator can see why nothing is rendering.
         """
         with self.lock:
-            queue = self._report_queue()
-            if not queue or any(job["state"] in ACTIVE for job in self.list_jobs()):
+            records = self._job_records()
+            queue = self._report_queue(records)
+            if not queue or self._bench_busy(records):
                 return None
             job_id = queue[0]
             directory = self._job(job_id)
+            # Re-read under the lock: cancel() also writes this record under the lock.
             record = _read(directory / "job.json")
             if record.get("state") != REPORT_QUEUED:
                 return None
@@ -387,8 +408,12 @@ class JobService:
                     pass
             except RuntimeError as exc:
                 return self._defer(directory, record, f"bench lease held: {exc}", None, logs)
-            gate = self.gate if self.gate is not None else MemoryGate()
-            ok, reason, snap = gate.check()
+            try:
+                gate = self.gate if self.gate is not None else MemoryGate()
+                ok, reason, snap = gate.check()
+            except ValueError as exc:
+                # A malformed threshold variable must not stall the queue silently.
+                return self._defer(directory, record, f"memory gate misconfigured: {exc}", None, logs)
             if not ok:
                 return self._defer(directory, record, reason, snap, logs)
             (directory / "cancel.request").unlink(missing_ok=True)
@@ -431,6 +456,10 @@ class JobService:
         # The reason text is stable (numbers live in the snapshot), so a 2 s
         # timer does not rewrite job.json or append a log line on every tick.
         if record.get("deferred_reason") != reason or stale:
+            # Never resurrect a job the operator removed from the queue meanwhile.
+            current = _read(directory / "job.json")
+            if current.get("state") != REPORT_QUEUED:
+                return {"job_id": job_id, "state": current.get("state"), "deferred_reason": None}
             record.update(deferred_reason=reason, deferred_utc=_utc_now())
             atomic_json(directory / "job.json", record)
             for path in logs:
@@ -467,7 +496,7 @@ class JobService:
                 manifest = _read(report / "build_manifest.json")
                 for fmt in ("html", "pdf"):
                     artifact = dict(manifest.get("artifacts", {}).get(fmt, {"status": "unavailable"}))
-                    if artifact.get("status") == "success" and not (report / ("report."+fmt)).is_file():
+                    if artifact.get("status") in ("success", "unverified", "failed-validation") and not (report / ("report."+fmt)).is_file():
                         artifact["status"] = "missing"
                     value["report_artifacts"][fmt] = artifact
                 value["report_artifacts"]["model"] = {
@@ -498,14 +527,20 @@ class JobService:
 
     def cancel(self, job_id):
         job = self._job(job_id)
-        value = self.status(job_id)
-        if value["state"] == REPORT_QUEUED:
-            # Nothing is running: leave the queue without signalling any process.
-            record = _read(job / "job.json")
-            record.update(state="cancelled", pid=None, deferred_reason=None,
-                          error="Report generation was removed from the queue; saved measurements are preserved")
-            atomic_json(job / "job.json", record)
-            return self.status(job_id)
+        with self.lock:
+            # dispatch_reports and _defer read-modify-write this record under the
+            # same lock; taking it here means a cancel is never lost to a
+            # concurrent dispatch, and a cancelled job is never re-queued.
+            value = self.status(job_id)
+            if value["state"] == REPORT_QUEUED:
+                # Nothing is running: leave the queue without signalling any process.
+                record = _read(job / "job.json")
+                if record.get("state") != REPORT_QUEUED:
+                    return self.status(job_id)
+                record.update(state="cancelled", pid=None, deferred_reason=None,
+                              error="Report generation was removed from the queue; saved measurements are preserved")
+                atomic_json(job / "job.json", record)
+                return self.status(job_id)
         if value["state"] not in ACTIVE:
             return value
         (job / "cancel.request").touch()
@@ -647,10 +682,13 @@ def worker(directory: Path, *, report_only=False):
                 notes=request.get("notes", ""), attachments=request.get("attachments", []))
         else:
             from .activity import bench_activity
-            from .runner import run_mock
+            from .services import acquire_mock
             with bench_activity("acquisition"):
-                path = run_mock(plan, directory / "runs", operator_observations=[request["notes"]] if request.get("notes") else [],
-                                attachment_descriptors=request.get("attachments", []))
+                # Dispatched by test type: an all-UVLO plan runs the phase-scoped
+                # ramp procedure, a load sweep the generic loop; mixed plans were
+                # refused at planning time.
+                path = acquire_mock(plan, directory / "runs", operator_observations=[request["notes"]] if request.get("notes") else [],
+                                    attachment_descriptors=request.get("attachments", []))
         run = _verified_off(path)
         save(run_dir=str(path))
         cancelled_acquisition = (directory / "cancel.request").exists()
@@ -668,12 +706,19 @@ def worker(directory: Path, *, report_only=False):
         reports = sorted((path / "reports").glob("r*"))
         report = reports[-1] if reports else None
         manifest = _read(report / "build_manifest.json") if report and (report / "build_manifest.json").exists() else {}
-        if returncode or manifest.get("status") != "success":
+        if returncode or manifest.get("status") not in ("success", "unverified"):
             save(state="failed", error="Acquisition preserved; report generation failed. See worker.log and build manifest.",
                  report_dir=str(report) if report else None)
         else:
             cancelled = cancelled_acquisition or state.get("acquisition_cancelled") is True
-            save(state="cancelled" if cancelled else "completed" if run["execution_status"] == "completed" else "aborted", report_dir=str(report))
+            # "unverified": every document built, but the PDF pagination checker
+            # could not run (tool missing). The documents are kept and linked;
+            # the note stays visible so nobody mistakes this for a verified PDF.
+            note = None
+            if manifest.get("status") == "unverified":
+                note = manifest.get("artifacts", {}).get("pdf", {}).get("note") or "PDF not verified: tool missing"
+            save(state="cancelled" if cancelled else "completed" if run["execution_status"] == "completed" else "aborted",
+                 report_dir=str(report), report_note=note)
     except KeyboardInterrupt:
         save(state="cancelled", error="Operator cancelled the job; inspect recorded shutdown status")
     except BaseException as exc:

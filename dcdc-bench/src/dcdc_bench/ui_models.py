@@ -82,6 +82,40 @@ def artifact_url(job_id: str, relative: str) -> str:
     return '/jobs/' + quote(job_id, safe='') + '/files/' + '/'.join(quote(part, safe='') for part in path.parts)
 
 
+# Artifact statuses whose file is kept on disk and stays reachable from the UI,
+# with the qualifier appended to the link label.
+KEPT_ARTIFACT_STATUSES = {'success': '', 'unverified': ' (not verified: checker tool missing)',
+                          'failed-validation': ' (failed the layout check; kept for inspection)'}
+
+
+def report_link_rows(snapshot: dict) -> list[tuple[str, str]]:
+    """(label, relative report path) for every kept artifact of a job snapshot.
+
+    A PDF the checker could not verify, or that failed its layout check, is kept
+    and linked with its status in the label; a failed or missing artifact is not.
+    """
+    if not snapshot.get('report_dir'):
+        return []
+    artifacts = snapshot.get('report_artifacts') or {}
+    rows = []
+    for filename, label, kind in (('report.html', 'Open interactive HTML', 'html'), ('report.pdf', 'Open PDF', 'pdf'),
+                                  ('report_model.json', 'Report data JSON', 'model')):
+        status = (artifacts.get(kind) or {}).get('status')
+        if status in KEPT_ARTIFACT_STATUSES:
+            rows.append((label + KEPT_ARTIFACT_STATUSES[status], 'report/' + filename))
+    return rows
+
+
+def job_actions(snapshot: dict) -> list[str]:
+    """Operator actions for a job state: 'stop' while a worker may run, 'dequeue' for a queued report."""
+    state = snapshot.get('state')
+    if state in ('queued', 'starting', 'running', 'acquiring', 'stopping', 'cancel_requested'):
+        return ['stop']
+    if state == 'report-queued':
+        return ['dequeue']
+    return []
+
+
 def state_label(snapshot: dict) -> str:
     state = str(snapshot.get('state', 'unknown'))
     if snapshot.get('cancel_requested') and state in ('queued', 'acquiring', 'reporting'):

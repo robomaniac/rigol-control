@@ -12,7 +12,7 @@ from pathlib import Path
 
 from .analysis import analyze_run, build_report_model
 from .annotations import annotations_file
-from .domain import BenchProfile, DutProfile, Plan, ReportProfile, TestRecipe
+from .domain import UVLO_TEST_TYPE, BenchProfile, DutProfile, Plan, ReportProfile, TestRecipe
 from .planning import build_plan, load_profile
 from .storage import atomic_json, verify_integrity
 
@@ -147,9 +147,32 @@ def report_run(run_dir: Path, *, formats: tuple[str, ...] | None = None,
     return directory
 
 
-def execute(plan: Plan, out: Path, *, scenario: str = "normal", formats: tuple[str, ...] = ("html", "pdf")) -> Path:
+def acquire_mock(plan: Plan, out: Path, *, scenario: str = "normal", operator_observations: list[str] | None = None,
+                 attachment_descriptors: list[dict] | None = None) -> Path:
+    """Run the mock procedure that matches the plan's test type; never a real instrument.
+
+    An all-``uvlo_input_ramp`` plan runs the phase-scoped ramp (``uvlo.run_uvlo_mock``);
+    a plan of load sweeps runs the generic loop (``runner.run_mock``). A recipe that
+    mixes the two is refused at planning time (every point ``unsupported``) and
+    again here. Real UVLO execution has no context and stays refused upstream.
+    """
+    types = {test.type for test in plan.recipe.tests}
+    if types == {UVLO_TEST_TYPE}:
+        if scenario != "normal":
+            raise ValueError("The UVLO input ramp has no failure-injection scenarios; use scenario 'normal'")
+        from .uvlo import run_uvlo_mock
+        return run_uvlo_mock(plan, out, operator_observations=operator_observations,
+                             attachment_descriptors=attachment_descriptors)
+    if UVLO_TEST_TYPE in types:
+        raise ValueError("A recipe that mixes uvlo_input_ramp with other test types cannot be executed; "
+                         "plan the ramp as its own recipe")
     from .runner import run_mock
-    run_dir = run_mock(plan, out, scenario=scenario)
+    return run_mock(plan, out, scenario=scenario, operator_observations=operator_observations,
+                    attachment_descriptors=attachment_descriptors)
+
+
+def execute(plan: Plan, out: Path, *, scenario: str = "normal", formats: tuple[str, ...] = ("html", "pdf")) -> Path:
+    run_dir = acquire_mock(plan, out, scenario=scenario)
     # This stage may fail. Evidence and execution status remain intact.
     report_run(run_dir, formats=formats)
     return run_dir

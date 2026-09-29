@@ -58,6 +58,10 @@ class PublicationApproval(BaseModel):
     attachments: list[str] = Field(default_factory=list)
     keep_serials: bool = False
     include_pdf: bool = False
+    # Publish a revision whose build_manifest.json status is not "success"
+    # (failed-validation, unverified, failed or missing). Recorded in the
+    # publication manifest; never implied.
+    allow_unverified: bool = False
     statement: str | None = None
 
     @field_validator("approver")
@@ -92,6 +96,19 @@ def load_approval(path: Path) -> PublicationApproval:
 
 def _sha(path: Path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _build_status(report_dir: Path) -> str | None:
+    """The renderer's verdict for the revision; None when the manifest is missing or unreadable."""
+    manifest = report_dir / "build_manifest.json"
+    if not manifest.is_file():
+        return None
+    try:
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+    except ValueError:
+        return None
+    status = payload.get("status") if isinstance(payload, dict) else None
+    return str(status) if status is not None else None
 
 
 def _inside(child: Path, parent: Path) -> bool:
@@ -248,6 +265,11 @@ def publish_run(run_dir: Path, revision: str, out_dir: Path, approval_path: Path
     report_dir = run_dir / "reports" / revision
     if not (report_dir / "report.html").is_file():
         raise ValueError(f"Revision {revision} has no issued report.html in {run_dir}")
+    build_status = _build_status(report_dir)
+    if build_status != "success" and not approval.allow_unverified:
+        raise ValueError(f"Revision {revision} build_manifest.json status is {build_status!r}, not 'success'; a report "
+                         "validation error blocks an ordinary issued publication. To publish it knowingly, set "
+                         "allow_unverified: true in the approval record; the publication manifest records both.")
     manifest_path = run_dir / "attachments" / "manifest.json"
     assets = []
     if manifest_path.is_file():
@@ -350,7 +372,8 @@ def publish_run(run_dir: Path, revision: str, out_dir: Path, approval_path: Path
         "approval": {"file_sha256": _sha(approval_path), "approver": approval.approver, "date": approval.date,
                      "public": approval.public, "attachments_allowlisted": list(approval.attachments),
                      "keep_serials": approval.keep_serials, "include_pdf": approval.include_pdf,
-                     "statement": approval.statement},
+                     "allow_unverified": approval.allow_unverified, "statement": approval.statement},
+        "build_status": build_status,
         "noindex": noindex,
         "noindex_is_not_access_control": "noindex is not access control: a robots tag only asks crawlers not to index; "
                                          "confidential data need an access-controlled destination, not a publicly reachable file.",

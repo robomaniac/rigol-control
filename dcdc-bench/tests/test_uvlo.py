@@ -381,6 +381,62 @@ def test_data05_coverage_is_counted_per_test(normal_run):
     assert sum(v["requested"] for v in combined.values()) == 51
 
 
+def test_m4_off_step_with_a_slightly_negative_readback_stays_a_recorded_off_state(tmp_path):
+    """A 0 V output commonly reads a few counts negative; that sign must not un-bracket the ramp or invent output power."""
+    plan = approved_plan(steps=[12., 9., 8.5, 9., 12.])
+
+    def negative_off_readback(quantity, value, point, phase):
+        return -.002 if quantity == "Vout_V" and value < .5 else value
+
+    path = run_uvlo_mock(plan, tmp_path, reading_override=negative_off_readback)
+    run, samples = evidence(path)
+    assert run["execution_status"] == "completed" and verified_off(run)
+    assert [p["output_state"] for p in run["points"]] == ["on", "on", "off", "off", "on"]
+    analysis = json.loads((analyze_run(path) / "analysis.json").read_text())
+    off = [p for p in analysis["points"] if p["output_state"] == "off"]
+    assert [p["vin_target_V"] for p in off] == [8.5, 9.]
+    for point in off:
+        assert point["Vout_V"] == pytest.approx(-.002) and "unexpected_sign" in point["metric_flags"]
+        assert point["qualification"] == "valid" and point["output_off_expected"] is True
+        assert point["efficiency_pct"] is None and point["Pout_W"] is None and point["loss_W"] is None
+        assert point["output_power_reason"].startswith("not evaluated: output off")
+        assert point["loss_reason"].startswith("not evaluated: output off")
+        assert point["Pin_W"] is not None and point["requirements"]["efficiency"] == "not-applicable"
+        budget = analysis["uncertainty"]["points"][point["point_id"]]
+        assert {budget["quantities"][q]["status"] for q in ("Pout_W", "loss_W", "efficiency_pct")} == {"not_evaluated"}
+        assert budget["quantities"]["Pin_W"]["status"] == "evaluated"
+    ramp = analysis["uvlo_input_ramp"]["uvlo-ramp"]
+    assert (ramp["turn_off"]["lower_V"], ramp["turn_off"]["upper_V"]) == (8.5, 9.)
+    assert (ramp["turn_on"]["lower_V"], ramp["turn_on"]["upper_V"]) == (9., 12.)
+    assert not any("no output-off step" in note for note in ramp["notes"])
+    on = [p for p in analysis["points"] if p["output_state"] == "on"]
+    assert len(on) == 3 and all(p["qualification"] == "valid" and p["Pout_W"] > 0 and p["loss_W"] is not None for p in on)
+    model = build_report_model(plan, run, analysis, samples)
+    by_id = {p["point_id"]: p for p in model.points}
+    for point in off:
+        assert not any(key in by_id[point["point_id"]] for key in ("Pout_W_lower", "loss_W_lower", "efficiency_pct_lower"))
+    assert all("efficiency_pct_lower" in by_id[p["point_id"]] and "loss_W_lower" in by_id[p["point_id"]] for p in on)
+
+
+def test_m4_operating_uvlo_step_with_metric_flags_is_still_demoted(tmp_path):
+    """Only off/indeterminate steps are exempt: an on step with an implausible ratio is an inconclusive efficiency point."""
+    plan = approved_plan(steps=[12., 9., 8.5, 9., 12.])
+
+    def negative_input_current_at_start(quantity, value, point, phase):
+        # Inside the absolute guard tolerance (-0.005 A), yet non-positive input power: a metric flag, not a fault.
+        return -.004 if quantity == "Iin_A" and point["vin_target_V"] == 12. and point.get("ramp_phase") == "down" and phase == "acquiring" else value
+
+    path = run_uvlo_mock(plan, tmp_path, reading_override=negative_input_current_at_start)
+    run, samples = evidence(path)
+    assert run["execution_status"] == "completed", run["errors"]
+    analysis = json.loads((analyze_run(path) / "analysis.json").read_text())
+    first = analysis["points"][0]
+    assert first["output_state"] == "on" and "nonpositive_input_power" in first["metric_flags"]
+    assert first["qualification"] == "inconclusive" and first["requirements"]["efficiency"] == "not-evaluated"
+    assert analysis["uncertainty"]["points"][first["point_id"]]["status"] == "not_evaluated"
+    assert [p["qualification"] for p in analysis["points"][1:]] == ["valid"] * 4
+
+
 # --- RUN-10: mock path imports no real driver --------------------------------------------------------
 
 def test_mock_uvlo_path_imports_no_real_driver_modules():

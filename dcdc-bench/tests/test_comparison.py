@@ -30,10 +30,18 @@ FORBIDDEN = ("because", "due to", "caused", "causes", "technology", "cooler", "s
              "better", "worse", "outperform", "significant", "is real", "proves", "confirms", "universally")
 
 
-def make_run(root: Path, name: str, *, tests, efficiency, vout=lambda vin, iout: 12. - .02 * iout) -> Path:
-    """Finalized synthetic run folder with one analysis revision; mirrors the store layout."""
+def make_run(root: Path, name: str, *, tests, efficiency, vout=lambda vin, iout: 12. - .02 * iout, readback=True) -> Path:
+    """Finalized synthetic run folder with one analysis revision; mirrors the store layout.
+
+    ``readback=True`` keeps the mock bench's synthetic readback specifications, so
+    ``analyze_run`` writes an evaluated budget through ``evaluate_run_budget``;
+    ``readback=False`` removes them, so the budget is honestly ``not_evaluated``.
+    """
     initial = default_plan()
     dut, bench, recipe = initial.dut, initial.bench, initial.recipe
+    if not readback:
+        for binding in bench.measurements.values():
+            binding.readback_specification = None
     dut.profile_id = "synthetic-comparison-fixture"
     dut.identity.model = "Synthetic comparison fixture"
     dut.ratings.origin = "synthetic_regression_fixture"
@@ -86,23 +94,6 @@ def make_run(root: Path, name: str, *, tests, efficiency, vout=lambda vin, iout:
     return path
 
 
-def add_budget_revision(run_dir: Path, *, u_eta=.4, u_loss=.05, u_vout=.01, k=2.) -> str:
-    """A second analysis revision carrying a synthetic evaluated budget (UNC-03 fixture, not a bench budget)."""
-    base = sorted((run_dir / "analysis").glob("a-*"))[0]
-    analysis = json.loads((base / "analysis.json").read_text())
-    version = analysis["formula_version"] + "+budget-fixture"
-    new_id = "a-" + hashlib.sha256((analysis["evidence_hash"] + version).encode()).hexdigest()[:12]
-    analysis.update(formula_version=version, analysis_id=new_id)
-    for point in analysis["points"]:
-        point["analysis_id"] = new_id
-    analysis["uncertainty"] = {"status": "evaluated", "coverage_factor": k,
-        "basis": "synthetic fixture budget for the UNC-03 regression; not a bench budget",
-        "standard": {p["point_id"]: {"efficiency_pct": u_eta, "loss_W": u_loss, "Vout_V": u_vout} for p in analysis["points"]}}
-    (run_dir / "analysis" / new_id).mkdir()
-    (run_dir / "analysis" / new_id / "analysis.json").write_text(json.dumps(analysis, indent=2, sort_keys=True))
-    return new_id
-
-
 def tree_hashes(run_dir: Path) -> dict[str, str]:
     return {str(path.relative_to(run_dir)): hashlib.sha256(path.read_bytes()).hexdigest()
             for path in sorted(run_dir.rglob("*")) if path.is_file()}
@@ -124,19 +115,30 @@ def eta_b(vin, iout):
     return 81. + 9. * iout + (vin - 24.) * .1
 
 
+TESTS_A = [("steady-load", [16., 24.], [.25, .5]), ("hold", [24.], [.5, .5, .5])]
+# Run B lists its loads in a different order and adds loads/conditions run A lacks,
+# so joining by array position would pair the wrong conditions.
+TESTS_B = [("steady-load", [18., 24.], [.5, .25, .75, .375]), ("hold", [24.], [.5])]
+
+
 @pytest.fixture(scope="module")
 def runs(tmp_path_factory):
+    """Two runs whose analyses carry evaluated budgets (the mock bench declares synthetic readback specifications)."""
     root = tmp_path_factory.mktemp("comparison-fixture")
-    # Run B lists its loads in a different order and adds loads/conditions run A lacks,
-    # so joining by array position would pair the wrong conditions.
-    a = make_run(root, "run-a", tests=[("steady-load", [16., 24.], [.25, .5]), ("hold", [24.], [.5, .5, .5])], efficiency=eta_a)
-    b = make_run(root, "run-b", tests=[("steady-load", [18., 24.], [.5, .25, .75, .375]), ("hold", [24.], [.5])], efficiency=eta_b)
-    return a, b
+    return make_run(root, "run-a", tests=TESTS_A, efficiency=eta_a), make_run(root, "run-b", tests=TESTS_B, efficiency=eta_b)
 
 
 @pytest.fixture(scope="module")
-def model(runs):
-    a, b = runs
+def bare_runs(tmp_path_factory):
+    """The same two runs on a bench without readback specifications: the budget is honestly not evaluated."""
+    root = tmp_path_factory.mktemp("comparison-bare")
+    return (make_run(root, "run-a", tests=TESTS_A, efficiency=eta_a, readback=False),
+            make_run(root, "run-b", tests=TESTS_B, efficiency=eta_b, readback=False))
+
+
+@pytest.fixture(scope="module")
+def model(bare_runs):
+    a, b = bare_runs
     return build_comparison_model([load_run(a, None, "A"), load_run(b, None, "B")], PairingPolicy())
 
 
@@ -221,6 +223,7 @@ def test_cmp02_prose_states_counts_and_extremes_without_causal_claims(model):
 
 def test_unc02_missing_budget_means_not_evaluated_without_bands(model):
     assert model.difference_uncertainty["status"] == "not evaluated"
+    assert model.difference_uncertainty["budgets"] == {"A": "not_evaluated", "B": "not_evaluated"}
     assert model.difference_uncertainty["assumption"]["independence_assumed"] is False
     for pair in model.pairs:
         assert {entry["status"] for entry in pair["uncertainty"].values()} == {"not evaluated"}
@@ -230,31 +233,48 @@ def test_unc02_missing_budget_means_not_evaluated_without_bands(model):
     assert any("no bands are drawn" in text for text in model.limitations)
 
 
-def test_unc03_covariance_respected_and_independence_recorded(runs):
+def test_unc03_evaluated_budgets_resolve_the_pair_difference_and_covariance_changes_it(runs):
+    """M2: the pair difference reads the budget evaluate_run_budget actually writes (per-point quantities/channels)."""
     a, b = runs
-    id_a, id_b = add_budget_revision(a), add_budget_revision(b)
-    # Two revisions now exist; the unqualified default still selects the current formula version.
-    assert load_run(a, None, "A").analysis["formula_version"] == FORMULA_VERSION
-    loaded = [load_run(a, id_a, "A"), load_run(b, id_b, "B")]
+    loaded = [load_run(a, None, "A"), load_run(b, None, "B")]
+    assert loaded[0].analysis["formula_version"] == FORMULA_VERSION
+    budgets = [run.analysis["uncertainty"] for run in loaded]
+    assert all(budget["schema_version"] == "uncertainty-budget-1.0" and budget["status"] == "evaluated" for budget in budgets)
+    assert all("standard" not in budget for budget in budgets), "no flat table exists; nothing may read one"
     independent = build_comparison_model(loaded, PairingPolicy())
     assert independent.difference_uncertainty["status"] == "evaluated"
+    assert independent.difference_uncertainty["budgets"] == {"A": "evaluated", "B": "evaluated"}
     assert independent.difference_uncertainty["assumption"]["independence_assumed"] is True
     assert "assumption, not a result" in independent.difference_uncertainty["assumption"]["statement"]
-    entry = independent.pairs[0]["uncertainty"]["efficiency_pct"]
-    assert entry["u_delta"] == pytest.approx(math.sqrt(.4 ** 2 + .4 ** 2))
-    assert entry["covariance"] == 0 and entry["covariance_basis"] == "independence assumed (cov = 0)"
-    assert entry["k"] == 2 and entry["expanded"] == pytest.approx(2 * math.sqrt(.32))
-    assert independent.pairs[0]["uncertainty"]["loss_W"]["u_delta"] == pytest.approx(math.sqrt(2 * .05 ** 2))
+    pair = independent.pairs[0]
+    point_a, point_b = budgets[0]["points"][pair["source_point_id_a"]], budgets[1]["points"][pair["source_point_id_b"]]
+    for quantity, table in (("efficiency_pct", "quantities"), ("loss_W", "quantities"), ("Vout_V", "channels")):
+        u_a, u_b = point_a[table][quantity]["standard"], point_b[table][quantity]["standard"]
+        entry = pair["uncertainty"][quantity]
+        assert entry["status"] == "evaluated" and (entry["u_a"], entry["u_b"]) == (u_a, u_b) and u_a > 0 and u_b > 0
+        assert entry["u_delta"] == pytest.approx(math.sqrt(u_a ** 2 + u_b ** 2))
+        assert entry["covariance"] == 0 and entry["covariance_basis"] == "independence assumed (cov = 0)"
+        assert entry["k"] == 2 and entry["expanded"] == pytest.approx(2 * entry["u_delta"])
     largest = next(m for m in independent.metrics if m.id == "largest-efficiency-difference")
-    assert largest.uncertainty["status"] == "evaluated" and largest.uncertainty["standard"] == pytest.approx(math.sqrt(.32))
+    assert largest.uncertainty["status"] == "evaluated" and largest.uncertainty["standard"] > 0
     assert "Independence between the two runs is assumed" in " ".join(independent.summary)
-    shared = build_comparison_model(loaded, PairingPolicy(), covariance={"quantities": {"efficiency_pct": .4 * .4}, "note": "fully shared fixture error"})
+    assert not any("no bands are drawn" in text for text in independent.limitations)
+    u_a, u_b = point_a["quantities"]["efficiency_pct"]["standard"], point_b["quantities"]["efficiency_pct"]["standard"]
+    # One supplied covariance applies to every pair, so it must be admissible (|cov| <= u_a*u_b) for all of them.
+    products = [budgets[0]["points"][p["source_point_id_a"]]["quantities"]["efficiency_pct"]["standard"]
+                * budgets[1]["points"][p["source_point_id_b"]]["quantities"]["efficiency_pct"]["standard"]
+                for p in independent.pairs]
+    cov = min(products)
+    shared = build_comparison_model(loaded, PairingPolicy(),
+                                    covariance={"quantities": {"efficiency_pct": cov}, "note": "shared error fixture"})
     entry = shared.pairs[0]["uncertainty"]["efficiency_pct"]
-    assert entry["u_delta"] == pytest.approx(0, abs=1e-12) and entry["covariance_basis"] == "supplied"
+    assert entry["covariance_basis"] == "supplied" and entry["covariance"] == pytest.approx(cov) and cov > 0
+    assert entry["u_delta"] == pytest.approx(math.sqrt(u_a ** 2 + u_b ** 2 - 2 * cov))
+    assert entry["u_delta"] < independent.pairs[0]["uncertainty"]["efficiency_pct"]["u_delta"]
     assert shared.difference_uncertainty["assumption"]["independence_assumed"] is False
     assert shared.pairs[0]["uncertainty"]["loss_W"]["covariance_basis"] == "independence assumed (cov = 0)"
     with pytest.raises(ValueError, match="Invalid covariance"):
-        build_comparison_model(loaded, PairingPolicy(), covariance={"quantities": {"efficiency_pct": .2}})
+        build_comparison_model(loaded, PairingPolicy(), covariance={"quantities": {"efficiency_pct": 2 * max(products)}})
     text = all_text(shared, comparison_body(shared.model_dump()))
     for word in FORBIDDEN:
         assert word not in text, word
@@ -330,8 +350,8 @@ def test_integrity_and_identity_failures_are_rejected(runs, tmp_path):
         build_comparison_model([load_run(a, None, "A"), load_run(a, None, "B")], PairingPolicy())
 
 
-def test_cli_compare_writes_outputs_and_leaves_source_runs_untouched(runs, tmp_path, capsys):
-    a, b = runs
+def test_cli_compare_writes_outputs_and_leaves_source_runs_untouched(bare_runs, tmp_path, capsys):
+    a, b = bare_runs
     before = tree_hashes(a), tree_hashes(b)
     out = tmp_path / "comparison"
     assert main(["compare", str(a), str(b), "--out", str(out)]) == 0

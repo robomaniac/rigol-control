@@ -33,7 +33,8 @@ from typing import Any
 from xml.etree import ElementTree
 
 SCHEMA_VERSION = "1.0"
-SEVERITY_ORDER = {"error": 0, "warning": 1, "info": 2}
+# "unverified": a check could not run because a checker tool is unavailable; it is not a layout defect.
+SEVERITY_ORDER = {"error": 0, "unverified": 1, "warning": 2, "info": 3}
 EDGE_TOLERANCE_PT = 1.0
 FOOTER_BAND = 0.15
 HEADER_BAND = 0.12
@@ -211,9 +212,16 @@ class PdfCheckResult:
         return [finding for finding in self.findings if finding.severity == "error"]
 
     @property
+    def unverified(self) -> list[Finding]:
+        """Checks that could not run because a checker tool is unavailable; not layout defects."""
+        return [finding for finding in self.findings if finding.severity == "unverified"]
+
+    @property
     def status(self) -> str:
         if self.errors:
             return "fail"
+        if self.unverified:
+            return "unverified"
         if any(finding.severity == "warning" for finding in self.findings):
             return "warning"
         return "pass"
@@ -262,7 +270,7 @@ def _scan_with_pypdf(document: Document, path: Path) -> None:
         from pypdf import PdfReader
     except ImportError as exc:
         document.tools["pypdf"] = None
-        document.problems.append(Finding("pypdf-unavailable", "error",
+        document.problems.append(Finding("pypdf-unavailable", "unverified",
             f"pypdf is not installed; page boxes, structure and drawing checks could not run ({exc})"))
         return
     document.tools["pypdf"] = getattr(pypdf, "__version__", "unknown")
@@ -464,7 +472,7 @@ def _extract_text_lines(document: Document, path: Path) -> None:
     tool = shutil.which("pdftohtml")
     if not tool:
         document.tools["pdftohtml"] = None
-        document.problems.append(Finding("pdftohtml-unavailable", "error",
+        document.problems.append(Finding("pdftohtml-unavailable", "unverified",
             "poppler-utils pdftohtml is not installed; text positions, clipping, page-number and identity checks could not run"))
         return
     try:
@@ -890,7 +898,7 @@ def main(argv: list[str] | None = None) -> int:
     model = json.loads(model_path.read_text(encoding="utf-8")) if model_path else None
     result = check_pdf(args.pdf, model)
     print(result.to_json())
-    return 0 if result.status != "fail" else 4
+    return 0 if result.status in ("pass", "warning") else 4
 
 
 if __name__ == "__main__":

@@ -383,10 +383,13 @@ def _evidence_label(plan: Plan, run: dict) -> str:
 def _uvlo_analysis(plan: Plan, run: dict, points: list[dict]) -> dict[str, Any]:
     """Recompute each UVLO step's output state from accepted means; bracket transitions per test.
 
-    Off/indeterminate steps are recorded states, not efficiency points. A
-    non-on state outside the declared expected-off phase is reclassified as
-    inconclusive here regardless of what the worker claimed, and a worker
-    output-state claim that disagrees with the accepted mean is rejected.
+    Off/indeterminate steps are recorded states, not efficiency points, and
+    carry no output power or loss either. A non-on state outside the declared
+    expected-off phase is reclassified as inconclusive here regardless of what
+    the worker claimed, and a worker output-state claim that disagrees with the
+    accepted mean is rejected. The state is classified from the accepted mean
+    alone; metric flags never demote an off step (a 0 V / 0 A readback commonly
+    reads a few counts negative), only an operating step.
     """
     outcomes = {p["point_id"]: p for p in run.get("points", [])}
     by_point = {p["point_id"]: p for p in points}
@@ -402,6 +405,8 @@ def _uvlo_analysis(plan: Plan, run: dict, points: list[dict]) -> dict[str, Any]:
         for request, phase in zip(requests, phases):
             point = by_point[request.point_id]
             state = test.uvlo.classify_output(point["Vout_V"]) if point["qualification"] == "valid" else None
+            if point["qualification"] == "valid" and state is None:
+                raise ValueError(f"Valid UVLO step {request.point_id} has no accepted Vout mean to classify")
             recorded = outcomes.get(request.point_id, {}).get("output_state")
             if state is not None and recorded is not None and recorded != state:
                 raise ValueError(f"Worker recorded output state {recorded!r} for {request.point_id}; "
@@ -409,9 +414,17 @@ def _uvlo_analysis(plan: Plan, run: dict, points: list[dict]) -> dict[str, Any]:
             off_expected = test.uvlo.off_expected(request.vin_target_V, phase)
             point.update(ramp_phase=phase, output_state=state, output_off_expected=off_expected,
                          minimum_vout_rule_applied=not off_expected)
+            if state == "on" and point.get("metric_flags"):
+                # An operating step is an efficiency point: the generic metric-flag
+                # demotion (skipped for UVLO steps in analyze_evidence) applies here.
+                point.update(qualification="inconclusive")
+                point["requirements"].update(output_voltage="not-evaluated", efficiency="not-evaluated")
             if state is not None and state != "on":
                 point.update(efficiency_pct=None,
-                             efficiency_reason=f"output {state}: recorded UVLO ramp state, not an efficiency point")
+                             efficiency_reason=f"output {state}: recorded UVLO ramp state, not an efficiency point",
+                             Pout_W=None, loss_W=None,
+                             output_power_reason=f"not evaluated: output {state}; a standby reading is not delivered output power",
+                             loss_reason=f"not evaluated: output {state}; output power is not applicable to a recorded ramp state")
                 point["requirements"].update(output_voltage="not-applicable", efficiency="not-applicable")
                 if not off_expected:
                     point.update(qualification="inconclusive",
@@ -443,6 +456,7 @@ def analyze_evidence(plan: Plan, run: dict, samples: list[dict], *, version: str
             raise ValueError("Raw measurement does not match its declared role, unit or location")
         grouped[row["point_id"]].append(row)
     outcomes = {p["point_id"]: p for p in run.get("points", [])}
+    uvlo_tests = {t.id for t in plan.recipe.tests if t.type == UVLO_TEST_TYPE}
     points = []
     accepted_values: dict[str, dict[str, list[float]]] = {}
     for request in plan.points:
@@ -473,7 +487,10 @@ def analyze_evidence(plan: Plan, run: dict, samples: list[dict], *, version: str
                              no_load=request.iout_target_A == 0)
         if qualification != "valid":
             derived.update(efficiency_pct=None, efficiency_reason=f"point {qualification}")
-        elif derived["metric_flags"]:
+        elif derived["metric_flags"] and request.test_id not in uvlo_tests:
+            # UVLO steps are classified from the accepted Vout mean first
+            # (_uvlo_analysis); a near-zero, slightly negative off-state readback
+            # must not demote a recorded off step. Operating steps are demoted there.
             qualification = "inconclusive"
         requirements = {"output_voltage": "not-evaluated", "efficiency": "not-evaluated",
                         "surface_temperature": "not-evaluated"}
