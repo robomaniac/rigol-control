@@ -49,6 +49,7 @@ TABLE_LAYOUTS = {
     "voltage-comparison": (20, 19, 18, 18, 25),
     "voltage-outcomes": (22, 14, 20, 44),
     "startup-readings": (25, 25, 25, 25),
+    "exclusions": (10, 13, 17, 20, 40),
 }
 FIELDS = ("Vin_V", "Iin_A", "Vout_V", "Iout_A", "Pin_W", "Pout_W", "loss_W",
           "efficiency_pct", "vout_error_pct")
@@ -911,8 +912,8 @@ def _body(model: dict) -> str:
     if exclusions:
         out += [_rows_table(["Point", "Test", "Requested input / load", "Qualification", "Reason"],
             [[p["point_id"],p.get("test_id"),f"{p.get('vin_target_V')} V / {p.get('iout_target_A')} A",
-              p.get("qualification"),p.get("reason", "not supplied")] for p in exclusions]), "",
-            ': {tbl-colwidths="[10,13,17,20,40]"}', ""]
+              p.get("qualification"),p.get("reason", "not supplied")] for p in exclusions],
+            layout="exclusions"), ""]
     else:
         out += ["No attempted measurements were excluded." if source_search or voltage_sweep else
                 "No excluded points are recorded in this analysis.", ""]

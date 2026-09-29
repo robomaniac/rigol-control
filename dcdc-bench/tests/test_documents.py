@@ -358,12 +358,15 @@ def test_web08_log_mode_excludes_zero_and_negative_current_points_explicitly(vie
         assert 0 in trace_x() and -.0004 in trace_x()
         assert page.evaluate(f"{graph}._fullLayout.xaxis.range")[0] <= -.0004, "default limits include the negative reading"
         assert excluded <= visible_ids()
+        # Invalid or unmeasured points are gaps in every mode; only the two
+        # nonpositive readings may be added to them by the log view.
+        linear_gaps = trace_x().count(None)
 
         page.evaluate("dcdcReport.setView({log_current:true})")
         page.evaluate("dcdcReport.whenIdle()")
         assert page.evaluate(f"{graph}._fullLayout.xaxis.type") == "log"
         xs = trace_x()
-        assert xs.count(None) == 2, "the two nonpositive readings become gaps"
+        assert xs.count(None) == linear_gaps + 2, "the two nonpositive readings become gaps"
         assert sorted(x for x in xs if x is not None) == chosen["positive"], "no value is substituted or shifted"
         assert "2 nonpositive-current point(s) omitted from this log view" in page.locator("#status-fig-efficiency").inner_text()
         assert not (excluded & visible_ids())
@@ -453,10 +456,14 @@ def test_web_compact_hover_desktop_mobile_and_alternate_axis(viewer):
             coordinate = _hover_point(page, point["point_id"])
             tooltip = page.locator('#plot-fig-efficiency .hoverlayer .hovertext')
             box = tooltip.bounding_box()
-            assert box and box["width"] <= 300 and box["height"] <= 100, box
+            # Chromium reports fractional layout boxes (300.03 px seen); allow sub-pixel rounding.
+            assert box and box["width"] <= 301 and box["height"] <= 101, box
             assert box["x"] >= -1 and box["x"] + box["width"] <= width + 1, box
             assert box["y"] >= -1 and box["y"] + box["height"] <= height + 1, box
-            assert tooltip.locator('tspan.line').count() == 3
+            # Condition, x, y — plus one labeled line only where a readback budget was evaluated (UNC-02).
+            lines = tooltip.locator('tspan.line').count()
+            has_band = "Expanded uncertainty:" in tooltip.text_content()
+            assert lines == (4 if has_band else 3), (lines, tooltip.text_content())
             assert tooltip.locator('.name').count() == 0, "Duplicate series bubble must be absent"
             colors = tooltip.evaluate("""el => ({background: getComputedStyle(el.querySelector('path')).fill,
                 text: getComputedStyle(el.querySelector('text')).fill})""")

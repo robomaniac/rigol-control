@@ -26,6 +26,7 @@ table{font-size:.82rem;width:100%}th{color:#29495d;background:var(--wash);font-w
 .table-voltage-comparison table{min-width:720px}
 .table-voltage-outcomes table{min-width:580px}
 .table-startup-readings table{min-width:470px}
+.table-exclusions table{min-width:520px}
 @media(max-width:650px){.table-key-value th,.table-key-value td{padding:.45rem .4rem}.report-table{scrollbar-width:thin}}
 @media print{.report-table{overflow:visible}.report-table table{min-width:0}.report-table tr{break-inside:avoid}}
 
