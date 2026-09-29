@@ -135,6 +135,10 @@ def _point(dut: DutProfile, bench: BenchProfile, recipe: TestRecipe, test: TestD
            point_id: str, vin: float, iout: float) -> PlannedPoint:
     ratings, source, load, policy = dut.ratings, bench.source, bench.load, recipe.planning
     reasons = _unsupported_capabilities(dut, bench, test)
+    types = {t.type for t in recipe.tests}
+    if UVLO_TEST_TYPE in types and len(types) > 1:
+        # The ramp is its own phase-scoped procedure; no executor runs it inside a load sweep.
+        reasons.append("Recipe mixes uvlo_input_ramp with other test types; plan the UVLO ramp as a separate recipe")
     physical_power = None
     if source.max_current_A is not None and source.max_power_W is not None:
         physical_power = min(vin * source.max_current_A, source.max_power_W)

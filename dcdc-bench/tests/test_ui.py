@@ -8,7 +8,8 @@ import pytest
 
 from dcdc_bench.cli import main
 from dcdc_bench.ui import published_file, require_loopback, run_ui
-from dcdc_bench.ui_models import artifact_url, edited_dut, edited_recipe, job_title, plan_rows, quantity, shutdown_label, state_label, target_values
+from dcdc_bench.ui_models import (artifact_url, edited_dut, edited_recipe, job_actions, job_title, plan_rows, quantity,
+                                  report_link_rows, shutdown_label, state_label, target_values)
 
 
 @pytest.mark.parametrize('text', ['nan', 'inf', '-1', '0', '1,1', '1:5', '1+2', ''])
@@ -141,3 +142,27 @@ def test_cli_ui_forwards_paths_and_options_without_starting_server(monkeypatch, 
     assert main(['ui', '--root', str(workspace), '--inventory', str(inventory), '--port', '8182']) == 0
     assert captured == [((workspace.resolve(), inventory.resolve()), {'host': '127.0.0.1', 'port': 8182, 'report_root': None})]
     assert not workspace.exists()
+
+
+def test_kept_report_artifacts_stay_linked_and_named_by_status():
+    """M5: an unverified or failed-validation PDF is kept on disk and stays reachable, with its status in the label."""
+    snapshot = {'job_id': 'job-1', 'report_dir': '/w/jobs/job-1/runs/r/reports/r0001',
+                'report_artifacts': {'html': {'status': 'success'}, 'pdf': {'status': 'unverified'}, 'model': {'status': 'success'}}}
+    rows = report_link_rows(snapshot)
+    assert [relative for _, relative in rows] == ['report/report.html', 'report/report.pdf', 'report/report_model.json']
+    assert rows[1][0] == 'Open PDF (not verified: checker tool missing)' and rows[0][0] == 'Open interactive HTML'
+    snapshot['report_artifacts']['pdf'] = {'status': 'failed-validation', 'error': 'p1: orphan-heading'}
+    assert report_link_rows(snapshot)[1][0] == 'Open PDF (failed the layout check; kept for inspection)'
+    for status in ('failed', 'missing', 'unavailable'):
+        snapshot['report_artifacts']['pdf'] = {'status': status}
+        assert [relative for _, relative in report_link_rows(snapshot)] == ['report/report.html', 'report/report_model.json']
+    assert report_link_rows({'job_id': 'job-1', 'report_artifacts': {'html': {'status': 'success'}}}) == []
+
+
+def test_run_panel_offers_stop_for_live_workers_and_dequeue_for_queued_reports():
+    """m1: a report-queued job can be removed from the queue; live workers get Stop."""
+    for state in ('queued', 'starting', 'running', 'acquiring', 'stopping', 'cancel_requested'):
+        assert job_actions({'state': state}) == ['stop']
+    assert job_actions({'state': 'report-queued'}) == ['dequeue']
+    for state in ('completed', 'aborted', 'failed', 'cancelled', 'reporting'):
+        assert job_actions({'state': state}) == []

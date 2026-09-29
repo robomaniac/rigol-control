@@ -149,7 +149,7 @@ def main(argv: list[str] | None = None) -> int:
             model = json.loads(model_path.read_text(encoding="utf-8")) if model_path.is_file() else None
             result = check_pdf(args.pdf, model)
             print(result.to_json())
-            return 0 if result.status != "fail" else 4
+            return 0 if result.status in ("pass", "warning") else 4
         raise ValueError(f"{args.command} is deferred; this increment provides the mock CLI and offline reports")
     except ImportError as exc:
         extra = "ui" if args.command == "ui" else "report"

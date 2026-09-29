@@ -18,9 +18,13 @@ an evaluated uncertainty budget for the paired quantity; then
 explicit assumption whenever no covariance model is supplied. Otherwise the
 differences are descriptive and resolvability is ``not evaluated``.
 
-Evaluated-budget contract consumed here (``analysis.json`` -> ``uncertainty``):
-``{"status": "evaluated", "standard": {point_id: {"efficiency_pct": u_pp,
-"loss_W": u_W, "Vout_V": u_V}}, "coverage_factor": k}``. Standard
+Evaluated-budget contract consumed here (``analysis.json`` -> ``uncertainty``,
+the ``uncertainty.evaluate_run_budget`` output): per-point standard
+uncertainties are read only through ``uncertainty.evaluated_quantity``, i.e.
+``points[point_id]["quantities"][name]["standard"]`` for derived quantities and
+``points[point_id]["channels"][name]["standard"]`` for channels, and only when
+that result's status is ``evaluated`` with a finite expanded value under the
+current schema version; ``coverage_factor`` is the budget's ``k``. Standard
 uncertainties are in the quantity's unit (percentage points for efficiency).
 Anything else is treated as not evaluated; nothing is invented.
 """
@@ -43,6 +47,7 @@ from .analysis import (FORMULA_VERSION, EvidenceRef, FigureSeries, FigureSpec, M
 from .domain import Contract, Plan
 from .services import _validate_analysis_identity
 from .storage import verify_integrity
+from .uncertainty import evaluated_quantity
 
 COMPARISON_VERSION = "paired-comparison-1.0"
 DIFFERENCE_MODEL = "u_delta^2 = u_A^2 + u_B^2 - 2*cov(A,B)"
@@ -326,13 +331,11 @@ def _pair_row(a: dict, b: dict, label_a: str, label_b: str, index: int) -> dict[
 
 
 def _standard_uncertainty(analysis: dict, point_id: str, quantity: str) -> float | None:
-    budget = analysis.get("uncertainty") or {}
-    if budget.get("status") != "evaluated":
+    """One point quantity's evaluated standard uncertainty, read through the budget's own accessor."""
+    result = evaluated_quantity(analysis.get("uncertainty"), point_id, quantity)
+    if result is None:
         return None
-    table = budget.get("standard")
-    if not isinstance(table, dict):
-        return None
-    value = _finite_number((table.get(point_id) or {}).get(quantity)) if isinstance(table.get(point_id), dict) else None
+    value = _finite_number(result.get("standard"))
     return value if value is not None and value >= 0 else None
 
 

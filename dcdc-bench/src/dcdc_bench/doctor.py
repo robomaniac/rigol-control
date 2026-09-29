@@ -421,6 +421,7 @@ def run_doctor(bench_path: Path, inventory_path: Path, *, out: Path | None = Non
     from benchctl.registry import get_driver_class
     from benchctl.transport import VisaTransport
     raw_transports, readonly = {}, {}
+    refusal: DoctorRefusal | None = None
     try:
         for role, device in devices.items():
             transport = VisaTransport(role, device.resource, timeout_ms=1500, log_path=folder / f"doctor-{stamp}.scpi.jsonl")
@@ -452,6 +453,9 @@ def run_doctor(bench_path: Path, inventory_path: Path, *, out: Path | None = Non
             else:
                 diagnosis["cadence"] = _cadence(readonly, seconds, poll_interval, time)
                 diagnosis["cadence"]["verified_states"] = states
+    except DoctorRefusal as exc:
+        # What was read before the refusal is evidence too: keep it, then exit non-zero.
+        refusal = exc
     finally:
         errors = []
         for role, transport in raw_transports.items():
@@ -460,9 +464,16 @@ def run_doctor(bench_path: Path, inventory_path: Path, *, out: Path | None = Non
             except Exception as exc:  # noqa: BLE001 - one failed close must not skip the other
                 errors.append(f"{role} close: {type(exc).__name__}: {exc}")
         diagnosis["close_errors"] = errors
-    if diagnosis["exit_code"] == 0 and findings:
+    if refusal is not None:
+        diagnosis["refusal"] = f"{type(refusal).__name__}: {refusal}"
+        findings.append({"role": "doctor", "severity": "blocking", "field": "refusal",
+                         "message": f"diagnosis stopped early: {refusal}"})
+        diagnosis["exit_code"] = 2
+    elif diagnosis["exit_code"] == 0 and findings:
         diagnosis["exit_code"] = 4
     diagnosis["summary"] = {"findings": len(findings), "blocking": sum(f["severity"] == "blocking" for f in findings),
                             "queries": len(transcript), "writes": 0}
     atomic_json(target, diagnosis)
+    if refusal is not None:
+        raise DoctorRefusal(f"{refusal}; partial diagnosis saved to {target}") from refusal
     return target, diagnosis

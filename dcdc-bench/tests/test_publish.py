@@ -25,7 +25,7 @@ def tree_hash(folder):
     return digest.hexdigest()
 
 
-def synthetic_run(tmp_path, *, revision="r0001", with_pdf=True):
+def synthetic_run(tmp_path, *, revision="r0001", with_pdf=True, build_status="success"):
     run_dir = tmp_path / "runs" / RUN_ID
     store = RunStore(run_dir)
     run = {"schema_version": "1.0", "run_id": RUN_ID, "data_source": "measured", "execution_status": "completed",
@@ -62,9 +62,11 @@ def synthetic_run(tmp_path, *, revision="r0001", with_pdf=True):
     (report / "report_model.json").write_text(json.dumps({
         "run_id": RUN_ID, "provenance": {"software": {"platform": "Linux-6.18-aarch64"}, "source_path": PRIVATE_PATH},
         "bench": {"source": {"serial": SERIAL_S}}, "points": [{"Vin_V": 24.005, "Iin_A": 0.0687}]}))
-    (report / "build_manifest.json").write_text(json.dumps({
-        "artifacts": {"html": {"path": PRIVATE_PATH + f"/reports/{revision}/report.html", "sha256": "x"}},
-        "versions": {"plotly_js": "4.1.1"}}))
+    build_manifest = {"artifacts": {"html": {"path": PRIVATE_PATH + f"/reports/{revision}/report.html", "sha256": "x"}},
+                      "versions": {"plotly_js": "4.1.1"}}
+    if build_status is not None:
+        build_manifest["status"] = build_status  # the renderer's verdict; None leaves it undeclared
+    (report / "build_manifest.json").write_text(json.dumps(build_manifest))
     (report / "exports" / "points.csv").write_text(f"point_id,Vin_V\np0001,24.005\n# source {PRIVATE_PATH}\n")
     (report / "figures" / "fig-efficiency.svg").write_text(f'<svg><title>{RUN_ID} {IP}</title></svg>')
     (report / "figures" / "fig-efficiency.pdf").write_bytes(b"%PDF-1.4 fake")
@@ -266,3 +268,23 @@ def test_load_approval_requires_explicit_fields(tmp_path):
     path.write_text("- not a mapping\n")
     with pytest.raises(ValueError, match="mapping"):
         load_approval(path)
+
+
+@pytest.mark.parametrize("build_status", ["failed-validation", "unverified", "failed", None])
+def test_revision_without_a_successful_build_is_refused_unless_explicitly_allowed(tmp_path, build_status):
+    """M6 / brief 12.1: a report validation error blocks an ordinary issued publication."""
+    run_dir = synthetic_run(tmp_path, build_status=build_status)
+    before = tree_hash(run_dir)
+    with pytest.raises(ValueError, match="not 'success'"):
+        publish_run(run_dir, "r0001", tmp_path / "public", approval_file(tmp_path))
+    assert not (tmp_path / "public").exists() and tree_hash(run_dir) == before
+    target = publish_run(run_dir, "r0001", tmp_path / "public", approval_file(tmp_path, allow_unverified=True))
+    manifest = json.loads((target / "publication_manifest.json").read_text())
+    assert manifest["approval"]["allow_unverified"] is True and manifest["build_status"] == build_status
+    assert tree_hash(run_dir) == before
+
+
+def test_successful_build_publishes_without_the_override_and_records_it(tmp_path):
+    target = publish_run(synthetic_run(tmp_path), "r0001", tmp_path / "public", approval_file(tmp_path))
+    manifest = json.loads((target / "publication_manifest.json").read_text())
+    assert manifest["approval"]["allow_unverified"] is False and manifest["build_status"] == "success"

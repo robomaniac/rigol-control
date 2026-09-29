@@ -1145,7 +1145,9 @@ def _record_pdf_check(manifest: dict, artifact: Path, model: dict) -> None:
     """Record the pagination check; an error finding makes the PDF a validation failure.
 
     The document is kept for inspection. A crash inside the checker is
-    recorded as a failed check, never as an unverified success.
+    recorded as a failed check, never as an unverified success. When the
+    checker's tools (pypdf, poppler pdftohtml) are unavailable the artifact is
+    "unverified": kept and linked, but named as not verified.
     """
     try:
         manifest["pdf_check"] = _check_pdf(artifact, model)
@@ -1158,6 +1160,10 @@ def _record_pdf_check(manifest: dict, artifact: Path, model: dict) -> None:
         summary = "; ".join((f"p{f['page']}: " if f.get("page") else "") + str(f.get("code")) for f in errors[:8])
         manifest["artifacts"]["pdf"].update(status="failed-validation",
             error=f"PDF pagination check (PDF-02) reported {len(errors)} error finding(s): {summary}")
+    elif manifest["pdf_check"].get("status") == "unverified":
+        missing = [str(f.get("code")) for f in manifest["pdf_check"].get("findings", []) if f.get("severity") == "unverified"]
+        manifest["artifacts"]["pdf"].update(status="unverified",
+            note="PDF not verified: tool missing (" + ", ".join(missing) + "); the pagination check (PDF-02) could not run")
 
 
 def _version(package: str) -> str | None:
@@ -1487,9 +1493,11 @@ def _render_report(report_model: dict, out_dir: Path, formats=("html", "pdf")) -
         for fmt in requested:
             manifest["artifacts"].setdefault(fmt, {"status": "failed", "error": f"{type(exc).__name__}: {exc}"})
     statuses = {fmt: manifest["artifacts"].get(fmt, {}).get("status") for fmt in requested}
-    failures = [fmt for fmt, status in statuses.items() if status != "success"]
-    # A document that built but failed its pagination check is kept and named as such.
-    manifest["status"] = ("success" if not failures else "failed-validation"
+    failures = [fmt for fmt, status in statuses.items() if status not in ("success", "unverified")]
+    # A document that built but failed its pagination check is kept and named as
+    # such; one whose checker tools were unavailable is kept as "unverified".
+    manifest["status"] = (("success" if all(status == "success" for status in statuses.values()) else "unverified")
+                          if not failures else "failed-validation"
                           if all(statuses[fmt] == "failed-validation" for fmt in failures) else "failed")
     (out / "build_manifest.json").write_text(_json(manifest), encoding="utf-8")
     if failures:

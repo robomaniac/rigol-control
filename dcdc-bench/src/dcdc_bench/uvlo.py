@@ -284,7 +284,8 @@ class UvloInputRampProcedure:
 
 
 def run_uvlo_mock(plan: Plan, out: Path, *, seed: int = 1, synthetic: SyntheticUvlo | None = None,
-                  reading_override: ReadingOverride | None = None) -> Path:
+                  reading_override: ReadingOverride | None = None, operator_observations: list[str] | None = None,
+                  attachment_descriptors: list[dict] | None = None) -> Path:
     """Execute the approved UVLO ramp against the synthetic plant; return the finalized run directory.
 
     In-process, virtual clock, OS file locks on the mock resources, fsync per
@@ -321,8 +322,9 @@ def run_uvlo_mock(plan: Plan, out: Path, *, seed: int = 1, synthetic: SyntheticU
         "clock": {"mode": "virtual",
                   "note": "simulated acquisition; virtual timestamps are model time, not hardware observations"},
         "software": _provenance(), "durability_policy": "flush and fsync every JSONL record",
-        "measurement_boundary": plan.bench.measurement_boundary, "operator_observations": [],
-        "attachment_descriptors": [], "real_hardware_opened": False, "errors": []}
+        "measurement_boundary": plan.bench.measurement_boundary,
+        "operator_observations": list(operator_observations or []),
+        "attachment_descriptors": list(attachment_descriptors or []), "real_hardware_opened": False, "errors": []}
     run.update(procedure.metadata())
     run["method"]["uvlo_input_ramp"]["synthetic_model"] = synthetic.parameters()
     store = RunStore(directory)

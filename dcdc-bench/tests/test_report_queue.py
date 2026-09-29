@@ -216,6 +216,75 @@ def test_cancel_removes_a_queued_report_without_signalling(service, monkeypatch)
     assert service.dispatch_reports() is None and launched == []
 
 
+def test_cancel_racing_dispatch_leaves_the_job_cancelled_and_launches_nothing(service, monkeypatch):
+    """M1 scenario A: the operator's cancel lands after the dispatcher's queue scan and before the launch."""
+    job_id = queued_job(service)
+    launched = capture_launches(service, monkeypatch)
+    service.gate = MemoryGate(150, 600, reader=fake_reader(*OK))
+    original = service._report_queue
+
+    def racing(records=None):
+        queue = original(records)
+        service.cancel(job_id)  # in-process: the service lock is reentrant, so the record changes under the dispatcher
+        return queue
+    monkeypatch.setattr(service, "_report_queue", racing)
+    assert service.dispatch_reports() is None
+    assert launched == []
+    state = record(service._job(job_id))
+    assert state["state"] == "cancelled" and state.get("dispatched_utc") is None and "queue" in state["error"]
+    assert service.status(job_id)["state"] == "cancelled"
+    assert service.dispatch_reports() is None and launched == []
+
+
+def test_cancel_during_a_deferral_never_resurrects_the_job(service, monkeypatch):
+    """M1 scenario B: _defer re-reads the record before writing a deferral reason into it."""
+    job_id = queued_job(service)
+    launched = capture_launches(service, monkeypatch)
+
+    class CancellingGate:
+        def check(self):
+            service.cancel(job_id)
+            return False, "MemAvailable below 150 MiB", {"mem_available_mib": 40.0}
+    service.gate = CancellingGate()
+    outcome = service.dispatch_reports()
+    assert outcome["state"] == "cancelled" and outcome["deferred_reason"] is None
+    state = record(service._job(job_id))
+    assert state["state"] == "cancelled" and state["deferred_reason"] is None and state.get("deferred_utc") is None
+    assert launched == [] and service.dispatch_reports() is None
+    log = service._job(job_id) / "resources.jsonl"
+    assert not log.exists() or not [e for e in lines(log) if e["phase"] == "deferred"]
+
+
+def test_malformed_gate_variable_defers_with_a_recorded_reason(service, monkeypatch):
+    """m2: a non-numeric threshold must not stall the queue with nothing recorded on the job."""
+    job_id = queued_job(service)
+    launched = capture_launches(service, monkeypatch)
+    monkeypatch.setenv(ENV_MIN_AVAILABLE_MIB, "lots")
+    service.gate = None  # thresholds come from the environment at each dispatch
+    outcome = service.dispatch_reports()
+    assert outcome["state"] == REPORT_QUEUED and outcome["deferred_reason"].startswith("memory gate misconfigured")
+    assert ENV_MIN_AVAILABLE_MIB in outcome["deferred_reason"] and "'lots'" in outcome["deferred_reason"]
+    assert launched == [] and service.status(job_id)["deferred_reason"] == outcome["deferred_reason"]
+    deferred = [e for e in lines(service._job(job_id) / "resources.jsonl") if e["phase"] == "deferred"]
+    assert len(deferred) == 1 and deferred[0]["reason"] == outcome["deferred_reason"]
+    monkeypatch.setenv(ENV_MIN_AVAILABLE_MIB, "0")
+    monkeypatch.setenv(ENV_MIN_AVAILABLE_PLUS_SWAP_FREE_MIB, "0")
+    assert service.dispatch_reports() == {"job_id": job_id, "state": "queued"}
+    assert launched == [(job_id, {"report_only": True})]
+
+
+def test_idle_dispatch_reads_job_records_only(service, monkeypatch):
+    """m3: while deferred with no active job, the 2 s tick reads job.json files, never run.json or sample tails."""
+    job_id = queued_job(service)
+    capture_launches(service, monkeypatch)
+    service.gate = MemoryGate(150, 600, reader=fake_reader(*LOW))
+    monkeypatch.setattr(service, "status", lambda job: pytest.fail("idle dispatch must not derive full job status"))
+    monkeypatch.setattr("dcdc_bench.job_service._latest_cycle", lambda path: pytest.fail("idle dispatch must not read sample tails"))
+    assert service.dispatch_reports()["state"] == REPORT_QUEUED
+    assert service.dispatch_reports()["state"] == REPORT_QUEUED
+    assert record(service._job(job_id))["deferred_reason"].startswith("MemAvailable below")
+
+
 # (d) retry queues; acquisition keeps priority ----------------------------------------------------
 
 def test_retry_queues_instead_of_refusing_and_acquisition_keeps_priority(service, monkeypatch):

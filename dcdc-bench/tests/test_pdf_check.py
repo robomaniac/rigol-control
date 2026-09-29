@@ -163,10 +163,11 @@ def test_missing_pdf_is_a_finding_not_an_exception(tmp_path):
     result = check_pdf(tmp_path / "absent.pdf")
     assert result.status == "fail" and result.page_count == 0
     assert _codes(result) == ["pdf-missing"]
-    assert json.loads(result.to_json())["counts"] == {"error": 1, "warning": 0, "info": 0}
+    assert json.loads(result.to_json())["counts"] == {"error": 1, "unverified": 0, "warning": 0, "info": 0}
 
 
-def test_missing_pdftohtml_is_an_error_finding(tmp_path, monkeypatch):
+def test_missing_pdftohtml_leaves_the_document_unverified_not_failed(tmp_path, monkeypatch):
+    """M5: an unavailable checker tool is not a layout defect; the verdict is "unverified"."""
     pypdf = pytest.importorskip("pypdf")
     writer = pypdf.PdfWriter()
     writer.add_blank_page(width=595.28, height=841.89)
@@ -177,8 +178,11 @@ def test_missing_pdftohtml_is_an_error_finding(tmp_path, monkeypatch):
     launched = []
     monkeypatch.setattr(pdf_check.subprocess, "run", lambda *args, **kwargs: launched.append(args) or None)
     result = check_pdf(path)
-    assert result.status == "fail"
-    assert "pdftohtml-unavailable" in _codes(result, "error")
+    assert result.status == "unverified"
+    assert "pdftohtml-unavailable" in _codes(result, "unverified") and _codes(result, "error") == []
+    assert [finding.code for finding in result.unverified] == ["pdftohtml-unavailable"]
+    assert json.loads(result.to_json())["counts"]["unverified"] == 1
+    assert pdf_check.main([str(path)]) == 4, "the CLI still signals a document that was not verified"
     assert result.tools["pdftohtml"] is None and result.tools["pypdf"]
     assert launched == [], "no process may run when the tool is absent"
     assert result.page_count == 1 and len(result.pages) == 1
@@ -390,3 +394,21 @@ def test_renderer_records_a_checker_crash_as_failed_validation(model, tmp_path, 
     assert manifest["pdf_check"]["findings"][0]["message"] == "RuntimeError: checker exploded"
     assert manifest["artifacts"]["pdf"]["status"] == "failed-validation"
     assert (tmp_path / "report.pdf").exists()
+
+
+def test_renderer_keeps_an_unverified_pdf_without_failing_the_build(model, tmp_path, monkeypatch):
+    """M5: a missing checker tool leaves the PDF kept, linked and named as unverified; the build does not fail."""
+    from dcdc_bench.reporting import render_report, renderer
+    _stub_document_toolchain(monkeypatch, renderer)
+    canned = {"schema_version": "1.0", "status": "unverified", "page_count": 0, "pages_inspected": 0,
+              "findings": [{"code": "pdftohtml-unavailable", "severity": "unverified", "page": None,
+                            "message": "fixture", "details": {}}], "pages": []}
+    monkeypatch.setattr(renderer, "_check_pdf", lambda artifact, model: canned)
+    manifest = render_report(model, tmp_path, formats=("pdf",))
+    assert manifest["status"] == "unverified"
+    assert manifest["artifacts"]["pdf"]["status"] == "unverified"
+    assert manifest["artifacts"]["pdf"]["note"].startswith("PDF not verified: tool missing (pdftohtml-unavailable)")
+    assert "error" not in manifest["artifacts"]["pdf"] and manifest["artifacts"]["pdf"]["sha256"]
+    assert manifest["pdf_check"] == canned
+    assert (tmp_path / "report.pdf").read_bytes() == b"%PDF-1.7 unit-test fixture"
+    assert json.loads((tmp_path / "build_manifest.json").read_text())["status"] == "unverified"
