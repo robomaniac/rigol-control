@@ -148,3 +148,27 @@ range for that selection — never from the programming range (§3.3) — and ad
 
 Evidence: `runs/real-{bringup,extended,source-limit,startup-descent,voltage-sweep}/<timestamp>_real_<id>/`
 (`scpi.jsonl`, `raw/samples.jsonl`, `raw/events.jsonl`); ids as in the tables. Reproduce with the tool above.
+
+## E. Live outputs-OFF probe, 2026-09-29 (read-only `doctor`, owner-authorized)
+
+`dcdc-bench doctor --readback-cadence --seconds 120 --poll-interval 1` against the real DP821A/DL3031A
+with **both outputs OFF and the converter still wired in**: 515 queries, 0 writes, identities matched the
+private inventory, source in CV at 0.000 V / 0.0000 A, load input OFF in CC with local sense, error-queue
+bit clear. Diagnosis JSON is local under `diagnostics/` (gitignored; it names serials).
+
+| Channel | Polls | Distinct values | Changes | Median change interval | Query latency median / max |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| load `Iout_A` (input OFF) | 121 | 29 | 82 | 1.006 s (min 0.95 s, max 5.0 s) | 3.7 ms / 29.9 ms |
+| load `Vout_V` | 121 | 1 (`0.000000`) | 0 | not observable | 3.9 ms / 34.5 ms |
+| source `Iin_A` | 121 | 1 (`0.0000`) | 0 | not observable | 4.0 ms / 24.0 ms |
+| source `Vin_V` | 121 | 1 (`0.000`) | 0 | not observable | 4.2 ms / 24.4 ms |
+
+This supplies the case the logs lacked (source OFF *and* input OFF): the load's zero-current readback is
+again bistable, alternating between exactly `0.000000` and 10.01–10.29 mA (the historical source-ON value
+was 10.93–11.31 mA), changing between consecutive 1 s polls in 82 of 120 intervals with the longest hold
+5 s. Inference: the ≈10–11 mA is the load's own zero-current readback state, independent of the source and
+of the converter; its 1 s change cadence is bounded by the polling period, consistent with T_r ≲ 1.15 s
+from section A. It does not measure any current. The probe also recorded the power-on protection state
+(source OVP 66 V; load voltage limit 155 V, current limit 70 A), i.e. the profile's guards are not retained
+between sessions and must be programmed and read back at the start of every real run, as the fixed
+procedures do. Nothing here qualifies a loaded measurement; the step-4 burst and step tests remain to be run.
