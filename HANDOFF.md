@@ -75,9 +75,9 @@ Last verified state (2026-09-28, commit `cc98899` on `dcdc-bench-hardening`):
 ```sh
 cd /home/jerome/rigol-control
 git status                                   # expect: clean, on dcdc-bench-hardening
-cd Software && ../.venv/bin/python -m pytest -q          # 445 passed
-cd ../dcdc-bench && ../.venv/bin/python -m pytest -q -m "not browser and not pdf"   # 672 passed, 15 deselected (4 min on the 1 GB Pi)
-../.venv/bin/python -m pytest -q -m "browser or pdf"     # 15 browser/PDF checks; need Chromium + Quarto + free memory
+cd Software && ../.venv/bin/python -m pytest -q          # 445 passed (10 s on the Pi 4)
+cd ../dcdc-bench && ../.venv/bin/python -m pytest -q -m "not browser and not pdf"   # 692 passed, 15 deselected (2 min 19 s on the Pi 4)
+../.venv/bin/python -m pytest -q -m "browser or pdf"     # 14 passed, 1 skipped on the Pi 4 (system Chromium 153 + Quarto; ~4 min, builds a demo)
 ```
 
 Run one pytest at a time; the suites spawn worker subprocesses and fsync every

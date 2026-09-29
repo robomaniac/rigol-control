@@ -121,11 +121,16 @@ These checks cover the evidence and revision requirements in brief Sections 7,
 These require the delivered browser assets and actual renderer binaries. Unit
 tests alone do not establish that an offline HTML or PDF works. Consult the
 current artifact-specific results in implementation status; the list below is
-the verification scope, not a substitute for that evidence. On this aarch64
-Raspberry Pi, Chrome for Testing has no linux-arm64 build, so the 13
-`browser`/`pdf`-marked tests (WEB-*, EXP-01, PDF-*) must run on a laptop or CI
-(the brief §4.3 ARM limitation); the initial-checkpoint record used Debian's
-`chromium-headless-shell` on the Pi.
+the verification scope, not a substitute for that evidence. Chrome for Testing
+has no linux-arm64 build, but Debian's `chromium-headless-shell` (153) drives
+these gates on the bench computer once memory allows: on 2026-09-28, on the
+2 GB Raspberry Pi 4 with Quarto 1.10.18, `pytest -m "browser or pdf"` built a
+fresh demo and passed **14 of 15** gates with 1 skipped (a sequence-report
+figure the M0/M1 demo does not contain) — the first complete run of this
+section. That run found and fixed one layout defect (the excluded-points
+table lacked its scroll wrapper at 390 px) and one PDF-02 finding (a lone
+table row in the normal demo). On the earlier 1 GB Pi the same run failed to
+start Chromium under load; a laptop or CI remains a valid alternative.
 
 | ID | Milestone | Gate / additional unit coverage |
 | --- | --- | --- |

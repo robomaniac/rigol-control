@@ -201,19 +201,32 @@ hardware execution; configured real jobs use `JobService` through the UI.
 
 ### Current verification record
 
-On 2026-09-28, after the nine parallel increments were merged and their seams settled, the non-browser suite passed **653 tests** with 15 browser/PDF tests deselected (`pytest dcdc-bench/tests -m 'not browser and not pdf'`, Raspberry Pi, 478 s). The 15 deselected gates still need a laptop or CI run. One historical count is retained,
-labeled as such: on 2026-09-27, before this branch's work, the non-browser
-dcdc-bench suite passed 393/393 and the `Software/` (benchctl) suite 435/435.
-Earlier per-selection counts have been removed from this document because
-overlapping selections at different revisions cannot be summed.
+On 2026-09-28 (late evening), on the bench computer after its move to a
+Raspberry Pi 4 Model B with 2 GB, the branch tip passed every executable
+gate: `Software/` (benchctl) **445 passed** (10 s); dcdc-bench non-browser
+`pytest -m 'not browser and not pdf'` **692 passed**, 15 deselected (139 s);
+and the browser/PDF gates `pytest -m 'browser or pdf'` **14 passed, 1 skipped**
+(248 s including a fresh three-scenario demo build). The skip is the
+sequence-report time-figure check, which the M0/M1 demo cannot exercise. This
+is the first complete execution of the browser/PDF section; it found one
+layout defect (the excluded-points table lacked its scroll wrapper at 390 px)
+and one PDF-02 finding (a lone table row in the normal demo), both fixed on
+the branch before this record. One historical count is retained, labeled as
+such: on 2026-09-27, before this branch's work, the non-browser dcdc-bench
+suite passed 393/393 and the benchctl suite 435/435. Earlier per-selection
+counts have been removed from this document because overlapping selections at
+different revisions cannot be summed.
 
-Verification platform: this Raspberry Pi is aarch64. Chrome for Testing has no
-linux-arm64 build, so the 13 `browser`/`pdf`-marked tests (WEB-*, EXP-01,
-PDF-*) are not run on the Pi in the current cycle and must run on a laptop or
-CI — the ARM limitation anticipated in brief §4.3. Quarto 1.10.18 is installed
-under `dcdc-bench/.tools/`. The historical record below used Debian's
-`chromium-headless-shell` through the renderer's browser lookup at the initial
-checkpoint.
+Verification platform: Raspberry Pi 4 Model B Rev 1.1, 2 GB, aarch64, Debian
+with Python 3.13, Debian `chromium-headless-shell` 153 (Chrome for Testing has
+no linux-arm64 build, so Playwright drives the system browser through the
+renderer's `_browser_path()`), Quarto 1.10.18 under `dcdc-bench/.tools/`.
+Host telemetry for the run is in `Data/Logs/memory-monitor.jsonl`
+(`tools/memory_monitor.py --summary`): MemAvailable never fell below 446 MiB
+and firmware reported no throttling, but compressed swap reached about 1 GiB
+while the render, the editor server and two coding assistants were resident.
+On the previous 1 GB Pi the same browser run could not start Chromium under
+load.
 
 | Check | Recorded result |
 | --- | --- |
