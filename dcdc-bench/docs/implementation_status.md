@@ -380,7 +380,7 @@ Commands executed from the parent checkout:
 ```sh
 .venv/bin/python -m pytest dcdc-bench/tests -m 'not browser and not pdf' -q
 .venv/bin/dcdc-bench demo --out dcdc-bench/examples/generated
-env DCDC_DEMO_DIR=/home/jerome/rigol-control/dcdc-bench/examples/generated \
+env DCDC_DEMO_DIR=~/rigol-control/dcdc-bench/examples/generated \
   .venv/bin/python -m pytest dcdc-bench/tests/test_documents.py \
   -m 'browser or pdf' -vv -o faulthandler_timeout=240
 ```
