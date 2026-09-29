@@ -145,7 +145,17 @@ swapon --show                                 # zram only; the old temporary swa
 
 Then run the two test suites from section 4. With the extra RAM the 15
 browser/PDF checks should pass locally for the first time — record the result
-in `implementation_status.md`. If the Pi 4 hostname or IP changed, update the
+in `implementation_status.md`.
+
+Memory monitoring (installed 2026-09-28 to judge whether 2 GB is enough): the
+user unit `bench-memory-monitor.service` runs
+`dcdc-bench/tools/memory_monitor.py` every 30 s and appends to
+`Data/Logs/memory-monitor.jsonl` (gitignored). Summarize with
+`.venv/bin/python dcdc-bench/tools/memory_monitor.py --summary Data/Logs/memory-monitor.jsonl`;
+watch `mem_available_min_mib`, `swap_used_max_mib`, `throttled_ever` and the
+`largest_resident_processes_mib` table. VS Code's remote server plus each
+Claude Code / Codex session costs several hundred MiB each; the bench software
+itself is under 100 MiB idle. If the Pi 4 hostname or IP changed, update the
 laptop's SSH config, not the repository. Nothing else needs migration.
 
 ## 7. Parked work in progress (do not delete blindly)
