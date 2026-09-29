@@ -13,7 +13,7 @@ from dcdc_bench.publish import PRIVATE_IPV4, Redactor, load_approval, publish_ru
 from dcdc_bench.storage import RunStore, verify_integrity
 
 RUN_ID = "20260927T120000.000000Z_real_abc123"
-IP, HOST, SERIAL_S, SERIAL_L = "192.168.1.100", "load-bench.local", "DP8G0000FAKE1", "DL3A0000FAKE2"
+IP, HOST, SERIAL_S, SERIAL_L = "192.168.77.42", "load-bench.local", "DP8G0000FAKE1", "DL3A0000FAKE2"
 PRIVATE_PATH = "/home/tester/rigol-control/dcdc-bench/runs/real-extended/" + RUN_ID
 
 
@@ -250,12 +250,12 @@ def test_cli_publish_prints_target_and_uses_no_subprocess(tmp_path, no_git_no_ne
 
 def test_private_ipv4_pattern_does_not_touch_numeric_evidence_or_versions():
     for text in ("003.371.214.673", "053.177.1.224", "105.323.2.39", "00.01.04.00", "4.1.1", "1.2.3.4",
-                 "192.168.1.100.5", "24.005 12.1352", "8.8.8.8"):
+                 "192.168.77.42.5", "24.005 12.1352", "8.8.8.8"):
         assert PRIVATE_IPV4.search(text) is None, text
-    for text in ("192.168.1.100", "10.0.0.7", "172.16.4.200", "169.254.1.1", "127.0.0.1", "at 192.168.1.100."):
+    for text in ("192.168.77.42", "10.0.0.7", "172.16.4.200", "169.254.1.1", "127.0.0.1", "at 192.168.77.42."):
         assert PRIVATE_IPV4.search(text) is not None, text
-    redactor = Redactor(endpoints={"192.168.1.100"}, serials={"DP8G0000FAKE1"}, paths=set())
-    cleaned, counts = redactor.text("Vin 24.005 V; TCPIP0::192.168.1.100::INSTR; serial DP8G0000FAKE1; /home/x/y.json; C:\\Users\\x\\run")
+    redactor = Redactor(endpoints={"192.168.77.42"}, serials={"DP8G0000FAKE1"}, paths=set())
+    cleaned, counts = redactor.text("Vin 24.005 V; TCPIP0::192.168.77.42::INSTR; serial DP8G0000FAKE1; /home/x/y.json; C:\\Users\\x\\run")
     assert cleaned == "Vin 24.005 V; [REDACTED:endpoint]; serial [REDACTED:serial]; [REDACTED:path]; [REDACTED:path]"
     assert counts == {"endpoint": 1, "serial": 1, "path": 2}
 
