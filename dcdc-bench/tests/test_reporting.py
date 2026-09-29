@@ -621,3 +621,99 @@ def test_issued_real_models_still_render_and_export(model_path, tmp_path):
     rows = list(csv.DictReader(io.StringIO((tmp_path / "exports/points.csv").read_text(encoding="utf-8", newline=""))))
     assert len(rows) == len(issued["points"])
     assert len(rows[0]) == len(set(rows[0])) if rows else True
+
+
+# --- Brief 9.1: flagged implausible points are drawn as flagged, never as nothing ---
+
+def _flag(point: dict, efficiency: float) -> dict:
+    point.update(qualification="inconclusive", quality_flags=["implausible_power_ratio"], efficiency_pct=efficiency,
+                 reason="Implausible power ratio: computed efficiency 112.3 % exceeds 100 % (output power 1.191 W > "
+                        "input power 1.061 W); readings preserved, point not qualified. Input and output current "
+                        "readbacks differ by +11.0 mA.")
+    return point
+
+
+def test_static_plot_draws_flagged_points_open_and_unjoined_and_keeps_them_in_range(model):
+    _flag(model["points"][1], 112.3)
+    before = copy.deepcopy(model)
+    figure = renderer._plot_figure(model, model["figures"][0], 1)
+    qualified, flagged = figure.data
+    assert list(qualified.y) == [39.1575, None, 81.23456789] and qualified.connectgaps is False
+    assert qualified.marker.symbol == "circle" and qualified.showlegend is None  # default: shown
+    assert list(flagged.y) == [None, 112.3, None] and list(flagged.x) == [.099, .2, .3]
+    assert flagged.mode == "markers" and flagged.marker.symbol == "circle-open"
+    assert flagged.marker.line.width == 2 and flagged.marker.color == qualified.marker.color
+    assert flagged.showlegend is False and flagged.name.endswith("· flagged, not qualified")
+    assert "Not qualified: implausible power ratio" in flagged.hovertemplate
+    assert list(flagged.customdata) == ["p1", "p2", "p3"]
+    assert "1 flagged point(s) drawn with open markers, not qualified" in figure.layout.annotations[0].text
+    assert figure.layout.yaxis.range is None, "autorange spans both traces, so the 112.3 % marker stays visible"
+    assert model == before
+    # A nominal-voltage figure keeps the flagged reading inside its default range.
+    model["dut"]["ratings"] = {"output_voltage_nominal_V": 12.}
+    voltage = {**model["figures"][0], "id": "fig-voltage", "y_key": "Vout_V"}
+    for point, vout in zip(model["points"], (12.01, 12.45, 11.99)):
+        point["Vout_V"] = vout
+    model["figures"] = [voltage]
+    low, high = renderer._figure_references(model)["fig-voltage"]["y_range"]
+    assert low < 11.99 and high > 12.45
+
+
+def test_static_plot_with_only_flagged_points_names_them_and_states_no_qualified_condition(model):
+    for point, efficiency in zip(model["points"], (112.3, 104.4, 101.9)):
+        _flag(point, efficiency)
+    figure = renderer._plot_figure(model, model["figures"][0], 1)
+    assert len(figure.data) == 1
+    (flagged,) = figure.data
+    assert list(flagged.y) == [112.3, 104.4, 101.9] and flagged.marker.symbol == "circle-open"
+    assert flagged.showlegend is True and flagged.name == "12 V · flagged, not qualified"
+    footer = figure.layout.annotations[0].text
+    assert "no qualified plotted conditions | 3 flagged point(s) drawn with open markers, not qualified" in footer
+    assert figure.layout.xaxis.range is None, "three distinct currents keep ordinary autoscaling"
+
+
+def test_static_plot_without_flags_is_unchanged(model):
+    figure = renderer._plot_figure(model, model["figures"][0], 1)
+    assert len(figure.data) == 1 and figure.data[0].marker.symbol == "circle"
+    assert "flagged" not in figure.layout.annotations[0].text
+
+
+def test_body_separates_readback_cross_check_and_lists_the_computed_reason(model):
+    _flag(model["points"][1], 112.3)
+    model["metrics"] += [
+        {"id": "load-span-load-12", "label": "Load regulation span", "value": .1, "unit": "% of nominal",
+         "conditions": "12 V requested input", "point_ids": ["p1", "p3"], "figure_ids": ["fig-efficiency"]},
+        {"id": "readback-cross-check-current-difference-mean",
+         "label": "Readback cross-check (pass-through, not calibration): mean current readback difference",
+         "value": .011, "unit": "A", "conditions": "3 loaded points (p1, p2, p3); 12 V requested input",
+         "point_ids": ["p1", "p2", "p3"], "figure_ids": []}]
+    body = renderer._body(model)
+    section = body.index("### Readback cross-check (pass-through, not calibration)")
+    assert "not a calibration, their uncertainty is unquantified, and no stored value is corrected" in body[section:]
+    # The heading carries the long label once; rows keep only the quantity.
+    assert "| mean current readback difference | 0.011 A | 3 loaded points (p1, p2, p3); 12 V requested input |" in body[section:]
+    regulation = body[body.index("## Regulation"):section]
+    assert "Load regulation span" in regulation and "Readback cross-check" not in regulation
+    assert "| p2 | load | 12 V / 0.2 A | inconclusive | Implausible power ratio: computed efficiency 112.3 % exceeds 100 %" in body
+    assert "insufficient input-voltage and load coverage" not in body
+
+
+def test_body_without_cross_check_metrics_has_no_cross_check_section(model):
+    body = renderer._body(model)
+    assert "Readback cross-check" not in body
+    assert "insufficient input-voltage and load coverage" in body
+
+
+def test_issued_export_carries_quality_flags_next_to_qualification(model, tmp_path):
+    _flag(model["points"][1], 112.3)
+    model["points"][2]["quality_flags"] = []
+    renderer.write_exports(model, tmp_path)
+    text = (tmp_path / "exports/points.csv").read_text(encoding="utf-8", newline="")
+    header = text.split("\r\n")[0].split(",")
+    assert header.index("quality_flags") == header.index("qualification") + 1
+    rows = list(csv.DictReader(io.StringIO(text)))
+    assert [row["quality_flags"] for row in rows] == ["", "implausible_power_ratio", ""]
+    assert rows[1]["qualification"] == "inconclusive" and rows[1]["reason"].startswith("Implausible power ratio")
+    meta = json.loads((tmp_path / "exports/points.meta.json").read_text())
+    column = next(column for column in meta["columns"] if column["name"] == "quality_flags")
+    assert "implausible_power_ratio" in column["description"] and column["unit"] is None

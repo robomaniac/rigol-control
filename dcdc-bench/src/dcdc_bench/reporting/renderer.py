@@ -28,7 +28,7 @@ from types import SimpleNamespace
 from typing import Any
 
 # The issued CSV export guards text cells exactly as the analysis export does.
-from ..analysis import _safe_cell
+from ..analysis import READBACK_METRIC_PREFIX, _safe_cell, is_flagged_implausible
 from .sensor_placement import with_sensor_placement
 from ..resources import children_peak_rss_mib, session_survivors, terminate_group, try_log_event
 
@@ -365,8 +365,9 @@ def _figure_references(model: dict) -> dict[str, dict]:
         for series in spec["series"]:
             for pid in series["point_ids"]:
                 point = points[pid]
-                if (point.get("qualification") != "valid" or not finite(point.get(spec["x_key"]))
-                        or not finite(point.get(spec["y_key"]))):
+                # Flagged (open-marker) points are drawn, so the default range keeps them in view.
+                if ((point.get("qualification") != "valid" and not is_flagged_implausible(point))
+                        or not finite(point.get(spec["x_key"])) or not finite(point.get(spec["y_key"]))):
                     continue
                 # Keep any supplied display band in view as well as the mean.
                 values.extend(float(point[key]) for key in (spec["y_key"], spec.get("lower_key"), spec.get("upper_key"))
@@ -396,41 +397,60 @@ def _plot_figure(model: dict, spec: dict, number: int):
             meta={"isTransition": True}))
     conditions = []
     plotted_currents: set[float] = set()
+    flagged_count = 0
+
+    def finite_pairs(horizontals, values):
+        return [(float(horizontal), float(value)) for horizontal, value in zip(horizontals, values)
+            if isinstance(horizontal, (int, float)) and not isinstance(horizontal, bool)
+            and isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(horizontal) and math.isfinite(value)]
+
     # The same condition keeps its color across both formats and every figure,
     # including a hold-only panel with a subset of the sequence's conditions.
     condition_styles = _condition_styles(model)
     for index, series in enumerate(spec["series"]):
         rows = [points[pid] for pid in series["point_ids"]]
         valid = [p.get("qualification") == "valid" for p in rows]
+        # Brief 9.1: an implausible ratio is preserved and flagged, never clamped
+        # or hidden. Flagged points are drawn open, unjoined, and never as qualified.
+        flagged = [is_flagged_implausible(p) for p in rows]
         x = [p.get(spec["x_key"]) for p in rows]
         y = [p.get(spec["y_key"]) if okay else None for p, okay in zip(rows, valid)]
-        plotted = [(float(horizontal), float(value)) for horizontal, value in zip(x, y)
-            if isinstance(horizontal, (int, float)) and not isinstance(horizontal, bool)
-            and isinstance(value, (int, float)) and not isinstance(value, bool)
-            and math.isfinite(horizontal) and math.isfinite(value)]
+        y_flagged = [p.get(spec["y_key"]) if flag else None for p, flag in zip(rows, flagged)]
+        plotted = finite_pairs(x, y)
+        plotted_flagged = finite_pairs(x, y_flagged)
         # Keep requested points in the report model/evidence controls, but do
         # not imply a measured curve exists through an empty legend entry.
-        if not plotted:
+        if not plotted and not plotted_flagged:
             continue
         style = condition_styles[_condition_key(series)]
         color = style["color"]
         condition = str(series.get("label", series["id"]))
-        conditions.append(condition)
         if spec["x_key"] == "Iout_A":
-            plotted_currents.update(current for current, _ in plotted)
-        lower, upper = spec.get("lower_key"), spec.get("upper_key")
-        if lower and upper:
-            for key, fill in ((lower, None), (upper, "tonexty")):
-                figure.add_trace(go.Scatter(x=x, y=[p.get(key) if okay else None
-                    for p, okay in zip(rows, valid)], mode="lines", line={"width": 0},
-                    fill=fill, fillcolor=_rgba(color, .13), showlegend=False,
-                    legendgroup=series["id"], hoverinfo="skip", connectgaps=False))
-        figure.add_trace(go.Scatter(x=x, y=y, name=html.escape(condition),
-            mode="lines+markers" if series.get("connect_points", True) else "markers",
-            line={"width": 2, "color": color, "dash": style["dash"]},
-            marker={"size": 9, "color": color, "symbol": style["symbol"]}, connectgaps=False,
-            legendgroup=series["id"], customdata=[p["point_id"] for p in rows],
-            hovertemplate="%{customdata}<br>%{x:.6g}<br>%{y:.6g}<extra>%{fullData.name}</extra>"))
+            plotted_currents.update(current for current, _ in [*plotted, *plotted_flagged])
+        if plotted:
+            conditions.append(condition)
+            lower, upper = spec.get("lower_key"), spec.get("upper_key")
+            if lower and upper:
+                for key, fill in ((lower, None), (upper, "tonexty")):
+                    figure.add_trace(go.Scatter(x=x, y=[p.get(key) if okay else None
+                        for p, okay in zip(rows, valid)], mode="lines", line={"width": 0},
+                        fill=fill, fillcolor=_rgba(color, .13), showlegend=False,
+                        legendgroup=series["id"], hoverinfo="skip", connectgaps=False))
+            figure.add_trace(go.Scatter(x=x, y=y, name=html.escape(condition),
+                mode="lines+markers" if series.get("connect_points", True) else "markers",
+                line={"width": 2, "color": color, "dash": style["dash"]},
+                marker={"size": 9, "color": color, "symbol": style["symbol"]}, connectgaps=False,
+                legendgroup=series["id"], customdata=[p["point_id"] for p in rows],
+                hovertemplate="%{customdata}<br>%{x:.6g}<br>%{y:.6g}<extra>%{fullData.name}</extra>"))
+        if plotted_flagged:
+            flagged_count += len(plotted_flagged)
+            figure.add_trace(go.Scatter(x=x, y=y_flagged, name=html.escape(condition + " · flagged, not qualified"),
+                mode="markers", showlegend=not plotted, legendgroup=series["id"], connectgaps=False,
+                marker={"size": 10, "color": color, "symbol": f"{style['symbol']}-open", "line": {"width": 2, "color": color}},
+                customdata=[p["point_id"] for p in rows],
+                hovertemplate="%{customdata}<br>%{x:.6g}<br>%{y:.6g}<br>Not qualified: implausible power ratio"
+                              "<extra>%{fullData.name}</extra>"))
     # Retained raw time series (e.g. thermal settling) are drawn exactly as supplied.
     for index, series in enumerate(spec.get("sample_series", [])):
         color = COLORS[index % len(COLORS)]
@@ -440,7 +460,10 @@ def _plot_figure(model: dict, spec: dict, number: int):
             mode="lines+markers", line={"width": 1.5, "color": color}, marker={"size": 5, "color": color},
             connectgaps=False, legendgroup=series["id"],
             hovertemplate="%{x:.6g} s<br>%{y:.6g}<extra>%{fullData.name}</extra>"))
-    footer = _footer(model, spec, "; ".join(conditions) or "no qualified plotted conditions")
+    plotted_conditions = "; ".join(conditions) or "no qualified plotted conditions"
+    if flagged_count:
+        plotted_conditions += f" | {flagged_count} flagged point(s) drawn with open markers, not qualified"
+    footer = _footer(model, spec, plotted_conditions)
     # Every user supplied segment is escaped before entering Plotly rich text.
     footer = "<br>".join(html.escape(line) for line in footer.split("<br>"))
     figure.update_layout(template="plotly_white", width=1080, height=530,
@@ -849,11 +872,24 @@ def _body(model: dict) -> str:
              "## Regulation and return results {#regulation}" if stages else
              "## Regulation results {#regulation}" if voltage_sweep else
              "## Regulation and no-load results {#regulation}"), ""]
-    if len(metrics) > 1:
+    cross_check = [m for m in metrics if str(m.get("id", "")).startswith(READBACK_METRIC_PREFIX)]
+    regulation = [m for m in metrics[1:] if m not in cross_check]
+    if regulation:
         out += [_rows_table(["Metric", "Value", "Actually covered conditions"],
             [[m["label"], f"{_number(m.get('value'))} {m.get('unit','')}", m.get("conditions", "")]
-             for m in metrics[1:]]), "", "See @fig-voltage for the qualified voltage values."
+             for m in regulation]), "", "See @fig-voltage for the qualified voltage values."
              + (" See @fig-hold-voltage for the sustained-load interval." if has_hold else ""), ""]
+    if cross_check:
+        # A pass-through profile (topology "none ...") declares no converter: the source
+        # and load instruments read the same series current and nearly the same voltage.
+        out += ["### Readback cross-check (pass-through, not calibration)", "",
+                "The DUT profile declares a direct connection with no converter, so the source and load instruments "
+                "read the same series current. These rows are differences between the two instruments' readbacks "
+                "along the declared path, computed from the same channel means as the point results. They are not a "
+                "calibration, their uncertainty is unquantified, and no stored value is corrected.", "",
+                _rows_table(["Cross-check", "Value", "Conditions"],
+                    [[_md(str(m["label"]).split(": ", 1)[-1]), f"{_number(m.get('value'))} {m.get('unit','')}",
+                      _md(m.get("conditions", ""))] for m in cross_check]), ""]
     no_load = [p for p in model["points"] if p.get("iout_target_A") == 0 and p.get("qualification") == "valid"]
     if no_load:
         out += ["### Enabled with no external load", "", "These values describe board/path input consumption, not controller quiescent current. Efficiency is not applicable.", "",
@@ -862,7 +898,7 @@ def _body(model: dict) -> str:
                  for p in no_load]), ""]
     elif stages or voltage_sweep:
         out += ["No-load consumption was not measured in this run.", ""]
-    if len(metrics) <= 1 and not no_load:
+    if not regulation and not no_load:
         out += ["This run has insufficient input-voltage and load coverage to calculate regulation, "
                 "and no qualified no-load point. A broader acquired grid is needed for these results.", ""]
     out += ["```{=typst}", "#pagebreak()", "```", "",
@@ -974,7 +1010,7 @@ def _controls_html(model: dict) -> str:
 EXPORT_FIELDS = ("run_id", "analysis_id", "evidence_type", "point_id", "test_id", "vin_target_V",
                  "programmed_input_V", "input_condition_label", "iout_target_A",
                  "Vin_V", "Iin_A", "Vout_V", "Iout_A", "Pin_W", "Pout_W", "loss_W",
-                 "efficiency_pct", "vout_error_pct", "qualification", "reason")
+                 "efficiency_pct", "vout_error_pct", "qualification", "quality_flags", "reason")
 EXPORT_TIMING_FIELDS = ("phase_label", "elapsed_start_s", "elapsed_s", "elapsed_end_s")
 EXPORT_COLUMNS: dict[str, tuple[str, str | None]] = {
     "run_id": ("Acquisition run identifier", None),
@@ -996,6 +1032,8 @@ EXPORT_COLUMNS: dict[str, tuple[str, str | None]] = {
     "efficiency_pct": ("Path efficiency = 100 × Pout / Pin", "%"),
     "vout_error_pct": ("Output deviation = 100 × (Vout − Vnominal) / Vnominal", "%"),
     "qualification": ("Point qualification: valid, inconclusive, setup-limited, not-run, …", None),
+    "quality_flags": ("Analysis flags that demoted the point (semicolon-separated, e.g. implausible_power_ratio); "
+                      "empty when none", None),
     "reason": ("Recorded qualification reason", None),
     "phase_label": ("Sequence stage label, when the run records stages", None),
     "elapsed_start_s": ("Start of the accepted query span, relative to the first accepted query", "s"),
