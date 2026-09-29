@@ -73,6 +73,18 @@ restore the tunnel after reconnecting.
    measurements for a new report without running the instruments again. See
    [the process model](pi-process-model.md) for the thresholds and logs.
 
+While a job is queued, acquiring or generating its report, a spinner with a
+short phrase (for example `Acquiring… point 2 of 4`, `Generating report…`) and
+the time elapsed since Start sits under the page title, visible from every tab;
+it disappears when nothing is working in the background, and clicking it opens
+**Run**. The same two-second poll keeps **Reports** current: when a job changes
+state or its report becomes available, the saved-runs list refreshes itself and
+a `Report ready: <run id>` notice appears, so **Refresh saved runs** is only
+needed for runs created outside this page. Every time the page shows (job start,
+report times, recent events, saved runs) is the bench computer's local clock
+with its zone abbreviation, e.g. `13:40:12 PDT (2026-09-29)`; the evidence files
+themselves keep recording UTC.
+
 Changing any setting clears the preview and its confirmation. Preview again
 before starting. Enter a different profile name to save a reusable variant.
 Existing profile names update that saved configuration; issued run evidence

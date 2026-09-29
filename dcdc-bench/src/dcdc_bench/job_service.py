@@ -110,6 +110,24 @@ def _latest_cycle(path):
     return {}, None
 
 
+def _recent_events(path, limit=12):
+    """Read-only tail of a run's raw/events.jsonl for the UI's Recent events list; [] when absent."""
+    try:
+        with Path(path).open("rb") as handle:
+            handle.seek(0, 2)
+            handle.seek(max(0, handle.tell()-16384))
+            lines = handle.read().splitlines()
+    except OSError:
+        return []
+    events = []
+    for line in lines[-limit:]:
+        try:
+            events.append(json.loads(line))
+        except (ValueError, UnicodeDecodeError):
+            continue  # a partial trailing line while the worker is still writing
+    return events
+
+
 class JobService:
     def __init__(self, root: Path, inventory_path: Path | None = None, gate: MemoryGate | None = None):
         self.root = Path(root).resolve()
@@ -494,6 +512,7 @@ class JobService:
             if latest:
                 value["latest"] = latest
                 value["latest_age_s"] = max(0., (now-datetime.fromisoformat(timestamp)).total_seconds())
+            value["events"] = _recent_events(candidates[-1].parent / "raw/events.jsonl")
         if value.get("report_dir"):
             report = _inside(job, value["report_dir"])
             if (report / "build_manifest.json").is_file():
