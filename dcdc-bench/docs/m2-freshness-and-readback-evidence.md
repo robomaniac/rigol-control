@@ -172,3 +172,34 @@ from section A. It does not measure any current. The probe also recorded the pow
 (source OVP 66 V; load voltage limit 155 V, current limit 70 A), i.e. the profile's guards are not retained
 between sessions and must be programmed and read back at the start of every real run, as the fixed
 procedures do. Nothing here qualifies a loaded measurement; the step-4 burst and step tests remain to be run.
+
+## F. Pass-through cross-check, 2026-09-29 13:37 PDT (owner-authorized real run, converter disconnected)
+
+Plan step 4 was run through the bench UI with the data-only profile `passthrough-check`
+(supply CH1 wired directly to the load; recipe `passthrough-12v-check`: 12 V; 0, 0.1, 0.25, 0.5 A;
+bench `rigol-local-passthrough-12v`, OVP 14 V). Run
+`workspace/jobs/20260929T203714Z_0a11d40f/runs/20260929T203715.209079Z_real_bed075`, completed, both
+outputs verified OFF. Accepted-window channel means:
+
+| Request | Vin_V | Iin_A | Vout_V | Iout_A | Iout − Iin | Vin − Vout | computed η |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 A (load input OFF) | 12.0101 | 0.0003 | 11.9910 | 0.00265 | — (offset) | 19 mV | not applicable |
+| 0.1 A | 12.0100 | 0.08835 | 11.9868 | 0.09939 | **+11.0 mA** | 23 mV | 112.3 % (flagged) |
+| 0.25 A | 12.0108 | 0.23806 | 11.9797 | 0.24926 | **+11.2 mA** | 31 mV | 104.4 % (flagged) |
+| 0.5 A | 12.0108 | 0.48820 | 11.9678 | 0.49945 | **+11.3 mA** | 43 mV | 101.9 % (flagged) |
+
+Observations (a wire cannot deliver more current than it receives): the load's current readback sits
+**+11.0 to +11.3 mA above the source's** at every loaded level, i.e. an offset that does not scale with
+current; the analysis correctly flagged the three loaded points `implausible_power_ratio` and refused to
+qualify them. Vin − Vout grows 19 → 43 mV with current (lead/contact drop of roughly 50 mΩ, inference).
+The no-load window read 0.0003 A on the source (3.6 mW "consumption": leakage/readback floor) while the
+load's OFF-input readback averaged 2.6 mA (its bistable 0/≈10 mA state, section E).
+
+Inference for Gap B: the ≈11 mA disagreement matches the load's zero-current readback state and the
+source's ±10 mA datasheet offset term; it is inside both instruments' annual specifications, so this is a
+plausibility cross-check, not a calibration, and it does not say which instrument is right. It does say
+that light-load efficiency computed from these two readbacks carries a systematic error of order
+11 mA / Iout (≈ 11 % at 0.1 A, ≈ 2 % at 0.5 A) unless an external current reference resolves it. The
+report for this run initially showed empty efficiency/loss curves without stating the reason; the
+renderer and analysis are being changed so flagged points are drawn as flagged and the summary explains
+the readback disagreement.
