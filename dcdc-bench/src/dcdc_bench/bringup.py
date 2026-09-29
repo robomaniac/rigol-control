@@ -62,6 +62,7 @@ class RigolPilot:
         self.supply, self.load = supply, load
         self.st, self.lt = supply_transport, load_transport
         self.bench = bench
+        self.load_input_readback = None
 
     # -- SourceAdapter / LoadAdapter contract (domain.py section 5.2) --------
 
@@ -195,7 +196,10 @@ class RigolPilot:
         mask = 15883
         if status & mask:
             raise self.abort(f"Load questionable condition {status}; stopping rather than clearing it")
-        if self.load.get_input_enabled() != enabled:
+        # Keep this cycle's :SOUR:INP:STAT? answer for the evidence record: the
+        # instrument's readback, distinct from the requested flag, at no extra query.
+        self.load_input_readback = self.load.get_input_enabled()
+        if self.load_input_readback != enabled:
             raise self.abort("Load input state no longer matches the requested phase")
         return status
 

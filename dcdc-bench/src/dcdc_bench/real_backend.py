@@ -9,6 +9,7 @@ startup gate has passed (plan Gap E).
 """
 from __future__ import annotations
 
+from itertools import groupby
 import math
 from pathlib import Path
 from statistics import mean
@@ -110,11 +111,16 @@ def prepare_real_plan(original: Plan) -> tuple[Plan, list[str], float]:
         if point.status == "executable":
             started_phases.add(phase_key)
     eligible = [p for p in plan.points if p.status == "executable"]
-    phases = sum(i == 0 or (p.test_id, p.vin_target_V) != (eligible[i-1].test_id, eligible[i-1].vin_target_V)
-                 for i, p in enumerate(eligible))
+    phase_groups = [list(group) for _, group in groupby(eligible, key=lambda p: (p.test_id, p.vin_target_V))]
+    phases = len(phase_groups)
+    # A phase opened by an enabled no-load observation enables the load only afterwards, so its
+    # five loaded startup cycles (enable_load) fall outside the 14 s per-phase startup budget.
+    deferred_load_enables = sum(group[0].iout_target_A == 0 and any(p.iout_target_A > 0 for p in group)
+                                for group in phase_groups)
     seconds = len(eligible) * (max(r.settling.minimum_dwell_s, r.settling.window_s,
         r.settling.minimum_fresh_samples * r.acquisition.target_poll_interval_s) +
-        max(r.acquisition.duration_s, r.acquisition.minimum_complete_cycles * r.acquisition.target_poll_interval_s) + 3) + phases * 14
+        max(r.acquisition.duration_s, r.acquisition.minimum_complete_cycles * r.acquisition.target_poll_interval_s) + 3
+        ) + phases * 14 + deferred_load_enables * 5
     if not eligible:
         errors.append("No requested point is eligible")
     if seconds > 540:

@@ -231,7 +231,9 @@ def dc_metrics(values: dict[str, float | None], nominal_V: float,
     result.update(Pin_W=pin, Pout_W=pout, loss_W=pin-pout,
                   vout_error_pct=100*(vout-nominal_V)/nominal_V)
     reason = None
-    if vin < 0 or iin < 0 or vout < 0 or iout < 0:
+    # With the load input OFF, Iout is the load's zero-current readback offset of
+    # either sign (evidence, not delivered output current), so its sign is exempt.
+    if vin < 0 or iin < 0 or vout < 0 or (iout < 0 and not no_load):
         flags.append("unexpected_sign")
     if no_load:
         reason = "not applicable: enabled with no external load"
@@ -497,7 +499,8 @@ def analyze_evidence(plan: Plan, run: dict, samples: list[dict], *, version: str
             qualification = "inconclusive"
         no_load = request.iout_target_A == 0
         load_states = {s["acquisition_settings"].get("load_enabled") for s in accepted}
-        if no_load and qualification == "valid" and True in load_states:
+        readbacks = {s["acquisition_settings"].get("load_input_readback") for s in accepted}
+        if no_load and qualification == "valid" and (True in load_states or True in readbacks):
             raise ValueError("Worker accepted an enabled no-load point with the load input enabled")
         # Enabled no-load (brief 9.1, plan Gap E): the measurand is input consumption
         # with the load input OFF; the load's current readback is kept as an offset,

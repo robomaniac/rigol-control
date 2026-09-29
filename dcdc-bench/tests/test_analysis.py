@@ -139,3 +139,17 @@ def test_data03_caption_is_covered_range_not_assumed_first_point():
         if metric.id.startswith("line-span"):
             assert "12–30 V" in metric.conditions
             assert "9–36" not in metric.conditions
+
+
+def test_no_load_readback_offset_sign_is_evidence_not_an_unexpected_sign():
+    # With the load input OFF, the electronic load's zero-current readback can be
+    # slightly negative; that offset is recorded, not judged as output current.
+    negative_offset = dc_metrics(dict(Vin_V=24., Iin_A=.01, Vout_V=12.1, Iout_A=-.0004), 12., no_load=True)
+    assert "unexpected_sign" not in negative_offset["metric_flags"]
+    assert negative_offset["Pin_W"] == pytest.approx(.24) and negative_offset["efficiency_pct"] is None
+    assert negative_offset["Pout_W"] is None and negative_offset["loss_W"] is None
+    # A loaded observation with negative output current is still flagged.
+    loaded = dc_metrics(dict(Vin_V=24., Iin_A=.01, Vout_V=12.1, Iout_A=-.0004), 12.)
+    assert "unexpected_sign" in loaded["metric_flags"]
+    # Other no-load sign faults remain flagged.
+    assert "unexpected_sign" in dc_metrics(dict(Vin_V=24., Iin_A=-.01, Vout_V=12.1, Iout_A=0.), 12., no_load=True)["metric_flags"]
