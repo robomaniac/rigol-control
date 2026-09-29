@@ -39,7 +39,10 @@ def confirmed(p):
 def test_configurable_plan_retains_exclusions_and_is_hash_stable():
     p, errors, seconds = plan(loads=(0., .1, .25, 4.))
     assert not errors and seconds < 540 and verify_plan_hash(p)
-    assert [row.status for row in p.points] == ["unsupported", "executable", "executable", "unsupported"]
+    # A 0 A first request is a distinct enabled no-load observation, not an exclusion (plan Gap E).
+    assert [row.status for row in p.points] == ["executable", "executable", "executable", "unsupported"]
+    assert "enabled no-load observation (load input OFF)" in p.points[0].reason
+    assert "efficiency not applicable" in p.points[0].reason
     rebuilt, errors, _ = prepare_real_plan(build_plan(p.dut, p.bench, p.recipe))
     assert not errors and rebuilt.plan_hash == p.plan_hash
 
@@ -71,7 +74,8 @@ def test_new_five_volt_dut_uses_profile_guards_not_twelve_volt_constants(tmp_pat
 
 def test_excluded_first_request_is_not_energized_or_mislabeled(tmp_path, monkeypatch):
     fake = bench(tmp_path, monkeypatch)
-    p, errors, _ = plan(loads=(0., .1))
+    p, errors, _ = plan(loads=(4., .1))
+    assert p.points[0].status == "unsupported"
     path = run_real(p, fake.config, fake.out, confirmation=confirmed(p))
     run = json.loads((path / "run.json").read_text())
     rows = [json.loads(line) for line in (path / "raw/samples.jsonl").read_text().splitlines()]
@@ -202,3 +206,140 @@ def test_operator_notes_are_preserved_and_visible_in_report_model(tmp_path, monk
     model = build_report_model(p, run, analysis, rows, "r0001")
     assert model.provenance["operator_observations"] == run["operator_observations"]
     verify_integrity(path)
+
+
+# ---------------------------------------------------------------------------
+# Startup gate (plan section 1 prerequisite) and enabled no-load (plan Gap E).
+# ---------------------------------------------------------------------------
+
+def test_startup_gate_permits_four_source_only_cycles_then_requires_output_in_band():
+    p, _, _ = plan()
+    procedure = ConfiguredProcedure(p, confirmed(p))
+    low = {"Vin_V": 24., "Iin_A": .02, "Vout_V": 3., "Iout_A": .001}
+    for _ in range(4):
+        procedure.guard(low, .1, loaded=False, startup=True)
+    with pytest.raises(ExtendedAbort, match="load will not be enabled"):
+        procedure.guard(low, .1, loaded=False, startup=True)
+    assert procedure.source_only_cycles == 5 and procedure.lower_output == pytest.approx(10.8)
+    # Outside startup the band applies at once, loaded or not; a no-load cycle demands no current match.
+    fresh = ConfiguredProcedure(p, confirmed(p))
+    with pytest.raises(ExtendedAbort, match="load will not be enabled"):
+        fresh.guard(low, 0., loaded=False)
+    fresh.guard({**low, "Vout_V": 10.8}, 0., loaded=False)
+
+
+@pytest.mark.parametrize("loads", [(.1,), (0., .1)])
+def test_startup_gate_failure_aborts_before_any_load_command(tmp_path, monkeypatch, loads):
+    fake = bench(tmp_path, monkeypatch, query_overrides={("load", ":MEAS:VOLT?"): "5.0"})
+    p, errors, _ = plan(loads=loads)
+    assert not errors
+    path = run_real(p, fake.config, fake.out, confirmation=confirmed(p))
+    run = json.loads((path / "run.json").read_text())
+    assert run["execution_status"] == "aborted"
+    assert "Output below startup/operating threshold" in run["errors"][0]
+    assert ":SOUR:INP:STAT ON" not in writes(fake, "load")
+    rows = [json.loads(line) for line in (path / "raw/samples.jsonl").read_text().splitlines()]
+    assert {r["phase"] for r in rows} == {"starting"} and len({r["acquisition_cycle_id"] for r in rows}) == 5
+    assert all(r["acquisition_settings"]["load_enabled"] is False for r in rows)
+    assert run["points"][0]["qualification"] == "inconclusive"
+    assert all(s == {"state": "OFF", "verified": True} for s in run["shutdown"].values())
+    verify_integrity(path)
+
+
+def test_no_load_after_a_loaded_point_is_unsupported_not_acquired():
+    p, errors, _ = plan(loads=(.1, 0.))
+    assert not errors
+    assert [row.status for row in p.points] == ["executable", "unsupported"]
+    assert "first request of its input-voltage phase" in p.points[1].reason
+    p, _, _ = plan(loads=(0., 0.))
+    assert [row.status for row in p.points] == ["executable", "unsupported"]
+    p, _, _ = plan(volts=(24., 20.), loads=(0., .1))
+    assert [row.status for row in p.points] == ["executable"] * 4
+
+
+def test_enabled_no_load_first_request_is_acquired_with_the_load_input_off(tmp_path, monkeypatch):
+    from dcdc_bench.analysis import analyze_run, build_report_model
+    fake = bench(tmp_path, monkeypatch)
+    p, errors, _ = plan(loads=(0., .1))
+    assert not errors and p.points[0].status == "executable"
+    path = run_real(p, fake.config, fake.out, confirmation=confirmed(p))
+    run = json.loads((path / "run.json").read_text())
+    assert run["execution_status"] == "completed" and run["executed_point_ids"] == ["p0001", "p0002"]
+    first, second = run["points"]
+    assert first["qualification"] == "valid" and first["observation"] == "enabled_no_load"
+    assert first["load_input_state"] == "OFF" and first["load_readback_offset_A"] == pytest.approx(.001)
+    assert first["iin_span_A"] == 0 and first["startup_gate"].startswith("passed")
+    assert len(first["acquisition_cycle_ids"]) >= 5
+    assert second["qualification"] == "valid" and second["observation"] == "loaded" and second["load_input_state"] == "ON"
+    assert run["method"]["enabled_no_load"]["load_input_state"].startswith("OFF")
+    rows = [json.loads(line) for line in (path / "raw/samples.jsonl").read_text().splitlines()]
+    assert all(r["acquisition_settings"]["load_enabled"] is False for r in rows if r["point_id"] == "p0001")
+    assert all(r["acquisition_settings"]["load_enabled"] is True for r in rows
+               if r["point_id"] == "p0002" and r["phase"] != "starting")
+    assert writes(fake, "load").count(":SOUR:INP:STAT ON") == 1
+    # The load's CC setpoint was programmed to the first loaded request while its input was OFF.
+    assert [float(c.split()[-1]) for c in writes(fake, "load") if c.startswith(":SOUR:CURR:LEV:IMM ")] == [.1]
+    # Analysis: input consumption with the load input OFF; efficiency not applicable; loss not module-only.
+    analysis = json.loads((analyze_run(path) / "analysis.json").read_text())
+    point = analysis["points"][0]
+    assert point["observation"] == "enabled_no_load" and point["load_input_state"] == "OFF"
+    assert point["efficiency_pct"] is None and point["efficiency_reason"] == "not applicable: enabled with no external load"
+    assert point["Pout_W"] is None and point["loss_W"] is None
+    assert "not attributed to the module alone" in point["loss_reason"]
+    assert point["enabled_no_load_consumption_W"] == pytest.approx(point["Vin_V"] * point["Iin_A"])
+    assert point["enabled_no_load_consumption_W"] == pytest.approx(24 * .01, rel=1e-6)
+    assert point["load_readback_offset_A"] == pytest.approx(.001) and point["Iout_A"] == pytest.approx(.001)
+    assert point["requirements"]["efficiency"] == "not-applicable"
+    assert analysis["points"][1]["observation"] == "loaded" and analysis["points"][1]["enabled_no_load_consumption_W"] is None
+    budget = analysis["uncertainty"]["points"]["p0001"]
+    assert budget["observation"] == "enabled_no_load" and budget["required_terms"] == ["Vin_V", "Iin_A"]
+    assert budget["budget_status"] == "unquantified"
+    assert budget["missing_terms"] and all(m.startswith(("Vin_V:", "Iin_A:")) for m in budget["missing_terms"])
+    assert budget["terms"]["Iin_A"]["status"] == "unquantified"
+    assert budget["terms"]["Iin_A"]["programming_accuracy_consulted"] is False
+    model = build_report_model(p, run, analysis, rows, "r0001")
+    metric = next(m for m in model.metrics if m.id == "enabled-no-load-input-consumption-p0001")
+    assert metric.unit == "W" and metric.value == point["enabled_no_load_consumption_W"]
+    assert "load input OFF" in metric.conditions and "not output current" in metric.conditions
+    assert "not module-only loss" in metric.conditions and metric.uncertainty["expanded"] is None
+    assert any(line.startswith("Enabled no-load path input consumption:") and "unquantified" in line for line in model.summary)
+    assert not any(key.endswith("_uncertainty_label") for key in model.points[0])
+    assert any("At qualified no-load points, input consumption is reported" in line for line in model.limitations)
+    verify_integrity(path)
+
+
+def test_no_load_only_plan_never_issues_a_load_enable(tmp_path, monkeypatch):
+    fake = bench(tmp_path, monkeypatch)
+    p, errors, _ = plan(loads=(0.,))
+    assert not errors
+    path = run_real(p, fake.config, fake.out, confirmation=confirmed(p))
+    run = json.loads((path / "run.json").read_text())
+    assert run["execution_status"] == "completed" and run["points"][0]["qualification"] == "valid"
+    assert run["points"][0]["observation"] == "enabled_no_load"
+    assert ":SOUR:INP:STAT ON" not in writes(fake, "load")
+    assert [float(c.split()[-1]) for c in writes(fake, "load") if c.startswith(":SOUR:CURR:LEV:IMM ")] == [.05]
+    assert run["shutdown"]["load"] == {"state": "OFF", "verified": True}
+    assert run["method"]["enabled_no_load"]["iin_span_A"] == .002
+    verify_integrity(path)
+
+
+def test_unstable_no_load_input_current_is_not_qualified_and_the_load_stays_off(tmp_path, monkeypatch):
+    fake = bench(tmp_path, monkeypatch)
+    from dcdc_bench.extended import ExtendedRigol
+    original, calls = ExtendedRigol.read, {"n": 0}
+
+    def wobbling(pilot, quantity):
+        value = original(pilot, quantity)
+        if quantity == "Iin_A" and not fake.sessions["load"].enabled:
+            calls["n"] += 1
+            return value + (.005 if calls["n"] % 2 else 0.)
+        return value
+
+    monkeypatch.setattr(ExtendedRigol, "read", wobbling)
+    p, _, _ = plan(loads=(0., .1))
+    path = run_real(p, fake.config, fake.out, confirmation=confirmed(p))
+    run = json.loads((path / "run.json").read_text())
+    assert run["execution_status"] == "aborted" and "no-load span" in run["errors"][0]
+    assert run["points"][0]["qualification"] == "inconclusive"
+    assert ":SOUR:INP:STAT ON" not in writes(fake, "load")
+    assert all(s == {"state": "OFF", "verified": True} for s in run["shutdown"].values())
