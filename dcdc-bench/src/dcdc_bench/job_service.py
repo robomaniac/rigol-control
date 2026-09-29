@@ -432,7 +432,11 @@ class JobService:
         revision manifest; integrity.json and the acquisition manifest are
         verified unchanged afterwards. No worker or instrument is involved.
         """
-        from .attachments import AssetStore
+        from .attachments import AssetStore, validate_asset
+        # Content validation (PDF/SVG parsing can take seconds) runs before the
+        # service lock so a slow upload never blocks start, preview or the
+        # report dispatcher; the store re-binds the result to the bytes by hash.
+        validated = validate_asset(data, filename)
         with self.lock:
             job, state = self._job(job_id), self.status(job_id)
             if state["state"] in ACTIVE:
@@ -441,7 +445,7 @@ class JobService:
                 raise ValueError("No finalized acquisition exists")
             path = _inside(job, state["run_dir"])
             verify_integrity(path)
-            entry = AssetStore(path).add(data, filename, caption=caption, owner=owner)
+            entry = AssetStore(path).add(data, filename, caption=caption, owner=owner, validated=validated)
             verify_integrity(path)
             return entry
 

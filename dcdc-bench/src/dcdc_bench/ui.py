@@ -34,6 +34,73 @@ body{background:#f3f6f8;color:#183047;font-family:system-ui,sans-serif}
 '''
 
 
+RASTER_SUFFIXES = {'.png', '.jpg', '.jpeg', '.gif', '.webp'}
+_TOO_LARGE = b'Request body exceeds the upload limit\n'
+
+
+def file_headers(path: Path, relative: str | None = None) -> dict[str, str]:
+    """Response headers for a served artifact.
+
+    Sniffing is off and nothing is cached. The report HTML keeps its scripted
+    sandbox; every other document is confined to an opaque origin with a
+    script-less ``sandbox``, so an SVG or PDF opened directly can never act in
+    the instrument-control origin. Uploaded attachments are downloads unless
+    they are raster images (``inline``); ``<img>`` loads ignore both headers,
+    so the editor keeps working.
+    """
+    headers = {'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-store'}
+    suffix = Path(path).suffix.lower()
+    if suffix == '.html':
+        # Report scripts can draw/export plots, but have an opaque origin
+        # and cannot access the local instrument-control UI.
+        headers['Content-Security-Policy'] = 'sandbox allow-scripts allow-downloads allow-popups'
+        return headers
+    headers['Content-Security-Policy'] = 'sandbox'
+    if relative is not None and '/attachments/' in '/' + relative.replace('\\', '/'):
+        disposition = 'inline' if suffix in RASTER_SUFFIXES else 'attachment'
+        headers['Content-Disposition'] = f'{disposition}; filename="{Path(path).name}"'
+    return headers
+
+
+class RequestBodyLimit:
+    """Pure-ASGI guard: refuse or cut off HTTP request bodies above ``limit`` bytes.
+
+    Runs before anything downstream (NiceGUI's upload spool included) can
+    buffer a body: a declared Content-Length above the limit is answered with
+    413 without reading it, and a chunked body is disconnected once it has
+    delivered more than the limit.
+    """
+
+    def __init__(self, app, limit: int):
+        self.app, self.limit = app, int(limit)
+
+    async def __call__(self, scope, receive, send):
+        if scope.get('type') != 'http':
+            return await self.app(scope, receive, send)
+        declared = next((value for name, value in scope.get('headers') or () if name == b'content-length'), None)
+        if declared is not None:
+            try:
+                too_large = int(declared) > self.limit
+            except ValueError:
+                too_large = True
+            if too_large:
+                await send({'type': 'http.response.start', 'status': 413,
+                            'headers': [(b'content-type', b'text/plain; charset=utf-8'),
+                                        (b'content-length', str(len(_TOO_LARGE)).encode())]})
+                await send({'type': 'http.response.body', 'body': _TOO_LARGE})
+                return
+        received = {'bytes': 0}
+
+        async def limited_receive():
+            message = await receive()
+            if message.get('type') == 'http.request':
+                received['bytes'] += len(message.get('body', b''))
+                if received['bytes'] > self.limit:
+                    return {'type': 'http.disconnect'}
+            return message
+        await self.app(scope, limited_receive, send)
+
+
 def require_loopback(host: str) -> str:
     if host == 'localhost':
         return '127.0.0.1'
@@ -78,6 +145,9 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
     service = JobService(Path(root), inventory_path=inventory_path)
     app.add_middleware(TrustedHostMiddleware,
                        allowed_hosts=list({'localhost', '127.0.0.1', '[::1]', '::1', host}))
+    # Server-side upload ceiling: the largest attachment plus multipart framing.
+    from .attachments import BYTE_LIMITS
+    app.add_middleware(RequestBodyLimit, limit=max(BYTE_LIMITS.values()) + 1024 * 1024)
     # NiceGUI's generic default permits every WebSocket origin. Bench control
     # uses Engine.IO's same-origin policy; SSH forwards retain their Host port.
     core.sio.eio.cors_allowed_origins = None
@@ -100,13 +170,8 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
     app.on_startup(dispatch_reports)
     app.timer(2.0, dispatch_reports)
 
-    def file_response(path):
-        headers = {'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-store'}
-        if path.suffix.lower() == '.html':
-            # Report scripts can draw/export plots, but have an opaque origin
-            # and cannot access the local instrument-control UI.
-            headers['Content-Security-Policy'] = 'sandbox allow-scripts allow-downloads allow-popups'
-        return FileResponse(path, headers=headers)
+    def file_response(path, relative=None):
+        return FileResponse(path, headers=file_headers(path, relative))
 
     @app.get('/jobs/{job_id}/files/{relative:path}')
     async def job_file(job_id: str, relative: str):
@@ -115,7 +180,14 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
             path = await run.io_bound(service.resolve_file, job_id, relative)
         except (ValueError, OSError, KeyError):
             raise HTTPException(status_code=404, detail='Artifact not available') from None
-        return file_response(path)
+        return file_response(path, relative)
+
+    # Photo/sensor-marker documentation editor: report-only revisions, no acquisition path.
+    # Registered before the published-file routes: FastAPI matches in registration
+    # order and the legacy ``/{filename}`` catch-all below would otherwise shadow
+    # every single-segment page such as ``/annotations``.
+    from .annotation_editor import register_annotation_editor
+    register_annotation_editor(ui, run, service, STYLE)
 
     if report_root is not None:
         published_directory = Path(report_root).resolve()
@@ -141,10 +213,6 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
             if path is None or not path.is_file():
                 raise HTTPException(status_code=404, detail='Published file not available') from None
             return file_response(path)
-
-    # Photo/sensor-marker documentation editor: report-only revisions, no acquisition path.
-    from .annotation_editor import register_annotation_editor
-    register_annotation_editor(ui, run, service, STYLE)
 
     @ui.page('/', response_timeout=30.0)
     async def bench_page():

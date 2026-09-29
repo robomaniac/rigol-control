@@ -17,9 +17,11 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import math
 import os
 import re
 import tempfile
+import time
 import unicodedata
 import warnings
 from datetime import datetime, timezone
@@ -43,12 +45,26 @@ MAX_PIXELS = 40_000_000
 MAX_FILENAME = 120
 MAX_CAPTION = 2000
 MAX_PDF_OBJECTS = 200_000
+# Wall-clock budget for one PDF inspection and the inflated size any single
+# stream may reach while objects are resolved (pypdf's default is 75 MB). A
+# 25 MB upload could otherwise hold hundreds of object streams that each take
+# seconds to tokenize; callers must not hold a service lock meanwhile.
+PDF_INSPECT_SECONDS = 10.0
+MAX_PDF_STREAM_BYTES = 4 * 1024 * 1024
 OWNER_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9 _.@:-]{0,99}")
 
 _SVG_FORBIDDEN_TAGS = frozenset({"script", "foreignobject", "iframe", "object", "embed", "handler",
                                  "audio", "video", "frame", "frameset"})
 _SVG_ANIMATION_TAGS = frozenset({"animate", "set", "animatetransform", "animatemotion", "discard"})
 _SVG_HREF_NAMES = frozenset({"href", "xlink:href"})
+# Animations may neither retarget references nor whole style declarations,
+# and the values they animate towards are scanned like inline CSS.
+_SVG_RETARGET_NAMES = frozenset({"href", "xlink:href", "style"})
+_SVG_ANIMATION_VALUES = frozenset({"to", "from", "by", "values"})
+# CSS escapes (``\75rl(`` is ``url(``, ``@\69mport`` is ``@import``) and
+# comments are normalized away before the unsafe-CSS scan.
+_CSS_ESCAPE = re.compile(r"\\(?:([0-9a-fA-F]{1,6})[ \t\n\r\f]?|(.))", re.S)
+_CSS_COMMENT = re.compile(r"/\*.*?\*/", re.S)
 # A DOCTYPE (with or without an internal subset) is recognized here so the
 # rejection names the entity problem instead of an unknown type.
 _SVG_START = re.compile(rb"^\s*(?:<\?xml[^>]*\?>\s*)?(?:<!--.*?-->\s*)*(?:<!DOCTYPE(?:[^>\[]|\[[^\]]*\])*>\s*)?"
@@ -56,8 +72,16 @@ _SVG_START = re.compile(rb"^\s*(?:<\?xml[^>]*\?>\s*)?(?:<!--.*?-->\s*)*(?:<!DOCT
 _DATA_IMAGE = re.compile(r"^data:image/(?:png|jpeg);base64,[A-Za-z0-9+/=\s]+$")
 _UNSAFE_CSS = re.compile(r"@import|expression\s*\(|javascript:|-moz-binding|behavior\s*:|"
                          r"url\(\s*['\"]?(?!#|data:image/(?:png|jpeg);base64,)", re.I)
-_PDF_ACTIVE_KEYS = frozenset({"/JS", "/JavaScript", "/OpenAction", "/Launch", "/AA"})
-_PDF_ACTIVE_SUBTYPES = frozenset({"/JavaScript", "/Launch", "/SubmitForm", "/ImportData", "/Rendition"})
+_PDF_ACTIVE_KEYS = frozenset({"/JS", "/JavaScript", "/OpenAction", "/Launch", "/AA", "/XFA",
+                              "/EmbeddedFiles", "/EF", "/RichMediaContent", "/RichMediaSettings"})
+_PDF_ACTIVE_SUBTYPES = frozenset({"/JavaScript", "/Launch", "/SubmitForm", "/ImportData", "/Rendition",
+                                  "/Movie", "/Sound", "/GoTo3DView", "/RichMediaExecute"})
+# Annotation subtypes that embed media, 3D scenes or file payloads.
+_PDF_ANNOTATION_SUBTYPES = frozenset({"/RichMedia", "/3D", "/Movie", "/Sound", "/Screen", "/FileAttachment"})
+# Actions that open another file or a URL. URI links are refused on purpose:
+# an attachment that can phone home when clicked is not evidence; print a
+# vendor datasheet to a link-free PDF before attaching it.
+_PDF_EXTERNAL_SUBTYPES = frozenset({"/GoToR", "/GoToE", "/URI"})
 
 
 class AttachmentRejected(ValueError):
@@ -153,11 +177,35 @@ def _inspect_raster(data: bytes, media_type: str) -> tuple[int, int]:
     return width, height
 
 
+def _finite_pixels(text: str) -> int | None:
+    """A length as whole pixels; non-finite or absurd values are a typed rejection, never a crash."""
+    try:
+        number = float(text)
+    except (ValueError, OverflowError):
+        return None
+    if not math.isfinite(number) or abs(number) > 1e9:
+        raise AttachmentRejected("dimensions", f"SVG dimension {text.strip()[:32]!r} is not a finite pixel count")
+    return int(round(number))
+
+
 def _svg_length(value: str | None) -> int | None:
     if value is None:
         return None
     match = re.fullmatch(r"\s*([0-9]*\.?[0-9]+)\s*(?:px)?\s*", value)
-    return int(round(float(match.group(1)))) if match else None
+    return _finite_pixels(match.group(1)) if match else None
+
+
+def _css_normalize(text: str) -> str:
+    def unescape(match: re.Match) -> str:
+        if match.group(1) is not None:
+            code = int(match.group(1), 16)
+            return chr(code) if 0 < code <= 0x10FFFF else "�"
+        return match.group(2)
+    return _CSS_ESCAPE.sub(unescape, _CSS_COMMENT.sub("", text))
+
+
+def _unsafe_css(text: str) -> bool:
+    return bool(_UNSAFE_CSS.search(_css_normalize(text)))
 
 
 def _local(name: str) -> str:
@@ -186,13 +234,14 @@ def _inspect_svg(data: bytes) -> tuple[int | None, int | None]:
         tag = _local(element.tag).lower()
         if tag in _SVG_FORBIDDEN_TAGS:
             raise AttachmentRejected("svg_active_content", f"SVG element <{tag}> is not accepted")
-        if tag == "style" and element.text and _UNSAFE_CSS.search(element.text):
+        if tag == "style" and element.text and _unsafe_css(element.text):
             raise AttachmentRejected("svg_external_reference", "SVG style loads external or executable content")
+        animation = tag in _SVG_ANIMATION_TAGS
         for raw_name, value in element.attrib.items():
             name = _local(raw_name).lower()
             if name.startswith("on"):
                 raise AttachmentRejected("svg_active_content", f"SVG event handler attribute {name} is not accepted")
-            if name == "style" and _UNSAFE_CSS.search(value):
+            if name == "style" and _unsafe_css(value):
                 raise AttachmentRejected("svg_external_reference", "SVG inline style loads external content")
             if name == "href":
                 candidate = value.strip()
@@ -201,18 +250,20 @@ def _inspect_svg(data: bytes) -> tuple[int | None, int | None]:
                 if not (internal or embedded):
                     raise AttachmentRejected("svg_external_reference",
                                              f"SVG <{tag}> references content outside the file")
-            if tag in _SVG_ANIMATION_TAGS and name == "attributename" and value.strip().lower() in _SVG_HREF_NAMES:
-                raise AttachmentRejected("svg_active_content", "SVG animations may not retarget references")
+            if animation and name == "attributename" and value.strip().lower() in _SVG_RETARGET_NAMES:
+                raise AttachmentRejected("svg_active_content", "SVG animations may not retarget references or styles")
+            if animation and name in _SVG_ANIMATION_VALUES and _unsafe_css(value):
+                raise AttachmentRejected("svg_external_reference", f"SVG <{tag}> animates towards external content")
+            if name not in ("style", "href") and "url(" in _css_normalize(value).lower() and _unsafe_css(value):
+                raise AttachmentRejected("svg_external_reference",
+                                         f"SVG attribute {name} references content outside the file")
     width, height = _svg_length(root.get("width")), _svg_length(root.get("height"))
     view_box = root.get("viewBox")
     if (width is None or height is None) and view_box:
         parts = re.split(r"[\s,]+", view_box.strip())
         if len(parts) == 4:
-            try:
-                width = width if width is not None else int(round(float(parts[2])))
-                height = height if height is not None else int(round(float(parts[3])))
-            except ValueError:
-                width = height = None
+            width = width if width is not None else _finite_pixels(parts[2])
+            height = height if height is not None else _finite_pixels(parts[3])
     if width is not None and height is not None:
         _check_dimensions(width, height)
     elif len(data) > BYTE_LIMITS["image/svg+xml"] // 4:
@@ -224,38 +275,55 @@ def _inspect_pdf(data: bytes) -> None:
     try:
         import pypdf
         from pypdf import generic
+        from pypdf.errors import LimitReachedError
     except ImportError as exc:  # pragma: no cover - depends on the installed extras
         raise AttachmentRejected("validator_unavailable", "pypdf is required to verify PDF attachments") from exc
+    deadline = time.monotonic() + PDF_INSPECT_SECONDS
     try:
-        reader = pypdf.PdfReader(io.BytesIO(data))
-        if reader.is_encrypted:
-            raise AttachmentRejected("pdf_encrypted", "Encrypted PDF cannot be inspected")
-        stack: list[Any] = [reader.trailer]
-        visited: set[tuple[int, int]] = set()
-        budget = MAX_PDF_OBJECTS
-        while stack:
-            item = stack.pop()
-            budget -= 1
-            if budget < 0:
-                raise AttachmentRejected("pdf_malformed", "PDF object graph is too large to inspect")
-            if isinstance(item, generic.IndirectObject):
-                key = (item.idnum, item.generation)
-                if key in visited:
-                    continue
-                visited.add(key)
-                item = item.get_object()
-            if isinstance(item, dict):
-                for key, value in item.items():
-                    name = str(key)
-                    if name in _PDF_ACTIVE_KEYS:
-                        raise AttachmentRejected("pdf_active_content", f"PDF contains {name}")
-                    if name == "/S" and str(value.get_object() if hasattr(value, "get_object") else value) in _PDF_ACTIVE_SUBTYPES:
-                        raise AttachmentRejected("pdf_active_content", f"PDF action {value} is not accepted")
-                    stack.append(value)
-            elif isinstance(item, list):
-                stack.extend(item)
+        with pypdf.apply_configuration(zlib_maximum_output_length=MAX_PDF_STREAM_BYTES,
+                                       lzw_maximum_output_length=MAX_PDF_STREAM_BYTES,
+                                       run_length_maximum_output_length=MAX_PDF_STREAM_BYTES):
+            reader = pypdf.PdfReader(io.BytesIO(data))
+            if reader.is_encrypted:
+                raise AttachmentRejected("pdf_encrypted", "Encrypted PDF cannot be inspected")
+            stack: list[Any] = [reader.trailer]
+            visited: set[tuple[int, int]] = set()
+            budget = MAX_PDF_OBJECTS
+            while stack:
+                if time.monotonic() > deadline:
+                    raise AttachmentRejected("pdf_too_complex",
+                                             f"PDF inspection exceeded its {PDF_INSPECT_SECONDS:g} s budget")
+                item = stack.pop()
+                budget -= 1
+                if budget < 0:
+                    raise AttachmentRejected("pdf_malformed", "PDF object graph is too large to inspect")
+                if isinstance(item, generic.IndirectObject):
+                    key = (item.idnum, item.generation)
+                    if key in visited:
+                        continue
+                    visited.add(key)
+                    item = item.get_object()
+                if isinstance(item, dict):
+                    for key, value in item.items():
+                        name = str(key)
+                        if name in _PDF_ACTIVE_KEYS:
+                            raise AttachmentRejected("pdf_active_content", f"PDF contains {name}")
+                        if name in ("/S", "/Subtype"):
+                            target = str(value.get_object() if hasattr(value, "get_object") else value)
+                            if name == "/S" and target in _PDF_EXTERNAL_SUBTYPES:
+                                raise AttachmentRejected("pdf_external_reference",
+                                                         f"PDF action {target} opens another file or a URL")
+                            if (name == "/S" and target in _PDF_ACTIVE_SUBTYPES) or \
+                                    (name == "/Subtype" and target in _PDF_ANNOTATION_SUBTYPES):
+                                raise AttachmentRejected("pdf_active_content", f"PDF {name} {target} is not accepted")
+                        stack.append(value)
+                elif isinstance(item, list):
+                    stack.extend(item)
     except AttachmentRejected:
         raise
+    except LimitReachedError as exc:
+        raise AttachmentRejected("pdf_too_complex",
+                                 f"PDF stream inflates beyond {MAX_PDF_STREAM_BYTES} bytes: {exc}") from exc
     except Exception as exc:
         raise AttachmentRejected("pdf_malformed", f"PDF could not be parsed: {type(exc).__name__}: {exc}") from exc
 
@@ -381,14 +449,24 @@ class AssetStore:
             raise AssetHashMismatch(f"Original {path.name} changed while being read")
         return data, asset
 
-    def add(self, data: bytes, filename: Any, *, caption: str = "", owner: str = "operator") -> dict:
+    def add(self, data: bytes, filename: Any, *, caption: str = "", owner: str = "operator",
+            validated: dict | None = None) -> dict:
         """Validate and store one asset; return its manifest entry.
 
         The same content is stored once. After finalization the entry is
         appended to a new documentation revision manifest; the acquisition
-        manifest and integrity file are never rewritten.
+        manifest and integrity file are never rewritten. ``validated`` may
+        carry the fields ``validate_asset`` already returned for these exact
+        bytes (so a caller can validate before taking a lock); it is re-bound
+        to the bytes by hash, size and name before use, else ignored.
         """
-        info = validate_asset(data, filename)
+        info = None
+        if isinstance(validated, dict) and isinstance(data, (bytes, bytearray)) and data:
+            if (validated.get("sha256") == hashlib.sha256(data).hexdigest() and validated.get("byte_size") == len(data)
+                    and validated.get("original_name") == normalize_filename(filename)):
+                info = dict(validated)
+        if info is None:
+            info = validate_asset(data, filename)
         caption = _check_text(caption, field="Caption", limit=MAX_CAPTION)
         if not isinstance(owner, str) or not OWNER_PATTERN.fullmatch(owner):
             raise AttachmentRejected("invalid_text", "Owner must be a short printable identifier")
