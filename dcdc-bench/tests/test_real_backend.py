@@ -1,5 +1,6 @@
 """Configured hardware path exercised only through fake SCPI transports."""
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -343,3 +344,231 @@ def test_unstable_no_load_input_current_is_not_qualified_and_the_load_stays_off(
     assert run["points"][0]["qualification"] == "inconclusive"
     assert ":SOUR:INP:STAT ON" not in writes(fake, "load")
     assert all(s == {"state": "OFF", "verified": True} for s in run["shutdown"].values())
+
+
+# ---------------------------------------------------------------------------
+# Independent safety review closure: load-enable ordering in the transcript,
+# runtime defenses, zero-current readback offsets, no-load-window aborts, the
+# time estimate and the per-sample load input readback.
+# ---------------------------------------------------------------------------
+
+def samples(path):
+    return [json.loads(line) for line in (path / "raw/samples.jsonl").read_text().splitlines()]
+
+
+def transcript_positions(fake, rows):
+    """Map each Iout_A sample to the transcript index of the load current query that produced it."""
+    iout_rows = [r for r in rows if r["quantity"] == "Iout_A"]
+    queries = [i for i, c in enumerate(fake.commands) if c == ("load", "query", ":MEAS:CURR?")]
+    # Every load current query on this path belongs to exactly one guarded cycle.
+    assert len(queries) == len(iout_rows)
+    return {r["sample_id"]: i for r, i in zip(iout_rows, queries)}, iout_rows
+
+
+def test_load_enable_follows_the_fifth_source_only_cycle_in_the_transcript(tmp_path, monkeypatch):
+    fake = bench(tmp_path, monkeypatch)
+    p, errors, _ = plan(loads=(.1, .25))
+    assert not errors
+    path = run_real(p, fake.config, fake.out, confirmation=confirmed(p))
+    run = json.loads((path / "run.json").read_text())
+    assert run["execution_status"] == "completed" and all(pt["qualification"] == "valid" for pt in run["points"])
+    enables = [i for i, c in enumerate(fake.commands) if c == ("load", "write", ":SOUR:INP:STAT ON")]
+    assert len(enables) == 1
+    positions, iout_rows = transcript_positions(fake, samples(path))
+    unloaded = [r for r in iout_rows if r["acquisition_settings"]["load_enabled"] is False]
+    loaded = [r for r in iout_rows if r["acquisition_settings"]["load_enabled"] is True]
+    # Exactly the five source-only starting cycles were completed before the enable command was written.
+    assert len(unloaded) == 5 and {r["phase"] for r in unloaded} == {"starting"}
+    assert max(positions[r["sample_id"]] for r in unloaded) < enables[0] < min(positions[r["sample_id"]] for r in loaded)
+    # The same ordering holds on the sample clock, and the five loaded starting cycles follow the enable.
+    assert max(r["query_end_monotonic_s"] for r in unloaded) < min(r["query_start_monotonic_s"] for r in loaded)
+    assert len([r for r in loaded if r["phase"] == "starting"]) == 5
+
+
+def test_each_voltage_phase_enables_the_load_once_and_never_inside_its_no_load_window(tmp_path, monkeypatch):
+    fake = bench(tmp_path, monkeypatch)
+    p, errors, _ = plan(volts=(24., 20.), loads=(0., .1))
+    assert not errors and [row.status for row in p.points] == ["executable"] * 4
+    path = run_real(p, fake.config, fake.out, confirmation=confirmed(p))
+    run = json.loads((path / "run.json").read_text())
+    assert run["execution_status"] == "completed" and run["executed_point_ids"] == ["p0001", "p0002", "p0003", "p0004"]
+    assert [pt["observation"] for pt in run["points"]] == ["enabled_no_load", "loaded"] * 2
+    assert all(pt["qualification"] == "valid" for pt in run["points"])
+    enables = [i for i, c in enumerate(fake.commands) if c == ("load", "write", ":SOUR:INP:STAT ON")]
+    assert len(enables) == 2 and writes(fake, "load").count(":SOUR:INP:STAT ON") == 2
+    positions, iout_rows = transcript_positions(fake, samples(path))
+    window = lambda point_id: [positions[r["sample_id"]] for r in iout_rows if r["point_id"] == point_id]
+    for no_load_id, loaded_id, enable in (("p0001", "p0002", enables[0]), ("p0003", "p0004", enables[1])):
+        # The phase's gate, no-load settling and no-load acquisition all precede its single enable;
+        # every loaded cycle of the phase follows it.
+        assert max(window(no_load_id)) < enable < min(window(loaded_id))
+        assert all(r["acquisition_settings"]["load_enabled"] is False for r in iout_rows if r["point_id"] == no_load_id)
+        assert all(r["acquisition_settings"]["load_enabled"] is True for r in iout_rows if r["point_id"] == loaded_id)
+    # The first phase's enable is not carried into the second phase's no-load window.
+    assert enables[0] < min(window("p0003"))
+
+
+def test_no_load_point_aborts_when_the_load_input_reports_on_after_the_gate(tmp_path, monkeypatch):
+    fake = bench(tmp_path, monkeypatch)
+    gate = ConfiguredProcedure.startup_gate
+
+    def gate_then_load_turns_on_externally(procedure, ctx, point):
+        gate(procedure, ctx, point)
+        fake.sessions["load"].enabled = True  # e.g. a front-panel press; no command was written
+
+    monkeypatch.setattr(ConfiguredProcedure, "startup_gate", gate_then_load_turns_on_externally)
+    p, _, _ = plan(loads=(0., .1))
+    path = run_real(p, fake.config, fake.out, confirmation=confirmed(p))
+    run = json.loads((path / "run.json").read_text())
+    assert run["execution_status"] == "aborted" and "requires the load input OFF" in run["errors"][0]
+    assert [pt["qualification"] for pt in run["points"]] == ["inconclusive", "not-run"]
+    assert ":SOUR:INP:STAT ON" not in writes(fake, "load")
+    assert {r["phase"] for r in samples(path)} == {"starting"}
+    assert all(s == {"state": "OFF", "verified": True} for s in run["shutdown"].values())
+    verify_integrity(path)
+
+
+def test_no_load_request_after_a_loaded_point_aborts_even_when_the_planner_is_bypassed(tmp_path, monkeypatch):
+    from dcdc_bench.extended import _run_fixed
+    from dcdc_bench.planning import _hash_payload
+    fake = bench(tmp_path, monkeypatch)
+    p, _, _ = plan(loads=(.1, 0.))
+    assert [row.status for row in p.points] == ["executable", "unsupported"]
+    forged = p.model_copy(deep=True)
+    forged.points[1].status = "executable"
+    forged.plan_hash = _hash_payload(forged.model_dump(mode="json", exclude={"plan_hash"}))
+    path = _run_fixed(fake.config, fake.out, arm=True, procedure=ConfiguredProcedure(forged, confirmed(forged)))
+    run = json.loads((path / "run.json").read_text())
+    assert run["execution_status"] == "aborted" and "not acquired after a loaded point" in run["errors"][0]
+    assert [pt["qualification"] for pt in run["points"]] == ["valid", "inconclusive"]
+    assert writes(fake, "load").count(":SOUR:INP:STAT ON") == 1
+    assert not any(r["point_id"] == "p0002" for r in samples(path))
+    assert all(s == {"state": "OFF", "verified": True} for s in run["shutdown"].values())
+
+
+def test_enable_load_refuses_a_no_load_request_without_touching_the_load():
+    p, _, _ = plan(loads=(0., .1))
+    procedure = ConfiguredProcedure(p, confirmed(p))
+
+    class Untouchable:
+        def __getattr__(self, name):
+            raise AssertionError(f"load.{name} must not be used for a no-load request")
+
+    with pytest.raises(ExtendedAbort, match="never enabled for an enabled no-load observation"):
+        procedure.enable_load(SimpleNamespace(load=Untouchable()), {"iout_target_A": 0.})
+    assert procedure.load_enabled is False
+
+
+@pytest.mark.parametrize("key", ["load_enabled", "load_input_readback"])
+def test_analysis_rejects_a_valid_no_load_claim_whose_samples_show_the_load_enabled(tmp_path, monkeypatch, key):
+    from dcdc_bench.analysis import analyze_evidence
+    from dcdc_bench.domain import Plan
+    fake = bench(tmp_path, monkeypatch)
+    p, _, _ = plan(loads=(0.,))
+    path = run_real(p, fake.config, fake.out, confirmation=confirmed(p))
+    saved = Plan.model_validate_json((path / "plan.json").read_text())
+    run = json.loads((path / "run.json").read_text())
+    rows = samples(path)
+    assert analyze_evidence(saved, run, rows)["points"][0]["qualification"] == "valid"
+    tampered_cycle = run["points"][0]["acquisition_cycle_ids"][2]
+    tampered = [{**r, "acquisition_settings": {**r["acquisition_settings"], key: True}}
+                if r["acquisition_cycle_id"] == tampered_cycle else r for r in rows]
+    with pytest.raises(ValueError, match="enabled no-load point with the load input enabled"):
+        analyze_evidence(saved, run, tampered)
+
+
+@pytest.mark.parametrize("response, offset", [("0.011", .011), ("-0.0004", -.0004)])
+def test_zero_current_readback_offset_is_evidence_not_output_current(tmp_path, monkeypatch, response, offset):
+    from dcdc_bench.analysis import analyze_run
+    fake = bench(tmp_path, monkeypatch, query_overrides={("load", ":MEAS:CURR?"): response})
+    p, _, _ = plan(loads=(0.,))
+    path = run_real(p, fake.config, fake.out, confirmation=confirmed(p))
+    run = json.loads((path / "run.json").read_text())
+    point = run["points"][0]
+    assert run["execution_status"] == "completed" and point["qualification"] == "valid"
+    assert point["observation"] == "enabled_no_load" and point["load_input_state"] == "OFF"
+    assert point["load_readback_offset_A"] == pytest.approx(offset)
+    assert ":SOUR:INP:STAT ON" not in writes(fake, "load")
+    analysis = json.loads((analyze_run(path) / "analysis.json").read_text())
+    result = analysis["points"][0]
+    assert result["qualification"] == "valid" and "unexpected_sign" not in result["metric_flags"]
+    assert result["load_readback_offset_A"] == pytest.approx(offset) and result["Iout_A"] == pytest.approx(offset)
+    assert result["efficiency_pct"] is None and result["Pout_W"] is None and result["loss_W"] is None
+    assert result["enabled_no_load_consumption_W"] == pytest.approx(result["Vin_V"] * result["Iin_A"])
+    assert result["enabled_no_load_consumption_W"] == pytest.approx(24 * .01, rel=1e-6)
+    verify_integrity(path)
+
+
+def test_cancel_during_the_no_load_window_aborts_with_outputs_off_and_no_load_enable(tmp_path, monkeypatch):
+    fake = bench(tmp_path, monkeypatch)
+    p, _, _ = plan(loads=(0., .1))
+    cancel = tmp_path / "cancel"
+    append = RunStore.append
+
+    def record(store, stream, row):
+        result = append(store, stream, row)
+        if stream == "samples" and row["point_id"] == "p0001" and row["phase"] == "acquiring":
+            cancel.touch()
+        return result
+
+    monkeypatch.setattr(RunStore, "append", record)
+    path = run_real(p, fake.config, fake.out, confirmation=confirmed(p), cancel=cancel)
+    run = json.loads((path / "run.json").read_text())
+    assert run["execution_status"] == "aborted" and "cancellation" in run["errors"][0]
+    assert [pt["qualification"] for pt in run["points"]] == ["inconclusive", "not-run"]
+    assert ":SOUR:INP:STAT ON" not in writes(fake, "load")
+    rows = samples(path)
+    assert all(r["acquisition_settings"]["load_enabled"] is False for r in rows) and "acquiring" in {r["phase"] for r in rows}
+    assert all(s == {"state": "OFF", "verified": True} for s in run["shutdown"].values())
+    verify_integrity(path)
+
+
+def test_output_sag_during_no_load_settling_aborts_before_any_load_enable(tmp_path, monkeypatch):
+    fake = bench(tmp_path, monkeypatch)
+    from dcdc_bench.extended import ExtendedRigol
+    gate, read, state = ConfiguredProcedure.startup_gate, ExtendedRigol.read, {"gated": False}
+
+    def gate_then_sag(procedure, ctx, point):
+        gate(procedure, ctx, point)
+        state["gated"] = True
+
+    def sagging(pilot, quantity):
+        value = read(pilot, quantity)
+        return 10.7 if quantity == "Vout_V" and state["gated"] else value  # below 0.9 x 12 V = 10.8 V
+
+    monkeypatch.setattr(ConfiguredProcedure, "startup_gate", gate_then_sag)
+    monkeypatch.setattr(ExtendedRigol, "read", sagging)
+    p, _, _ = plan(loads=(0., .1))
+    path = run_real(p, fake.config, fake.out, confirmation=confirmed(p))
+    run = json.loads((path / "run.json").read_text())
+    assert run["execution_status"] == "aborted" and "Output below startup/operating threshold" in run["errors"][0]
+    assert [pt["qualification"] for pt in run["points"]] == ["inconclusive", "not-run"]
+    assert ":SOUR:INP:STAT ON" not in writes(fake, "load")
+    rows = samples(path)
+    assert len([r for r in rows if r["phase"] == "settling"]) == 4 and "acquiring" not in {r["phase"] for r in rows}
+    assert all(s == {"state": "OFF", "verified": True} for s in run["shutdown"].values())
+    verify_integrity(path)
+
+
+def test_time_estimate_budgets_the_loaded_startup_cycles_that_follow_a_no_load_acquisition():
+    seconds = lambda **kw: plan(**kw)[2]
+    # Same eligible point count and phase count; the no-load-first phase enables its load later.
+    assert seconds(loads=(0., .1, .25)) == seconds(loads=(.05, .1, .25)) + 5
+    # A phase with no loaded request never enables the load, so nothing is added.
+    assert seconds(loads=(0.,)) == seconds(loads=(.1,))
+    assert seconds(volts=(24., 20.), loads=(0., .1)) == seconds(volts=(24., 20.), loads=(.05, .1)) + 10
+    p, errors, estimate = plan(volts=(24., 20.), loads=(0., .1))
+    assert not errors and estimate < 540 and verify_plan_hash(p)
+
+
+def test_samples_record_the_load_input_readback_beside_the_requested_flag(tmp_path, monkeypatch):
+    fake = bench(tmp_path, monkeypatch)
+    p, _, _ = plan(loads=(0., .1))
+    path = run_real(p, fake.config, fake.out, confirmation=confirmed(p))
+    rows = samples(path)
+    assert rows and all("load_input_readback" in r["acquisition_settings"] for r in rows)
+    assert all(r["acquisition_settings"]["load_input_readback"] is False for r in rows if r["point_id"] == "p0001")
+    assert all(r["acquisition_settings"]["load_input_readback"] is True for r in rows if r["point_id"] == "p0002")
+    # The readback agrees with the requested flag in every preserved cycle (verify_running aborts otherwise).
+    assert all(r["acquisition_settings"]["load_input_readback"] is r["acquisition_settings"]["load_enabled"] for r in rows)
+    verify_integrity(path)
