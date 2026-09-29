@@ -1,6 +1,7 @@
 """WEB-11 in a real offline browser: marker positions survive resize and reload; keyboard access works.
 
-Marked ``browser``: needs Playwright's Chromium and is excluded on the bench Pi.
+Marked ``browser``: drives the same system Chromium the renderer uses
+(``_browser_path``), so no Playwright-managed browser download is required.
 """
 import io
 import json
@@ -9,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from dcdc_bench.reporting.renderer import TEMPLATES
+from dcdc_bench.reporting.renderer import TEMPLATES, _browser_path
 from dcdc_bench.reporting.sensor_placement import sensor_placement_html
 
 pytestmark = pytest.mark.browser
@@ -58,14 +59,17 @@ def test_WEB11_markers_stay_on_the_same_physical_spot_across_resize_and_reload(t
     sync_api = pytest.importorskip("playwright.sync_api")
     fixture = _fixture(tmp_path)
     with sync_api.sync_playwright() as playwright:
-        browser = playwright.chromium.launch()
+        browser = playwright.chromium.launch(executable_path=_browser_path(), headless=True,
+            args=["--disable-dev-shm-usage", "--disable-gpu", "--no-sandbox", "--renderer-process-limit=1"])
         page = browser.new_page(viewport={"width": 1200, "height": 900})
         page.route("**/*", lambda route: route.continue_() if route.request.url.startswith("file://") else route.abort())
         page.goto(fixture.as_uri())
         page.wait_for_selector('.sensor-placement-block[data-sensor-ready="true"]')
         wide_image = page.evaluate("() => document.querySelector('img.sensor-image').getBoundingClientRect().width")
         _assert_on_spot(page.evaluate(RATIOS))
-        page.set_viewport_size({"width": 420, "height": 800})
+        # Narrower than the 400 px fixture photograph plus body margins, so the
+        # image must actually scale for the resize half of WEB-11 to mean anything.
+        page.set_viewport_size({"width": 320, "height": 800})
         page.wait_for_timeout(400)
         narrow_image = page.evaluate("() => document.querySelector('img.sensor-image').getBoundingClientRect().width")
         assert narrow_image < wide_image, "the photograph actually shrank with the viewport"
