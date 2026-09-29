@@ -63,8 +63,10 @@ def test_render_manifest_hashes_actual_renderer_theme_and_interaction_source(tmp
     (templates / "web").mkdir()
     (templates / "characterization.qmd").write_text("fixture template\n")
     theme = templates / "theme/report.css"
+    tables = templates / "theme/print-tables.typ"
     script = templates / "web/report.js"
     theme.write_text("body { color: blue; }\n")
+    tables.write_text("#show table: it => it\n")
     script.write_text("/* first interaction source */\n")
     monkeypatch.setattr(renderer, "TEMPLATES", templates)
     monkeypatch.setattr(renderer, "_browser_path", lambda: None)
@@ -86,12 +88,15 @@ def test_render_manifest_hashes_actual_renderer_theme_and_interaction_source(tmp
         return manifest["render_sources_sha256"]
 
     first = record(tmp_path / "r0001")
-    expected = {"renderer.py": Path(renderer.__file__), "report.css": theme, "report.js": script}
+    expected = {"renderer.py": Path(renderer.__file__), "report.css": theme, "print-tables.typ": tables,
+                "report.js": script}
     assert first == {name: hashlib.sha256(path.read_bytes()).hexdigest()
                      for name, path in expected.items()}
     theme.write_text("body { color: purple; }\n")
+    tables.write_text("#show table: it => block(breakable: false, it)\n")
     script.write_text("/* second interaction source */\n")
     second = record(tmp_path / "r0002")
     assert first["renderer.py"] == second["renderer.py"]
     assert first["report.css"] != second["report.css"]
+    assert first["print-tables.typ"] != second["print-tables.typ"]
     assert first["report.js"] != second["report.js"]
