@@ -1166,6 +1166,20 @@ def _record_pdf_check(manifest: dict, artifact: Path, model: dict) -> None:
             note="PDF not verified: tool missing (" + ", ".join(missing) + "); the pagination check (PDF-02) could not run")
 
 
+def _print_header(identity: str) -> str:
+    """Typst header include for the PDF: running identity, type, heading and table pagination rules."""
+    # JSON string syntax is also a valid Typst quoted string; user text is never raw code.
+    return ('#set page(numbering: "1 / 1", header: text(size: 7pt, fill: rgb("516677"), '
+            + json.dumps(identity, ensure_ascii=False) + '))\n'
+            '#set text(font: ("DejaVu Sans", "Liberation Sans"), fill: rgb("183047"))\n'
+            # A sticky heading travels with the block after it, so a table moved
+            # whole to the next page never strands its heading (brief §12.6).
+            '#show heading: it => { block(above: 1.2em, below: 0.5em, sticky: true, it) }\n'
+            '#set par(justify: false)\n'
+            # Tables up to half a page never split; taller ones keep their last two rows together.
+            + (TEMPLATES / "theme/print-tables.typ").read_text(encoding="utf-8"))
+
+
 def _version(package: str) -> str | None:
     try:
         return importlib.metadata.version(package)
@@ -1379,6 +1393,7 @@ def _render_report(report_model: dict, out_dir: Path, formats=("html", "pdf")) -
         "render_sources_sha256": {
             "renderer.py": _sha(Path(__file__).resolve()),
             "report.css": _sha(TEMPLATES / "theme/report.css"),
+            "print-tables.typ": _sha(TEMPLATES / "theme/print-tables.typ"),
             "report.js": _sha(TEMPLATES / "web/report.js"),
         }}
     gate_record = out / "memory_gate.json"
@@ -1447,13 +1462,7 @@ def _render_report(report_model: dict, out_dir: Path, formats=("html", "pdf")) -
             + '<script>' + script + '</script>'
         (out / "interactions.html").write_text(runtime_slot + '\n', encoding="utf-8")
         identity = f"{model.get('evidence_label','')} · {_identity(model)} · {model['run_id']}"
-        # JSON string syntax is also a valid Typst quoted string; user text is never raw code.
-        print_header = ('#set page(numbering: "1 / 1", header: text(size: 7pt, fill: rgb("516677"), '
-            + json.dumps(identity, ensure_ascii=False) + '))\n'
-            '#set text(font: ("DejaVu Sans", "Liberation Sans"), fill: rgb("183047"))\n'
-            '#show heading: it => { block(above: 1.2em, below: 0.5em, it) }\n'
-            '#set par(justify: false)\n')
-        (out / "print-header.typ").write_text(print_header, encoding="utf-8")
+        (out / "print-header.typ").write_text(_print_header(identity), encoding="utf-8")
         source = (TEMPLATES / "characterization.qmd").read_text(encoding="utf-8")
         source = source.replace("__TITLE__", json.dumps(_md(model.get("title", f"{_identity(model)} characterization"))))
         source = source.replace("__SUBTITLE__", json.dumps(_md(identity + " · " + model["analysis_id"])))
