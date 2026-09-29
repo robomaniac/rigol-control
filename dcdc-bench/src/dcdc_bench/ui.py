@@ -10,8 +10,9 @@ import json
 import sys
 from pathlib import Path
 
-from .ui_models import (artifact_url, edited_dut, edited_recipe, job_actions, job_title, plan_rows, quantity,
-                        report_link_rows, shutdown_label, state_label)
+from .ui_models import (activity_text, artifact_url, edited_dut, edited_recipe, elapsed_text, event_text, job_actions,
+                        job_title, local_time_text, plan_rows, quantity, report_became_ready, report_link_rows,
+                        saved_runs_key, shutdown_label, state_label, time_legend)
 
 
 STYLE = '''
@@ -30,6 +31,8 @@ body{background:#f3f6f8;color:#183047;font-family:system-ui,sans-serif}
 .bench-shell .q-tab-panels{background:transparent;width:100%}.bench-shell .q-tab-panel{padding:20px 0}
 .bench-shell .q-field{width:100%}.bench-shell .q-checkbox__label{overflow-wrap:anywhere}
 .bench-shell pre{white-space:pre-wrap;overflow-wrap:anywhere}.bench-artifact{font-weight:600;color:#15608f}
+.bench-activity{background:#e3f1f6;border:1px solid #b9d7e4;border-radius:999px;padding:8px 18px;cursor:pointer;max-width:100%}
+.bench-activity-text{font-weight:650;color:#15608f}
 @media(max-width:680px){.bench-shell{padding:14px}.bench-card{padding:16px}.bench-fields{grid-template-columns:1fr}.bench-title{font-size:25px}.bench-stat{min-width:125px}}
 '''
 
@@ -232,7 +235,10 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
         state = {'preview': None, 'job_id': None, 'loading': False, 'polling': False,
                  'profiles': {}, 'selected': {}, 'fields': {}, 'confirm': {}, 'jobs': [],
                  'generation': 0, 'loads': {}, 'pending_loads': set(), 'preview_busy': False,
-                 'active': False, 'active_job_id': None}
+                 'active': False, 'active_job_id': None,
+                 # job_id -> saved_runs_key of the last snapshot this page showed; drives the
+                 # Reports-tab auto-refresh and the "Report ready" notice from the same poll.
+                 'seen': {}}
         selectors = {}
         status_widgets = {}
         panels = {}
@@ -624,6 +630,10 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                     ui.label('The measurements are saved and both outputs are verified OFF. Report generation is queued and starts automatically when no test is running and enough memory is free.'
                              + (' Waiting: ' + str(snapshot['deferred_reason']) + '.' if snapshot.get('deferred_reason') else '')).classes('bench-message')
                 ui.label('Run ' + str(snapshot.get('run_id') or snapshot['job_id'])).classes('bench-muted')
+                # Local wall-clock display only; job.json and the run evidence keep UTC.
+                for key, label in [('created_utc', 'Started'), ('queued_utc', 'Report queued'), ('dispatched_utc', 'Report started')]:
+                    if snapshot.get(key):
+                        ui.label(f'{label}: {local_time_text(snapshot[key])}').classes('bench-muted')
                 progress = snapshot.get('progress') or {}
                 complete, total = progress.get('completed', 0), progress.get('total', 0)
                 ui.linear_progress(value=complete / total if total else 0, show_value=False).props('rounded size=10px').classes('w-full')
@@ -682,7 +692,7 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                 if events:
                     with ui.expansion('Recent events', icon='list').classes('w-full'):
                         for event in events[-12:]:
-                            ui.label(str(event)).classes('bench-muted')
+                            ui.label(event_text(event)).classes('bench-muted')
 
         async def select_job(job_id):
             state['job_id'] = job_id
@@ -703,6 +713,7 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
             if client.is_deleted or jobs is None:
                 return
             remember_jobs(jobs)
+            state['seen'].update({job['job_id']: saved_runs_key(job) for job in jobs})
             panels['reports'].clear()
             with panels['reports']:
                 if not jobs:
@@ -715,6 +726,35 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                         ui.button('View run', on_click=lambda _, job_id=job['job_id']: select_job(job_id)).props('flat no-caps')
                         report_links(job)
 
+        def show_activity(snapshot):
+            """Header spinner and phrase, visible from every tab; hidden when nothing works in the background."""
+            phrase = activity_text(snapshot)
+            if not phrase:
+                status_widgets['activity'].set_visibility(False)
+                return
+            status_widgets['activity_text'].set_text(phrase)
+            started = snapshot.get('created_utc')
+            detail = str(snapshot.get('dut_model') or 'Converter test')
+            if elapsed_text(started):
+                detail += ' · started ' + local_time_text(started) + ' · elapsed ' + elapsed_text(started)
+            status_widgets['activity_detail'].set_text(detail)
+            status_widgets['activity'].set_visibility(True)
+
+        async def note_transitions(snapshots):
+            """Reports-tab bookkeeping from the poll: refresh the saved-runs list when a polled job's
+            state or report links changed since the page last showed it; announce a report that
+            became available. Nothing happens on ticks without a change."""
+            stale = False
+            for snapshot in snapshots:
+                key = saved_runs_key(snapshot)
+                previous = state['seen'].get(snapshot['job_id'])
+                state['seen'][snapshot['job_id']] = key
+                stale = stale or previous != key
+                if report_became_ready(previous, key):
+                    ui.notify('Report ready: ' + str(snapshot.get('run_id') or snapshot['job_id']), type='positive', timeout=10000)
+            if stale:
+                await refresh_reports()
+
         async def poll():
             if state['polling'] or not state['job_id']:
                 return
@@ -724,11 +764,12 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                 snapshot = await run.io_bound(service.status, job_id)
                 if client.is_deleted or snapshot is None or state['job_id'] != job_id:
                     return
+                busy = None
                 if snapshot.get('state') in ('queued', 'acquiring', 'reporting'):
                     state['active'], state['active_job_id'] = True, job_id
                 elif state['active_job_id'] and state['active_job_id'] != job_id:
                     busy = await run.io_bound(service.status, state['active_job_id'])
-                    if state['job_id'] != job_id:
+                    if client.is_deleted or busy is None or state['job_id'] != job_id:
                         return
                     state['active'] = busy.get('state') in ('queued', 'acquiring', 'reporting')
                     if not state['active']:
@@ -738,6 +779,9 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                 if 'start' in status_widgets:
                     status_widgets['start'].set_enabled(can_start())
                 show_status(snapshot)
+                # The indicator follows whichever job is still working, even while an older run is displayed.
+                show_activity(snapshot if activity_text(snapshot) else busy)
+                await note_transitions([snapshot] + ([busy] if busy else []))
             except (ValueError, OSError, RuntimeError) as exc:
                 if state['job_id'] != job_id:
                     return
@@ -751,6 +795,16 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
         with ui.column().classes('bench-shell gap-5'):
             ui.label('DC–DC Bench').classes('bench-title')
             ui.label('Choose a converter, preview the limits, then measure efficiency and generate an interactive report.').classes('bench-subtitle')
+            # Background-activity pill: outside the tab panels so it is visible from every tab.
+            # poll() fills it and shows/hides it; it starts hidden until a job is polled.
+            with ui.row().classes('bench-activity items-center gap-3').props('role=status aria-live=polite') as activity:
+                ui.spinner(size='sm', color='primary')
+                status_widgets['activity_text'] = ui.label('').classes('bench-activity-text')
+                status_widgets['activity_detail'] = ui.label('').classes('bench-muted')
+            activity.tooltip('Work in progress on the bench computer. Click to open the Run tab.')
+            activity.on('click', lambda: tabs.set_value('Run'))
+            activity.set_visibility(False)
+            status_widgets['activity'] = activity
             with ui.tabs().classes('bench-tabs w-full') as tabs:
                 for name, icon in [('Bench', 'electrical_services'), ('DUT and recipe', 'tune'), ('Run', 'play_circle'), ('Reports', 'description')]:
                     ui.tab(name, icon=icon).props('aria-label=' + json.dumps(name))
@@ -789,6 +843,7 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                     ui.button('Refresh saved runs', on_click=refresh_reports, icon='refresh').props('flat no-caps aria-label="Refresh saved runs"')
                     panels['reports'] = ui.column().classes('w-full gap-4')
             ui.label('Local bench control · Data stays in your workspace · Closing this tab does not restart or cancel acquisition.').classes('bench-muted')
+            ui.label(time_legend()).classes('bench-muted')
             ui.link('Sensor placement editor — add photographs and sensor markers to a finished run', '/annotations').classes('bench-artifact')
         await refresh_reports()
         active = next((job for job in state['jobs'] if job.get('state') in

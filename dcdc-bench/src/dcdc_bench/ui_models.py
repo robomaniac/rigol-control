@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import copy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 import math
 import re
 from pathlib import PurePosixPath
@@ -132,13 +132,11 @@ def state_label(snapshot: dict) -> str:
     return labels.get(state, state.replace('_', ' ').capitalize())
 
 
-def job_title(snapshot: dict) -> str:
+def job_title(snapshot: dict, *, zone: tzinfo | None = None) -> str:
+    """'<converter> · <local start time>'; the time is omitted when the record has none."""
     name = str(snapshot.get('dut_model') or 'Converter test')
-    try:
-        timestamp = datetime.fromisoformat(snapshot.get('created_utc', '')).astimezone(timezone.utc)
-    except (ValueError, TypeError):
-        return name
-    return name + ' · ' + timestamp.strftime('%d %b %Y, %H:%M UTC')
+    started = local_time_text(snapshot.get('created_utc'), zone=zone)
+    return name if started == UNKNOWN_TIME else name + ' · ' + started
 
 
 def shutdown_label(snapshot: dict) -> str:
@@ -151,3 +149,113 @@ def shutdown_label(snapshot: dict) -> str:
             str(record.get('state', '')).upper() == 'OFF' for record in shutdown.values()):
         return 'Supply output and electronic load are verified OFF.'
     return 'Output shutdown is not fully verified. Check the instruments before touching the wiring.'
+
+
+# --- Operator-facing time display -------------------------------------------
+# Evidence files record UTC (spec §8.2). The page shows the bench computer's
+# local wall clock instead, because that is the clock on the operator's wrist;
+# nothing here is written back to disk.
+
+UNKNOWN_TIME = 'unknown'
+LOCAL_TIME_FORMAT = '%H:%M:%S %Z (%Y-%m-%d)'
+
+
+def _parse_utc(iso_utc) -> datetime | None:
+    if not isinstance(iso_utc, str) or not iso_utc.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(iso_utc.strip())
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+
+
+def local_time_text(iso_utc, *, zone: tzinfo | None = None) -> str:
+    """An ISO UTC instant as '13:40:12 PDT (2026-09-29)' in the bench computer's local zone.
+
+    ``zone`` defaults to the system zone through ``datetime.astimezone()``; it is
+    a parameter only so tests do not depend on the machine they run on. A naive
+    string is taken as UTC (how the workers write it). ``None`` or unparsable
+    input gives ``'unknown'`` rather than a misleading time.
+    """
+    parsed = _parse_utc(iso_utc)
+    if parsed is None:
+        return UNKNOWN_TIME
+    return parsed.astimezone(zone).strftime(LOCAL_TIME_FORMAT)
+
+
+def local_zone_name(zone: tzinfo | None = None) -> str:
+    """The abbreviation the page shows for its clock, e.g. 'PDT'."""
+    return datetime.now(timezone.utc).astimezone(zone).tzname() or 'local time'
+
+
+def time_legend(zone: tzinfo | None = None) -> str:
+    return f'Times shown in bench-computer local time ({local_zone_name(zone)}); evidence files record UTC.'
+
+
+def elapsed_text(iso_utc, now: datetime | None = None) -> str:
+    """Wall-clock time since ``iso_utc`` as 'm:ss' or 'h:mm:ss'; '' when the start is unknown."""
+    started = _parse_utc(iso_utc)
+    if started is None:
+        return ''
+    seconds = int(max(timedelta(0), (now or datetime.now(timezone.utc)) - started).total_seconds())
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f'{hours}:{minutes:02d}:{secs:02d}' if hours else f'{minutes}:{secs:02d}'
+
+
+def event_text(event, *, zone: tzinfo | None = None) -> str:
+    """One recorded run event as '<local time> · <kind> key=value …' for the Recent events list."""
+    if not isinstance(event, dict):
+        return str(event)
+    hidden = {'event', 'timestamp_utc', 'run_id', 'monotonic_s'}
+    details = ' '.join(f'{key}={value}' for key, value in event.items() if key not in hidden)
+    text = local_time_text(event.get('timestamp_utc'), zone=zone) + ' · ' + str(event.get('event', 'event'))
+    return text + (' ' + details if details else '')
+
+
+# --- Background-activity indicator and Reports-tab freshness -----------------
+
+# Job states during which some process is still working for the operator: the
+# acquisition worker, the report dispatcher's queue, or the report-only worker.
+ACTIVITY_STATES = ('queued', 'starting', 'running', 'acquiring', 'stopping', 'cancel_requested',
+                   'analyzing', 'rendering', 'reporting', 'report-queued')
+
+
+def activity_text(snapshot: dict | None) -> str:
+    """Short header phrase for work in progress; '' when the job needs no indicator."""
+    if not snapshot:
+        return ''
+    state = str(snapshot.get('state', ''))
+    if state not in ACTIVITY_STATES:
+        return ''
+    if snapshot.get('cancel_requested') or state in ('stopping', 'cancel_requested'):
+        return 'Stopping… waiting for both outputs to be verified OFF'
+    if state == 'queued':
+        return 'Queued — waiting for the worker to start'
+    if state == 'starting':
+        return 'Starting — checking the bench'
+    if state in ('running', 'acquiring'):
+        progress = snapshot.get('progress') or {}
+        total = progress.get('total') or 0
+        if total:
+            return f'Acquiring… point {min((progress.get("completed") or 0) + 1, total)} of {total}'
+        return 'Acquiring… preparing the run'
+    if state == 'report-queued':
+        reason = snapshot.get('deferred_reason')
+        return 'Report queued — waiting: ' + str(reason) if reason else 'Report queued — starts when the bench is idle'
+    return 'Generating report…'
+
+
+def saved_runs_key(snapshot: dict) -> tuple:
+    """What the saved-runs list shows for a job: its state and the report links it offers.
+
+    The Reports tab is refreshed when this changes between polls, so the list
+    follows the job without a busy loop or a manual Refresh.
+    """
+    return (str(snapshot.get('state')), tuple(relative for _, relative in report_link_rows(snapshot)))
+
+
+def report_became_ready(previous: tuple | None, current: tuple) -> bool:
+    """A kept report appeared for a job the page had already seen without one."""
+    return previous is not None and not previous[1] and bool(current[1])
