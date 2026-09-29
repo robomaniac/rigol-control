@@ -319,6 +319,27 @@ def test_diagnostics_folder_inside_a_run_folder_is_refused(tmp_path, monkeypatch
     assert fake.sessions == {}
 
 
+def test_doctor_out_never_overwrites_and_only_writes_a_new_json_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("DCDC_DIAGNOSTICS_DIR", str(tmp_path / "diagnostics"))
+    fake = make_fake(tmp_path, monkeypatch)
+    existing = tmp_path / "diagnostics" / "existing.json"
+    existing.parent.mkdir()
+    existing.write_text('{"kept": true}')
+    with pytest.raises(DoctorRefusal, match="never overwrites"):
+        run_doctor(bench_file(tmp_path), fake.inventory, out=existing)
+    assert existing.read_text() == '{"kept": true}'
+    with pytest.raises(DoctorRefusal, match=r"\.json"):
+        run_doctor(bench_file(tmp_path), fake.inventory, out=tmp_path / "diagnostics" / "bench-profile.yaml")
+    published = tmp_path / "public" / "run" / "r0001"
+    published.mkdir(parents=True)
+    (published / "publication_manifest.json").write_text("{}")
+    with pytest.raises(DoctorRefusal, match="publication copy"):
+        run_doctor(bench_file(tmp_path), fake.inventory, out=published / "doctor.json")
+    assert fake.sessions == {}, "every refusal happens before an instrument is opened"
+    target, diagnosis = run_doctor(bench_file(tmp_path), fake.inventory, out=tmp_path / "diagnostics" / "fresh.json")
+    assert target == tmp_path / "diagnostics" / "fresh.json" and json.loads(target.read_text())["kind"] == "doctor"
+
+
 def test_doctor_never_uses_the_write_paths_of_the_real_drivers(tmp_path, monkeypatch):
     """Guard against a future driver read method starting to drain the error queue."""
     from benchctl.drivers.rigol_dl3000 import RigolDL3000

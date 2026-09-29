@@ -390,6 +390,14 @@ def run_doctor(bench_path: Path, inventory_path: Path, *, out: Path | None = Non
     if out is not None:
         out = Path(out)
         diagnostics_dir(out.parent)
+        # The diagnosis names endpoints and serials: it only ever goes to a new
+        # .json file, never over a profile, job record, approval or published copy.
+        if out.suffix.lower() != ".json":
+            raise DoctorRefusal(f"--out {out} must name a new .json file")
+        if out.is_symlink() or out.exists():
+            raise DoctorRefusal(f"--out {out} already exists; the doctor never overwrites a file")
+        if (out.parent / "publication_manifest.json").exists():
+            raise DoctorRefusal(f"--out {out} is inside a publication copy; diagnostics are not for publication")
     now = datetime.now(timezone.utc)
     stamp = now.strftime("%Y%m%dT%H%M%S.%fZ")
     target = out if out is not None else folder / f"doctor-{stamp}.json"

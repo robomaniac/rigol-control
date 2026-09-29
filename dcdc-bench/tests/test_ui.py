@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from dcdc_bench.cli import main
-from dcdc_bench.ui import published_file, require_loopback, run_ui
+from dcdc_bench.ui import RequestBodyLimit, file_headers, published_file, require_loopback, run_ui
 from dcdc_bench.ui_models import (artifact_url, edited_dut, edited_recipe, job_actions, job_title, plan_rows, quantity,
                                   report_link_rows, shutdown_label, state_label, target_values)
 
@@ -166,3 +166,87 @@ def test_run_panel_offers_stop_for_live_workers_and_dequeue_for_queued_reports()
     assert job_actions({'state': 'report-queued'}) == ['dequeue']
     for state in ('completed', 'aborted', 'failed', 'cancelled', 'reporting'):
         assert job_actions({'state': state}) == []
+
+
+def test_file_headers_confine_documents_and_download_uploaded_documents():
+    html = file_headers(Path('report.html'), 'report/report.html')
+    assert html['Content-Security-Policy'] == 'sandbox allow-scripts allow-downloads allow-popups'
+    assert 'Content-Disposition' not in html
+    name = 'a' * 64
+    svg = file_headers(Path(f'/w/run/attachments/originals/{name}.svg'), f'run/attachments/originals/{name}.svg')
+    assert svg['Content-Security-Policy'] == 'sandbox' and svg['Content-Disposition'] == f'attachment; filename="{name}.svg"'
+    pdf = file_headers(Path(f'{name}.pdf'), f'run/attachments/originals/{name}.pdf')
+    assert pdf['Content-Security-Policy'] == 'sandbox' and pdf['Content-Disposition'].startswith('attachment;')
+    raster = file_headers(Path(f'{name}.jpg'), f'run/attachments/originals/{name}.jpg')
+    assert raster['Content-Disposition'] == f'inline; filename="{name}.jpg"' and raster['Content-Security-Policy'] == 'sandbox'
+    figure = file_headers(Path('fig-efficiency.svg'), 'report/figures/fig-efficiency.svg')
+    assert figure['Content-Security-Policy'] == 'sandbox' and 'Content-Disposition' not in figure
+    legacy = file_headers(Path('efficiency.csv'))
+    assert legacy['Content-Security-Policy'] == 'sandbox' and 'Content-Disposition' not in legacy
+    for headers in (html, svg, pdf, raster, figure, legacy):
+        assert headers['X-Content-Type-Options'] == 'nosniff' and headers['Cache-Control'] == 'no-store'
+
+
+def test_request_body_limit_refuses_declared_and_streamed_oversize_bodies():
+    import asyncio
+    seen, sent = [], []
+
+    async def inner(scope, receive, send):
+        seen.append(scope['path'])
+        if scope['type'] != 'http':
+            return
+        total = 0
+        while True:
+            message = await receive()
+            if message['type'] != 'http.request':
+                seen.append(message['type'])
+                return
+            total += len(message.get('body', b''))
+            if not message.get('more_body'):
+                seen.append(total)
+                return
+
+    async def send(message):
+        sent.append(message)
+
+    async def never():
+        pytest.fail('an oversized declared body must not be read')
+    guard = RequestBodyLimit(inner, limit=1000)
+    asyncio.run(guard({'type': 'http', 'path': '/_nicegui/client/x/upload/1', 'headers': [(b'content-length', b'5000')]}, never, send))
+    assert seen == [] and sent[0]['status'] == 413
+    chunks = [{'type': 'http.request', 'body': b'x' * 600, 'more_body': True} for _ in range(5)]
+
+    async def receive():
+        return chunks.pop(0)
+    asyncio.run(guard({'type': 'http', 'path': '/upload', 'headers': []}, receive, send))
+    assert seen == ['/upload', 'http.disconnect'] and len(chunks) == 3, 'cut off at the first chunk past the limit'
+    seen.clear()
+    chunks[:] = [{'type': 'http.request', 'body': b'ok', 'more_body': False}]
+    asyncio.run(guard({'type': 'http', 'path': '/small', 'headers': [(b'content-length', b'2')]}, receive, send))
+    assert seen == ['/small', 2]
+    seen.clear()
+    asyncio.run(guard({'type': 'websocket', 'path': '/socket.io'}, never, send))
+    assert seen == ['/socket.io'], 'non-HTTP scopes pass straight through'
+
+
+def test_annotation_editor_is_not_shadowed_by_the_published_file_catch_all(tmp_path, monkeypatch):
+    """The real route table with --report-root set, without starting a server."""
+    from nicegui import app, ui
+    from starlette.routing import Match
+    monkeypatch.setattr(ui, 'run', lambda *args, **kwargs: None)
+    monkeypatch.setattr(app, 'timer', lambda *args, **kwargs: None)
+    monkeypatch.setenv('DCDC_ACTIVITY_LOCK', str(tmp_path / 'activity.lock'))
+    monkeypatch.setenv('DCDC_JOB_LAUNCHER', 'detached')
+    reports = tmp_path / 'Data'
+    (reports / 'Runs').mkdir(parents=True)
+    (reports / 'legacy-report.html').write_text('published')
+    run_ui(tmp_path / 'workspace', report_root=reports)
+
+    def first_match(path):
+        scope = {'type': 'http', 'method': 'GET', 'path': path, 'root_path': '', 'headers': []}
+        return next((route for route in app.routes if route.matches(scope)[0] == Match.FULL), None)
+    assert first_match('/annotations').path == '/annotations'
+    assert first_match('/').path == '/'
+    assert first_match('/legacy-report.html').path == '/{filename}'
+    assert first_match('/Runs/converter/report.html').path == '/Runs/{relative:path}'
+    assert first_match('/jobs/j/files/report/report.html').path == '/jobs/{job_id}/files/{relative:path}'

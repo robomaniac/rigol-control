@@ -270,6 +270,25 @@ class FakeFile:
         return self._data
 
 
+class SizedFile(FakeFile):
+    """Upload object that also reports its size and streams chunks, like NiceGUI's FileUpload."""
+
+    def __init__(self, name, data, size=None, chunk=1024):
+        super().__init__(name, data)
+        self._size, self._chunk = size, chunk
+
+    def size(self):
+        return len(self._data) if self._size is None else self._size
+
+    def iterate(self, *, chunk_size=None):
+        step = chunk_size or self._chunk
+
+        async def chunks():
+            for start in range(0, len(self._data), step):
+                yield self._data[start:start + step]
+        return chunks()
+
+
 def test_editor_page_drives_select_upload_place_nudge_and_save_without_a_server(service, monkeypatch):
     """The page's callbacks against the real JobService; NiceGUI is replaced by a recording stub."""
     import asyncio
@@ -295,6 +314,12 @@ def test_editor_page_drives_select_upload_place_nudge_and_save_without_a_server(
         await ui.last("upload").kwargs["on_upload"](SimpleNamespace(file=FakeFile("evil.svg",
             b'<svg xmlns="http://www.w3.org/2000/svg" width="9" height="9"><script>1</script></svg>')))
         assert ui.notifications[-1][1] == "negative" and "svg_active_content" in ui.notifications[-1][0]
+        # The byte limit is enforced on the server before the body is assembled; a rejected upload leaves no revision.
+        monkeypatch.setattr(annotation_editor, "UPLOAD_LIMIT", 64)
+        await ui.last("upload").kwargs["on_upload"](SimpleNamespace(file=SizedFile("huge.png", png(), size=10 ** 9)))
+        assert ui.notifications[-1][1] == "negative" and "too_large" in ui.notifications[-1][0]
+        monkeypatch.setattr(annotation_editor, "UPLOAD_LIMIT", 4 * len(png()))
+        assert not (path / "attachments/revisions/2.json").exists()
         picker.kwargs["on_change"](SimpleNamespace(value=picker.value))
         image = ui.last("interactive_image")
         assert image.args[0].startswith(f"/jobs/{job_id}/files/run/attachments/originals/")
@@ -331,3 +356,64 @@ def test_editor_page_drives_select_upload_place_nudge_and_save_without_a_server(
     service.dispatch_reports()
     assert service.status(job_id)["state"] == "queued" and service.status(job_id).get("action") == "report-only"
     verify_integrity(path)
+
+
+def test_upload_size_is_enforced_server_side_before_the_body_is_assembled():
+    import asyncio
+    from dcdc_bench.annotation_editor import read_upload
+    data = png()
+
+    class Untouchable(SizedFile):
+        async def read(self):
+            pytest.fail("read() must not run for an upload that declares an oversized body")
+
+        def iterate(self, **kwargs):
+            pytest.fail("iterate() must not run for an upload that declares an oversized body")
+
+    with pytest.raises(AttachmentRejected) as info:
+        asyncio.run(read_upload(Untouchable("big.png", data, size=len(data) + 1), limit=len(data)))
+    assert info.value.reason == "too_large"
+    delivered = []
+
+    class Streaming(SizedFile):
+        def size(self):
+            return 0  # an untrustworthy size: the stream itself is bounded
+
+        def iterate(self, *, chunk_size=None):
+            async def chunks():
+                for index in range(100):
+                    delivered.append(index)
+                    yield b"x" * 1024
+            return chunks()
+
+    with pytest.raises(AttachmentRejected) as info:
+        asyncio.run(read_upload(Streaming("big.png", b""), limit=4096))
+    assert info.value.reason == "too_large" and len(delivered) == 5, "aborted at the first chunk past the limit"
+    assert asyncio.run(read_upload(SizedFile("ok.png", data, chunk=7), limit=len(data))) == data
+    assert asyncio.run(read_upload(FakeFile("plain.png", data), limit=len(data))) == data
+    with pytest.raises(AttachmentRejected):
+        asyncio.run(read_upload(FakeFile("plain.png", data), limit=len(data) - 1))
+    assert asyncio.run(read_upload(FakeFile("plain.png", data))) == data, "the default limit is the attachment ceiling"
+
+
+def test_attachment_validation_runs_outside_the_service_lock(service, monkeypatch):
+    from dcdc_bench import attachments
+    job_id, job, path = finished_job(service, monkeypatch)
+    observed, real = [], attachments.validate_asset
+
+    def spy(data, name):
+        observed.append(service.lock.is_locked)
+        return real(data, name)
+    monkeypatch.setattr(attachments, "validate_asset", spy)
+    entry = service.add_attachment(job_id, "photo.png", png())
+    assert observed == [False], "validated exactly once, before the service lock is taken"
+    assert entry["added_in_revision"] == 1 and (path / "attachments/revisions/1.json").exists()
+    verify_integrity(path)
+    # The store re-binds a pre-validated result by hash: a result for other bytes is ignored and re-validated.
+    other = png(41, 30)
+    observed.clear()
+    second = AssetStore(path).add(other, "other.png", validated={**entry, "original_name": "other.png"})
+    assert observed == [False] and second["sha256"] == hashlib.sha256(other).hexdigest()
+    observed.clear()
+    again = AssetStore(path).add(other, "other.png", validated=dict(second))
+    assert observed == [] and again == second, "a matching pre-validation is trusted without a second parse"
