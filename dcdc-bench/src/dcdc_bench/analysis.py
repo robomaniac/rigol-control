@@ -23,13 +23,21 @@ from .storage import atomic_json, verify_integrity
 from .uncertainty import DERIVED as UNCERTAINTY_DERIVED, evaluate_run_budget, evaluated_quantity
 from .thermal import annotate_thermal_points, thermal_report_contribution
 
-FORMULA_VERSION = "settled-dc-1.2"
+FORMULA_VERSION = "settled-dc-1.3"
 QUANTITIES = ("Vin_V", "Iin_A", "Vout_V", "Iout_A")
 # Enabled no-load (brief 9.1, plan Gap E): input consumption with the load input OFF.
 NO_LOAD_METRIC_PREFIX = "enabled-no-load-input-consumption-"
+# Brief 9.1: an efficiency above 100 % or a negative loss is preserved and flagged,
+# never clamped. The flag names travel with the point into every export.
+IMPLAUSIBLE_RATIO_FLAG = "implausible_power_ratio"
+UNEXPECTED_SIGN_FLAG = "unexpected_sign"
+# Pass-through checks (DUT topology "none ..."): differences between the two
+# instruments' readbacks along the declared path. Not a calibration.
+READBACK_METRIC_PREFIX = "readback-cross-check-"
+READBACK_LABEL = "Readback cross-check (pass-through, not calibration)"
 CSV_FIELDS = ["run_id", "analysis_id", "test_id", "point_id", "vin_target_V",
               "iout_target_A", *QUANTITIES, "Pin_W", "Pout_W", "loss_W",
-              "efficiency_pct", "vout_error_pct", "qualification", "reason"]
+              "efficiency_pct", "vout_error_pct", "qualification", "quality_flags", "reason"]
 
 
 class EvidenceRef(Contract):
@@ -348,9 +356,44 @@ def uvlo_ramp_brackets(steps: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _safe_cell(value: Any) -> Any:
+    if isinstance(value, (list, tuple)):
+        # Flag lists become one semicolon-joined text cell (the interactive
+        # export joins the same way, so the two CSV files stay byte-identical).
+        value = ";".join(str(item) for item in value)
     if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@", "\t", "\r")):
         return "'" + value
     return "" if value is None else value
+
+
+def flag_reason(values: dict[str, Any], derived: dict[str, Any], flags: list[str]) -> str:
+    """Computed statement for a point demoted by metric flags. Quotes the readings; adjusts nothing."""
+    vin, iin, vout, iout = (values.get(q) for q in QUANTITIES)
+    finite = {q: _finite_number(values.get(q)) for q in QUANTITIES}
+    parts = []
+    eta, pin, pout = (_finite_number(derived.get(k)) for k in ("efficiency_pct", "Pin_W", "Pout_W"))
+    if IMPLAUSIBLE_RATIO_FLAG in flags and eta is not None and pin is not None and pout is not None:
+        if eta > 100:
+            parts.append(f"Implausible power ratio: computed efficiency {eta:.1f} % exceeds 100 % "
+                         f"(output power {pout:.3f} W > input power {pin:.3f} W); readings preserved, point not qualified.")
+        else:
+            parts.append(f"Implausible power ratio: computed efficiency {eta:.1f} % is below 0 % "
+                         f"(output power {pout:.3f} W with input power {pin:.3f} W); readings preserved, point not qualified.")
+        if finite["Iin_A"] is not None and finite["Iout_A"] is not None:
+            parts.append(f"Input and output current readbacks differ by {1000 * (iout - iin):+.1f} mA.")
+    if "nonpositive_input_power" in flags and pin is not None:
+        parts.append(f"Nonpositive input power ({pin:.4g} W): efficiency suppressed; readings preserved, point not qualified.")
+    if UNEXPECTED_SIGN_FLAG in flags:
+        negative = [f"{q} = {finite[q]:.6g}" for q in QUANTITIES if finite[q] is not None and finite[q] < 0]
+        parts.append("Unexpected sign: " + (", ".join(negative) if negative else "a negative channel mean")
+                     + " at a loaded point; readings preserved, point not qualified.")
+    if not parts:
+        parts.append("Metric flags " + ", ".join(flags) + ": readings preserved, point not qualified.")
+    return " ".join(parts)
+
+
+def is_flagged_implausible(point: dict[str, Any]) -> bool:
+    """A demoted point whose readings give output power above input power (or a negative ratio)."""
+    return point.get("qualification") == "inconclusive" and IMPLAUSIBLE_RATIO_FLAG in (point.get("quality_flags") or [])
 
 
 def points_csv(points: list[dict[str, Any]]) -> str:
@@ -422,7 +465,8 @@ def _uvlo_analysis(plan: Plan, run: dict, points: list[dict]) -> dict[str, Any]:
             if state == "on" and point.get("metric_flags"):
                 # An operating step is an efficiency point: the generic metric-flag
                 # demotion (skipped for UVLO steps in analyze_evidence) applies here.
-                point.update(qualification="inconclusive")
+                point.update(qualification="inconclusive", quality_flags=list(point["metric_flags"]),
+                             reason=flag_reason(point, point, list(point["metric_flags"])))
                 point["requirements"].update(output_voltage="not-evaluated", efficiency="not-evaluated")
             if state is not None and state != "on":
                 point.update(efficiency_pct=None,
@@ -490,6 +534,10 @@ def analyze_evidence(plan: Plan, run: dict, samples: list[dict], *, version: str
         accepted_values[request.point_id] = {q: [s["value"] for s in accepted if s["quantity"] == q] for q in QUANTITIES}
         derived = dc_metrics(values, plan.dut.ratings.output_voltage_nominal_V,
                              no_load=request.iout_target_A == 0)
+        # The worker's reason stands unless the analysis demotes the point; then
+        # the reason states what was computed (brief 9.1) and the flags that did it.
+        reason = outcome.get("reason", request.reason)
+        quality_flags: list[str] = []
         if qualification != "valid":
             derived.update(efficiency_pct=None, efficiency_reason=f"point {qualification}")
         elif derived["metric_flags"] and request.test_id not in uvlo_tests:
@@ -497,6 +545,8 @@ def analyze_evidence(plan: Plan, run: dict, samples: list[dict], *, version: str
             # (_uvlo_analysis); a near-zero, slightly negative off-state readback
             # must not demote a recorded off step. Operating steps are demoted there.
             qualification = "inconclusive"
+            quality_flags = list(derived["metric_flags"])
+            reason = flag_reason(values, derived, quality_flags)
         no_load = request.iout_target_A == 0
         load_states = {s["acquisition_settings"].get("load_enabled") for s in accepted}
         readbacks = {s["acquisition_settings"].get("load_input_readback") for s in accepted}
@@ -523,7 +573,7 @@ def analyze_evidence(plan: Plan, run: dict, samples: list[dict], *, version: str
                 requirements["efficiency"] = "pass" if derived["efficiency_pct"] >= acceptance.minimum_efficiency_pct else "fail"
         points.append({**request.model_dump(), **values, **derived, **observation,
                        "run_id": run["run_id"], "test_id": request.test_id,
-                       "qualification": qualification, "reason": outcome.get("reason", request.reason),
+                       "qualification": qualification, "quality_flags": quality_flags, "reason": reason,
                        "requirements": requirements, "metrology": "unquantified",
                        "accepted_cycle_count": len(by_cycle),
                        "accepted_sample_ids": [s["sample_id"] for s in accepted],
@@ -945,6 +995,105 @@ def _apply_uncertainty(points: list[dict], figures: list[FigureSpec], metrics: l
             "unquantified_aspects": list(budget.get("unquantified_aspects", [])), "note": note}
 
 
+def _implausible_ratio_statements(points: list[dict]) -> tuple[str | None, str | None]:
+    """Summary paragraph and limitation line for points flagged implausible; computed, never invented."""
+    flagged = [p for p in points if is_flagged_implausible(p)]
+    if not flagged:
+        return None, None
+    loaded = [p for p in points if p.get("iout_target_A") not in (None, 0)]
+    etas = [_finite_number(p.get("efficiency_pct")) for p in flagged]
+    above = [p for p, eta in zip(flagged, etas) if eta is not None and eta > 100]
+    if len(above) == len(flagged):
+        kind = "output power above input power"
+    elif not above:
+        kind = "negative output power"
+    else:
+        kind = "output power above input power or negative"
+    text = (f"{len(flagged)} of {len(loaded)} loaded points show a physically impossible power ratio ({kind}) "
+            "and are not qualified; the readings are preserved in the table and explorer.")
+    differences = [1000 * (p["Iout_A"] - p["Iin_A"]) for p in above
+                   if _finite_number(p.get("Iout_A")) is not None and _finite_number(p.get("Iin_A")) is not None]
+    if differences and (all(d > 0 for d in differences) or all(d < 0 for d in differences)):
+        text += (f" The input and output current readbacks differ by {min(differences):+.1f} mA to "
+                 f"{max(differences):+.1f} mA across these points, which points to instrument readback disagreement "
+                 "at the declared boundary rather than converter behaviour (output power cannot exceed input power).")
+    limitation = (f"Points flagged {IMPLAUSIBLE_RATIO_FLAG} ({', '.join(p['point_id'] for p in flagged)}) keep their "
+                  "readings and their unclamped computed efficiency and loss; they are not qualified, contribute to no "
+                  "issued metric, and are drawn with open markers in the figures.")
+    return text, limitation
+
+
+def _readback_cross_check(plan: Plan, points: list[dict]) -> dict[str, Any]:
+    """Pass-through DUT (topology 'none ...'): per-point and aggregate readback differences.
+
+    ``current_readback_difference_A = Iout_A − Iin_A`` and ``voltage_drop_V = Vin_V − Vout_V``
+    over loaded points with complete channel means, whatever their qualification.
+    These compare two instruments' readbacks along the declared path; they are
+    not a calibration and correct no stored value.
+    """
+    empty = {"metrics": [], "summary": None, "summary_metric_ids": [], "limitation": None}
+    if not str(plan.dut.construction.topology).strip().lower().startswith("none"):
+        return empty
+    loaded = [p for p in points if p.get("iout_target_A") not in (None, 0)
+              and all(_finite_number(p.get(q)) is not None for q in QUANTITIES)]
+    if not loaded:
+        return empty
+    quantities = {
+        "current-difference": ("current readback difference", "Iout_A − Iin_A", "A",
+                               lambda p: p["Iout_A"] - p["Iin_A"]),
+        "voltage-drop": ("voltage drop", "Vin_V − Vout_V", "V", lambda p: p["Vin_V"] - p["Vout_V"]),
+    }
+    basis = " (channel means over accepted cycles; a difference between two instrument readbacks along the declared path, not a correction)"
+    ids = [p["point_id"] for p in loaded]
+    inputs = sorted({p["vin_target_V"] for p in loaded})
+    loads = sorted({p["iout_target_A"] for p in loaded})
+    scope = (f"{len(loaded)} loaded points ({', '.join(ids)}); "
+             + _join_phrases([f"{v:g} V" for v in inputs]) + " requested input; requested loads "
+             + (f"{loads[0]:g} A" if len(loads) == 1 else f"{loads[0]:g}–{loads[-1]:g} A"))
+    metrics: list[MetricResult] = []
+    aggregates: dict[str, dict[str, float]] = {}
+    for name, (description, formula, unit, compute) in quantities.items():
+        values = [compute(p) for p in loaded]
+        for point, value in zip(loaded, values):
+            metrics.append(MetricResult(id=f"{READBACK_METRIC_PREFIX}{name}-{point['point_id']}",
+                label=f"{READBACK_LABEL}: {description}", value=float(value), unit=unit,
+                formula=formula + basis,
+                conditions=(f"{point['point_id']}: {point['vin_target_V']:g} V requested input, "
+                            f"{point['iout_target_A']:g} A requested load; point {point['qualification']}"),
+                selector={"point_id": point["point_id"]}, point_ids=[point["point_id"]], figure_ids=[]))
+        aggregates[name] = {"mean": float(mean(values)), "min": float(min(values)), "max": float(max(values))}
+        for statistic, value in aggregates[name].items():
+            metrics.append(MetricResult(id=f"{READBACK_METRIC_PREFIX}{name}-{statistic}",
+                label=f"{READBACK_LABEL}: {statistic} {description}", value=value, unit=unit,
+                formula=f"{statistic}({formula}) over loaded points{basis}",
+                conditions=scope, selector={"observation": "loaded", "topology": plan.dut.construction.topology},
+                point_ids=ids, figure_ids=[]))
+    current, drop = aggregates["current-difference"], aggregates["voltage-drop"]
+    summary = (f"{READBACK_LABEL}: across {len(loaded)} loaded points the load current readback minus the source "
+               f"current readback is {1000 * current['mean']:+.1f} mA on average ({1000 * current['min']:+.1f} to "
+               f"{1000 * current['max']:+.1f} mA), and the source-terminal voltage minus the load-terminal voltage is "
+               f"{1000 * drop['mean']:.1f} mV on average ({1000 * drop['min']:.1f} to {1000 * drop['max']:.1f} mV). "
+               "These are differences between two instruments' readbacks along the declared path; no stored value is corrected.")
+    limitation = ("The readback cross-check compares the source and load instruments' readbacks along the declared "
+                  "pass-through path. It is not a calibration, its uncertainty is unquantified, and it corrects no stored value.")
+    return {"metrics": metrics, "summary": summary,
+            "summary_metric_ids": [f"{READBACK_METRIC_PREFIX}{name}-mean" for name in quantities],
+            "limitation": limitation}
+
+
+def _flag_figure_captions(figures: list[FigureSpec], points: list[dict]) -> None:
+    """Say what an open marker means on every figure that draws a flagged point."""
+    by_id = {p["point_id"]: p for p in points}
+    for figure in figures:
+        drawn = [pid for series in figure.series for pid in series.point_ids
+                 if is_flagged_implausible(by_id[pid])
+                 and _finite_number(by_id[pid].get(figure.x_key)) is not None
+                 and _finite_number(by_id[pid].get(figure.y_key)) is not None]
+        if drawn:
+            figure.caption += (f" Open markers are {len(drawn)} point(s) flagged {IMPLAUSIBLE_RATIO_FLAG}; they are drawn "
+                               "unclamped for visibility, are not qualified, and are excluded from issued results.")
+
+
 def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[dict],
                        revision: str = "r0001") -> ReportModel:
     evidence_label = _evidence_label(plan, run)
@@ -956,6 +1105,9 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
         raise ValueError("Analysis measurement boundary does not match its acquisition")
     # Presentation annotations never mutate the preserved analysis evidence.
     points = copy.deepcopy(analysis["points"])
+    for point in points:
+        # Analyses issued before settled-dc-1.3 carry no per-point flag list.
+        point.setdefault("quality_flags", [])
     sequence = _sequence_annotations(points, raw_samples)
     search = run.get("method", {}).get("source_limit_search")
     voltage_sweep = run.get("method", {}).get("voltage_efficiency_sweep")
@@ -1156,15 +1308,24 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
                            + f"; {limit:g} A supply setting",
                 selector={"point_id": endpoint["point_id"]}, point_ids=[endpoint["point_id"]],
                 figure_ids=["fig-source-current"]))
+    cross_check = _readback_cross_check(plan, points)
+    metrics.extend(cross_check["metrics"])
     uncertainty = _apply_uncertainty(points, figures, metrics, analysis.get("uncertainty"))
     # Bound temperature channels contribute separate figures (no secondary axes).
     thermal_section = thermal_report_contribution(plan, run, points, raw_samples, series, evidence_label, boundary)
     figures.extend(thermal_section["figures"])
     metrics.extend(thermal_section["metrics"])
+    _flag_figure_captions(figures, points)
     for metric in metrics:
         metric.qualification = f"{observation} observation"
     summary = [f"{len(valid)} of {len(points)} requested operating points produced qualified {observation} DC results."]
     summary_evidence = []
+    implausible_summary, implausible_limitation = _implausible_ratio_statements(points)
+    if implausible_summary:
+        summary.append(implausible_summary)
+    if cross_check["summary"]:
+        summary_evidence.append(SummaryEvidence(paragraph_index=len(summary), metric_ids=cross_check["summary_metric_ids"]))
+        summary.append(cross_check["summary"])
     if uvlo:
         for test_id, detail in uvlo.items():
             off, on, hysteresis = detail["turn_off"], detail["turn_on"], detail["hysteresis"]
@@ -1320,6 +1481,10 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
          if any(p["qualification"] == "valid" and p["iout_target_A"] == 0 for p in points) else
          "No qualified no-load point was acquired; enabled no-load input consumption was not measured in this run."),
     ]
+    if implausible_limitation:
+        limitations.append(implausible_limitation)
+    if cross_check["limitation"]:
+        limitations.append(cross_check["limitation"])
     provenance = {"formula_version": analysis["formula_version"],
                   "plan_hash": plan.plan_hash, "evidence_hash": analysis.get("evidence_hash"),
                   "software": run.get("software", {}), "data_source": run.get("data_source", "simulated"),
