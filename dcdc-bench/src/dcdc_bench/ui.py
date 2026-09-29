@@ -631,7 +631,8 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                              + (' Waiting: ' + str(snapshot['deferred_reason']) + '.' if snapshot.get('deferred_reason') else '')).classes('bench-message')
                 ui.label('Run ' + str(snapshot.get('run_id') or snapshot['job_id'])).classes('bench-muted')
                 # Local wall-clock display only; job.json and the run evidence keep UTC.
-                for key, label in [('created_utc', 'Started'), ('queued_utc', 'Report queued'), ('dispatched_utc', 'Report started')]:
+                for key, label in [('created_utc', 'Started'), ('acquisition_cancelled_utc', 'Stop requested'),
+                                   ('queued_utc', 'Report queued'), ('dispatched_utc', 'Report started')]:
                     if snapshot.get(key):
                         ui.label(f'{label}: {local_time_text(snapshot[key])}').classes('bench-muted')
                 progress = snapshot.get('progress') or {}

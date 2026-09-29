@@ -493,3 +493,25 @@ def test_idle_page_shows_no_activity_indicator(tmp_path, monkeypatch):
         finally:
             client.delete()
     asyncio.run(scenario())
+
+
+def test_stopped_run_shows_when_the_operator_requested_the_stop(tmp_path, monkeypatch):
+    """Job 20260929T213318Z_6290205b showed only 'Stopped' (error None, no time). The recorded request
+    time now appears with the other local times so an operator can match it to what they did."""
+    snapshots = {'job-1': snapshot('job-1', 'acquiring')}
+
+    async def scenario():
+        client, poll, notices, service = await open_bench_page(monkeypatch, tmp_path, snapshots)
+        try:
+            with client:
+                run_tab = find(client, tag='q-tab-panel', name='Run')
+                assert not any(text.startswith('Stop requested') for text in texts(run_tab))
+                snapshots['job-1'].update(state='cancelled', run_dir='/w/jobs/job-1/runs/r-0001', acquisition_cancelled=True,
+                                          acquisition_cancelled_utc='2026-09-29T20:40:15+00:00')
+                await poll()
+                shown = texts(run_tab)
+                assert 'Stopped' in shown
+                assert 'Stop requested: ' + local_time_text('2026-09-29T20:40:15+00:00') in shown
+        finally:
+            client.delete()
+    asyncio.run(scenario())

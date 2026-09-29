@@ -128,6 +128,16 @@ def _recent_events(path, limit=12):
     return events
 
 
+def _stop_requested_utc(marker):
+    """The UTC time cancel() wrote into the marker file; None when absent, empty or not a timestamp."""
+    try:
+        text = Path(marker).read_text().strip()
+        datetime.fromisoformat(text)
+    except (OSError, ValueError):
+        return None
+    return text
+
+
 class JobService:
     def __init__(self, root: Path, inventory_path: Path | None = None, gate: MemoryGate | None = None):
         self.root = Path(root).resolve()
@@ -566,7 +576,10 @@ class JobService:
                 return self.status(job_id)
         if value["state"] not in ACTIVE:
             return value
-        (job / "cancel.request").touch()
+        # The marker carries the request time: run_mock swallows the SIGINT below
+        # itself, so the worker's KeyboardInterrupt message never lands for a
+        # mock job, and the dispatcher deletes this file before the report runs.
+        (job / "cancel.request").write_text(_utc_now())
         pid = value.get("pid")
         if _pid_matches(pid, job):
             try:
@@ -714,12 +727,15 @@ def worker(directory: Path, *, report_only=False):
                                     attachment_descriptors=request.get("attachments", []))
         run = _verified_off(path)
         save(run_dir=str(path))
-        cancelled_acquisition = (directory / "cancel.request").exists()
+        marker = directory / "cancel.request"
+        cancelled_acquisition = marker.exists()
         if not report_only:
             # Outputs are verified OFF. Exit now so drivers and acquisition state
             # leave RAM before the heaviest phase; the UI dispatcher launches a
             # fresh report-only worker once the bench is idle and memory allows.
+            # Keep the operator's stop time: the dispatcher unlinks the marker.
             save(state=REPORT_QUEUED, pid=None, queued_utc=_utc_now(), acquisition_cancelled=cancelled_acquisition,
+                 acquisition_cancelled_utc=_stop_requested_utc(marker) if cancelled_acquisition else None,
                  deferred_reason=None, deferred_utc=None)
             return
         save(state="reporting")
