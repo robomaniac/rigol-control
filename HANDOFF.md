@@ -195,11 +195,40 @@ low-sensitivity and all now public on the branch:
 
 ## 9. Next bounded tasks, in order
 
-1. Verify the suites on the Pi 4 (section 6) and run the browser/PDF checks.
-2. Resolve the parked worktrees (section 7).
-3. Execute the M2 qualification plan with the owner present at the bench;
-   only after that revisit the M3 exit criteria.
-4. Then the owner decides on the 12 V cold-start test plan.
+Done on the Pi 4 (2026-09-28/29): suites and browser/PDF gates verified
+(section 4); parked worktrees resolved (section 7); M2 plan steps 1–3
+(software-only) completed — datasheet terms transcribed
+(`dcdc-bench/docs/instrument-specifications.md`, profile
+`profiles/bench/rigol-dp821a-dl3031a.yaml`), historical readback evidence
+analysed (`docs/m2-freshness-and-readback-evidence.md`), per-point budget with
+an `unquantified` fall-through and an enabled-no-load stage added and
+independently reviewed as safe; the owner-authorized read-only `doctor` run
+confirmed identities, OFF states and the load's ≈10 mA zero-current readback.
+
+Consequences the operator must know before the next real run:
+- **Every saved real plan hash changed** (planner warnings text): re-run
+  **Preview** before Start; stale previews are refused by design.
+- With a **0 A first request** in a phase, the load now turns on 15–35 s after
+  the source (source-only gate + no-load dwell/acquisition + loaded startup)
+  instead of ~5 s.
+- `NO_LOAD_IIN_SPAN_A = 2 mA` in `real_backend.py` is a proposed settling
+  criterion for no-load windows — the owner must confirm or change it.
+- Datasheet-bound readback accuracy gives about ±28 percentage points (k = 2)
+  at 24 V / 0.1 A; light-load efficiency cannot be qualified from the internal
+  readbacks alone. An external current measurement (DMM/shunt on the output
+  lead, ideally the input lead too) is a hardware decision for the owner.
+
+Remaining, in order:
+1. Merge the review follow-ups (extra fake-SCPI cases, no-load sign exemption,
+   time-estimate margin, per-sample load-input readback) — in progress on
+   2026-09-29.
+2. **Bench, converter disconnected** (M2 plan step 4, owner authorization):
+   freshness burst/step tests, plausibility cross-check, zero/offset check per
+   `docs/m2-freshness-and-readback-evidence.md` §D.
+3. **Bench, DUT at 24 V** (step 5, owner authorization): one enabled-no-load
+   window then one 0.1 A point through the UI's approvals and confirmation.
+4. Only then revisit the M3 exit criteria; then the owner decides on the 12 V
+   cold-start test plan (`docs/cold-start-hypothesis.md`).
 
 ## 10. For a future Claude Code session
 
