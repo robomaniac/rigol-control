@@ -20,6 +20,13 @@ Conventions
   ``not_evaluated`` with a reason list. There is never a zero or a placeholder.
 - Efficiency uncertainty is in percentage points; loss uncertainty is in watts
   and has its own propagation.
+- Every point carries a budget record (``terms``): one line per readback channel
+  with its value, distribution, source and ``status`` in {evaluated,
+  unquantified}. The point's ``budget_status`` is ``evaluated`` only when every
+  required term and every required derived quantity is evaluated; otherwise it
+  is ``unquantified`` and ``missing_terms`` names what blocks it (plan Gap C).
+  An enabled-no-load observation requires only the input terms (Vin, Iin) and
+  input power; its load-current readback is an offset, not a measurand.
 """
 from __future__ import annotations
 
@@ -251,11 +258,61 @@ def _metrology(statuses: list[str]) -> str:
     return _METROLOGY_BY_STATUS[weakest]
 
 
+NO_LOAD_REQUIRED_TERMS = ("Vin_V", "Iin_A")
+NO_LOAD_REQUIRED_QUANTITIES = ("Pin_W",)
+
+
+def is_no_load_point(point: dict[str, Any]) -> bool:
+    """An enabled-no-load observation: the load input is OFF and only input consumption is a measurand."""
+    return point.get("observation") == "enabled_no_load" or point.get("iout_target_A") == 0
+
+
+def _term_record(quantity: str, review: dict[str, Any], channel: dict[str, Any]) -> dict[str, Any]:
+    """One budget-record line for a readback channel: value, distribution, source, status (plan Gap C).
+
+    The value is the channel mean's standard uncertainty from the declared readback
+    specification only; ``programming_accuracy`` is never consulted (CORE-06).
+    """
+    instrument = "source" if quantity in ("Vin_V", "Iin_A") else "load"
+    specification = review.get("specification") or {}
+    record: dict[str, Any] = {"quantity": quantity, "instrument": instrument,
+                              "term": f"{instrument} {quantity} readback error limit",
+                              "binding_field": "readback_specification", "programming_accuracy_consulted": False,
+                              "unit": review.get("unit"), "distribution": specification.get("distribution"),
+                              "source": review.get("source", "unknown"),
+                              "specification_status": review.get("status", "unknown")}
+    if channel.get("status") == "evaluated":
+        record.update(status="evaluated", value=channel["systematic_standard"],
+                      value_kind="systematic standard uncertainty of the readback term (never divided by n)",
+                      half_width=channel["terms"]["specification_limit"]["half_width"],
+                      repeatability_standard=channel["repeatability"].get("standard_error_of_mean"),
+                      combined_standard=channel["standard"], reasons=[])
+    else:
+        record.update(status="unquantified", value=None, value_kind=None, half_width=None,
+                      reasons=[reason if reason.startswith(f"{quantity}:") else f"{quantity}: {reason}"
+                               for reason in channel.get("reasons", [])])
+    return record
+
+
+def _budget_record(result: dict[str, Any], reviews: dict[str, dict[str, Any]], *, no_load: bool) -> None:
+    """Attach the per-point budget record and its two-valued status to an evaluate_point result."""
+    required = NO_LOAD_REQUIRED_TERMS if no_load else CHANNELS
+    required_quantities = NO_LOAD_REQUIRED_QUANTITIES if no_load else DERIVED
+    terms = {q: _term_record(q, reviews[q], result["channels"][q]) for q in CHANNELS}
+    missing = [reason for q in required for reason in terms[q]["reasons"]]
+    evaluated = (all(terms[q]["status"] == "evaluated" for q in required)
+                 and all(result["quantities"][n]["status"] == "evaluated" for n in required_quantities))
+    result.update(observation="enabled_no_load" if no_load else "loaded", terms=terms,
+                  required_terms=list(required), required_quantities=list(required_quantities),
+                  missing_terms=missing, budget_status="evaluated" if evaluated else "unquantified")
+
+
 def evaluate_point(point: dict[str, Any], reviews: dict[str, dict[str, Any]], *, policy: UncertaintyPolicy,
                    correlations: dict[frozenset, float], samples: dict[str, list[float]] | None = None,
                    ambient_C: float | None = None) -> dict[str, Any]:
     """Budget for one analysis point: channel uncertainties, then each derived quantity."""
     samples = samples or {}
+    no_load = is_no_load_point(point)
     result: dict[str, Any] = {"point_id": point["point_id"], "qualification": point.get("qualification"),
                               "status": "not_evaluated", "metrology": "unquantified", "reasons": [],
                               "channels": {}, "quantities": {}}
@@ -264,6 +321,7 @@ def evaluate_point(point: dict[str, Any], reviews: dict[str, dict[str, Any]], *,
         result["reasons"].append(reason)
         result["channels"] = {q: {"status": "not_evaluated", "reasons": [reason]} for q in CHANNELS}
         result["quantities"] = {name: {"status": "not_evaluated", "reasons": [reason], "flags": []} for name in DERIVED}
+        _budget_record(result, reviews, no_load=no_load)
         return result
     channels = result["channels"]
     for q in CHANNELS:
@@ -323,6 +381,7 @@ def evaluate_point(point: dict[str, Any], reviews: dict[str, dict[str, Any]], *,
         result["status"] = "partially_evaluated"
     result["reasons"] = sorted({reason for q in CHANNELS for reason in channels[q].get("reasons", [])}
                                | {reason for n in DERIVED for reason in result["quantities"][n].get("reasons", [])})
+    _budget_record(result, reviews, no_load=no_load)
     return result
 
 
@@ -368,7 +427,9 @@ def evaluate_run_budget(plan: Plan, points: list[dict[str, Any]], accepted_value
             "unquantified_aspects": list(UNQUANTIFIED_ASPECTS), "reasons": reasons,
             "summary": {"valid_points": len(valid), "evaluated_points": len(fully),
                         "partially_evaluated_points": len(partially),
-                        "not_evaluated_points": len(results) - len(fully) - len(partially)},
+                        "not_evaluated_points": len(results) - len(fully) - len(partially),
+                        "budget_status": {"evaluated": sum(r["budget_status"] == "evaluated" for r in results.values()),
+                                          "unquantified": sum(r["budget_status"] == "unquantified" for r in results.values())}},
             "points": results}
 
 

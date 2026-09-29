@@ -25,6 +25,8 @@ from .thermal import annotate_thermal_points, thermal_report_contribution
 
 FORMULA_VERSION = "settled-dc-1.2"
 QUANTITIES = ("Vin_V", "Iin_A", "Vout_V", "Iout_A")
+# Enabled no-load (brief 9.1, plan Gap E): input consumption with the load input OFF.
+NO_LOAD_METRIC_PREFIX = "enabled-no-load-input-consumption-"
 CSV_FIELDS = ["run_id", "analysis_id", "test_id", "point_id", "vin_target_V",
               "iout_target_A", *QUANTITIES, "Pin_W", "Pout_W", "loss_W",
               "efficiency_pct", "vout_error_pct", "qualification", "reason"]
@@ -238,7 +240,8 @@ def dc_metrics(values: dict[str, float | None], nominal_V: float,
         # output power or a converter/path loss estimate.
         result.update(Pout_W=None, loss_W=None)
         result["output_power_reason"] = "not evaluated: no external load; load-off current is not delivered output current"
-        result["loss_reason"] = "not evaluated: output power is unavailable with no external load"
+        result["loss_reason"] = ("not evaluated: output power is unavailable with no external load; the input consumption "
+                                 "is a path quantity at the declared boundary and is not attributed to the module alone")
     elif pin <= 0:
         reason = "nonpositive input power"
         flags.append("nonpositive_input_power")
@@ -492,6 +495,19 @@ def analyze_evidence(plan: Plan, run: dict, samples: list[dict], *, version: str
             # (_uvlo_analysis); a near-zero, slightly negative off-state readback
             # must not demote a recorded off step. Operating steps are demoted there.
             qualification = "inconclusive"
+        no_load = request.iout_target_A == 0
+        load_states = {s["acquisition_settings"].get("load_enabled") for s in accepted}
+        if no_load and qualification == "valid" and True in load_states:
+            raise ValueError("Worker accepted an enabled no-load point with the load input enabled")
+        # Enabled no-load (brief 9.1, plan Gap E): the measurand is input consumption
+        # with the load input OFF; the load's current readback is kept as an offset,
+        # never as delivered output current.
+        observation = {"observation": "enabled_no_load" if no_load else "loaded",
+                       "load_input_state": ("not recorded" if not load_states or load_states == {None}
+                                            else "OFF" if load_states == {False} else "ON" if load_states == {True}
+                                            else "mixed"),
+                       "load_readback_offset_A": values["Iout_A"] if no_load else None,
+                       "enabled_no_load_consumption_W": derived["Pin_W"] if no_load and qualification == "valid" else None}
         requirements = {"output_voltage": "not-evaluated", "efficiency": "not-evaluated",
                         "surface_temperature": "not-evaluated"}
         acceptance = plan.dut.acceptance
@@ -502,7 +518,7 @@ def analyze_evidence(plan: Plan, run: dict, samples: list[dict], *, version: str
                 requirements["efficiency"] = "not-applicable"
             elif acceptance.minimum_efficiency_pct is not None and derived["efficiency_pct"] is not None:
                 requirements["efficiency"] = "pass" if derived["efficiency_pct"] >= acceptance.minimum_efficiency_pct else "fail"
-        points.append({**request.model_dump(), **values, **derived,
+        points.append({**request.model_dump(), **values, **derived, **observation,
                        "run_id": run["run_id"], "test_id": request.test_id,
                        "qualification": qualification, "reason": outcome.get("reason", request.reason),
                        "requirements": requirements, "metrology": "unquantified",
@@ -902,7 +918,7 @@ def _apply_uncertainty(points: list[dict], figures: list[FigureSpec], metrics: l
                                "they are not validated 95 % confidence intervals, and points without a band were not evaluated.")
     metric_quantity = {"highest-observed-efficiency": "efficiency_pct", "highest-qualified-input-current": "Iin_A"}
     for metric in metrics:
-        name = metric_quantity.get(metric.id)
+        name = metric_quantity.get(metric.id) or ("Pin_W" if metric.id.startswith(NO_LOAD_METRIC_PREFIX) else None)
         pid = metric.selector.get("point_id")
         result = evaluated_quantity(budget, pid, name) if name and isinstance(pid, str) else None
         if result is not None:
@@ -1071,6 +1087,19 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
                        + peak.get("input_condition_label", f"{peak['vin_target_V']:g} V requested input")
                        + f", {peak['iout_target_A']:g} A requested load",
             selector={"point_id": peak["point_id"]}, point_ids=[peak["point_id"]], figure_ids=["fig-efficiency"]))
+    for point in valid:
+        if point.get("observation") != "enabled_no_load" or point.get("enabled_no_load_consumption_W") is None:
+            continue
+        offset = point.get("load_readback_offset_A")
+        metrics.append(MetricResult(id=f"{NO_LOAD_METRIC_PREFIX}{point['point_id']}",
+            label="Enabled no-load path input consumption", value=point["enabled_no_load_consumption_W"], unit="W",
+            formula="mean(Vin) * mean(Iin) with the load input OFF",
+            conditions=point.get("input_condition_label", f"{point['vin_target_V']:g} V requested input")
+                       + f"; load input {point.get('load_input_state', 'not recorded')}"
+                       + (f"; load current readback {offset:.4f} A retained as a load-off offset, not output current"
+                          if isinstance(offset, (int, float)) and not isinstance(offset, bool) else "")
+                       + "; efficiency not applicable; path consumption at the declared boundary, not module-only loss",
+            selector={"point_id": point["point_id"]}, point_ids=[point["point_id"]], figure_ids=[]))
     nominal = plan.dut.ratings.output_voltage_nominal_V
     for test in plan.recipe.tests:
         if test.type == UVLO_TEST_TYPE:
@@ -1238,6 +1267,15 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
                            f"{m.uncertainty['status']}) at {m.conditions}.")
         else:
             summary.append(f"Highest observed path efficiency: {m.value:.2f}% at {m.conditions}.")
+    for m in metrics:
+        if not m.id.startswith(NO_LOAD_METRIC_PREFIX):
+            continue
+        summary_evidence.append(SummaryEvidence(paragraph_index=len(summary), metric_ids=[m.id]))
+        if m.uncertainty.get("expanded") is not None and m.uncertainty.get("label"):
+            summary.append(f"Enabled no-load path input consumption: {m.uncertainty['label']} (k = {m.uncertainty['k']:g}, "
+                           f"{m.uncertainty['status']}) at {m.conditions}.")
+        else:
+            summary.append(f"Enabled no-load path input consumption: {m.value:.4g} W (uncertainty unquantified) at {m.conditions}.")
     line_metrics = [m for m in metrics if m.id.startswith("line-span-")]
     if line_metrics:
         m = max(line_metrics, key=lambda item: item.value)
