@@ -1388,7 +1388,10 @@ def _print_header(identity: dict[str, str], paper: str = "letter") -> str:
     reads them for the header band, footer and title block and defines the
     ``dcdc-report`` function that the ``typst-show.typ`` template partial applies
     in place of Quarto's article block. print-tables.typ follows: tables up to
-    half a page never split; taller ones keep their last two rows together.
+    half a page never split; taller ones keep their last two rows together and
+    never open with a single row at the bottom of a page (a table that fits on
+    one page moves whole, with its sticky heading, when its header and first
+    two rows would not fit).
     """
     if paper not in PAPER_SIZES:
         raise ValueError("Report paper must be letter or a4")

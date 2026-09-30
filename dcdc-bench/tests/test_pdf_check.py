@@ -23,10 +23,14 @@ from dcdc_bench.reporting.pdf_check import (BBox, Document, Element, Page, Regio
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "pdf"
 PROJECT = Path(__file__).resolve().parents[1]
-FIXTURE_NAMES = ("clean", "orphan-heading", "lone-table-row", "clipped-text", "caption-without-figure")
+FIXTURE_NAMES = ("clean", "orphan-heading", "lone-table-row", "clipped-text", "caption-without-figure",
+                 "split-table-unguarded", "split-table-guarded")
 MODELS = {name: {"run_id": f"run-fixture-{suffix}", "dut": {"model": "FIXTURE-DUT"}} for name, suffix in (
     ("clean", "clean"), ("orphan-heading", "orphan"), ("lone-table-row", "lone-row"),
-    ("clipped-text", "clipped"), ("caption-without-figure", "caption"))}
+    ("clipped-text", "clipped"), ("caption-without-figure", "caption"),
+    ("split-table-unguarded", "split-unguarded"), ("split-table-guarded", "split-guarded"))}
+# The guarded fixture imports the print theme's table rule from the templates.
+THEME_TABLES = PROJECT / "templates" / "theme" / "print-tables.typ"
 
 
 def _typst() -> Path | None:
@@ -55,6 +59,7 @@ def compiled(tmp_path_factory):
     for source in FIXTURES.iterdir():
         if source.suffix in (".typ", ".svg"):
             shutil.copyfile(source, out / source.name)
+    shutil.copyfile(THEME_TABLES, out / THEME_TABLES.name)
     pdfs = {}
     for name in FIXTURE_NAMES:
         subprocess.run([str(typst), "compile", f"{name}.typ", f"{name}.pdf"], cwd=out, check=True,
@@ -101,6 +106,34 @@ def test_lone_last_table_row_is_reported(compiled):
     assert lone[0].details["rows_per_page"] == {"1": 37, "2": 1}
     assert "Point" in lone[0].details["table"]
     assert "table-header-alone" not in _codes(result)
+
+
+@pytest.mark.integration
+def test_table_opening_with_a_single_row_at_a_page_bottom_is_reported_once(compiled):
+    """Control case: without the theme rule the nine-row table splits 1 + 8 under its sticky heading."""
+    result = check_pdf(compiled["split-table-unguarded"], MODELS["split-table-unguarded"])
+    split = [finding for finding in result.findings if finding.code == "table-split-after-first-row"]
+    assert len(split) == 1 and split[0].page == 1 and split[0].severity == "warning"
+    assert split[0].details["rows_per_page"] == {"1": 1, "2": 8}
+    assert "Metric" in split[0].details["table"]
+    assert result.status == "warning"
+    assert {"orphan-heading", "lone-table-row", "table-header-alone"}.isdisjoint(_codes(result))
+    assert [page["tables"] for page in result.pages] == [1, 1]
+
+
+@pytest.mark.integration
+def test_theme_table_rule_moves_a_table_whose_head_would_not_fit_together_with_its_heading(compiled):
+    """templates/theme/print-tables.typ: the same layout with the rule applied paginates cleanly (PDF-02)."""
+    result = check_pdf(compiled["split-table-guarded"], MODELS["split-table-guarded"])
+    assert _codes(result, "error") == [], [finding.message for finding in result.errors]
+    assert "table-split-after-first-row" not in _codes(result), [finding.message for finding in result.findings]
+    assert result.status == "pass"
+    assert result.page_count == 2
+    # The whole table left page 1 and its heading travelled with it: neither an
+    # orphan heading nor a lone row, and the re-emitted table is counted once.
+    assert [page["tables"] for page in result.pages] == [0, 1]
+    assert "Regulation" not in result.pages[0]["headings"]
+    assert "Regulation" in result.pages[1]["headings"]
 
 
 @pytest.mark.integration
@@ -269,6 +302,48 @@ def test_table_header_alone_at_the_bottom_and_lone_row_are_errors():
     assert by_code["table-header-alone"].page == 1
     assert by_code["lone-table-row"].page == 3
     assert by_code["lone-table-row"].details["rows_per_page"] == {"2": 3, "3": 1}
+
+
+def test_a_table_wrapping_the_same_rows_twice_yields_one_finding_and_one_table():
+    """Typst tags a table re-emitted by a show rule as a Table around a Table with the same rows."""
+    first, second = _page(1), _page(2)
+    root = Element(role="Root")
+    document_element = _element("Document", root)
+    _element("H1", document_element, [(1, 0)])
+    _text_region(first, 0, 90, "Results", 14)
+    wrapper = _element("Table", document_element)
+    table = _element("Table", wrapper)
+    head_row = _element("TR", _element("THead", table))
+    _element("TH", head_row, [(1, 1)])
+    _text_region(first, 1, 760, "Metric")
+    body = _element("TBody", table)
+    for page, mcid, top in [(first, 2, 780), (second, 0, 80), (second, 1, 100), (second, 2, 120)]:
+        row = _element("TR", body)
+        _element("TD", row, [(page.number, mcid)])
+        _text_region(page, mcid, top, "row")
+    _element("P", document_element, [(2, 3)])
+    _text_region(second, 3, 150, "Uncertainty: no applicable validated uncertainty budget is supplied.")
+    analysis = analyze(_document([first, second], root), {"run_id": "run-x"})
+    split = [finding for finding in analysis.findings if finding.code == "table-split-after-first-row"]
+    assert len(split) == 1, [finding.message for finding in analysis.findings]
+    assert split[0].page == 1 and split[0].details["rows_per_page"] == {"1": 1, "2": 3}
+    assert [page["tables"] for page in analysis.pages] == [1, 1], "the wrapper is not a second table"
+    assert [finding.code for finding in analysis.findings if finding.severity == "error"] == []
+
+
+def test_findings_repeating_code_page_and_message_are_reported_once():
+    """Two identical findings (same code, page and message) collapse to the first, keeping its details."""
+    duplicate = pdf_check.Finding("table-split-after-first-row", "warning", "Table 'Metric' starts with a single row", 4,
+                                  {"rows_per_page": {"4": 1, "5": 11}})
+    repeated = pdf_check.Finding("table-split-after-first-row", "warning", "Table 'Metric' starts with a single row", 4,
+                                 {"rows_per_page": {"4": 1, "5": 11}, "extra": True})
+    other_page = pdf_check.Finding("table-split-after-first-row", "warning", "Table 'Metric' starts with a single row", 6)
+    other_code = pdf_check.Finding("lone-table-row", "error", "Table 'Metric' starts with a single row", 4)
+    unique = pdf_check._unique([duplicate, repeated, other_page, other_code])
+    assert unique == [duplicate, other_page, other_code]
+    assert unique[0].details == {"rows_per_page": {"4": 1, "5": 11}}
+    payload = pdf_check.PdfCheckResult("hand-built.pdf", 6, True, {}, unique, []).to_dict()
+    assert payload["counts"] == {"error": 1, "unverified": 0, "warning": 2, "info": 0}
 
 
 def test_heading_followed_by_content_on_the_same_page_is_not_an_orphan():
