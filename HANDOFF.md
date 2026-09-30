@@ -228,7 +228,27 @@ flagged (implausible) points as open markers with a computed explanation and
 a readback cross-check metric; the bench page shows a header activity
 spinner, refreshes Reports automatically and displays bench-local time.
 
+Later on 2026-09-29 (Pi 4): the owner chose report design **A (datasheet /
+TI-like)**, US Letter, one accent colour — productised in the renderer
+(`templates/theme/print-theme.typ`, `typst-show.typ`, `ReportProfile.paper`)
+with a plain-language "About this report" table replacing raw identifiers on
+page 1 (PDF and HTML). The bench page was rebuilt as **one page** (converter
+cards → simulated/real tiles with visible limits → test cards by category →
+Preview/Start; two-step Stop; delete/rename; real-vs-simulated decided by the
+bench only — `TestRecipe.execution_mode` is now optional and ignored with a
+warning). An **automotive standards catalog** (`standards.py`,
+`docs/standards/iso16750-2.md`) lists ISO 16750-2:2023 section 4 with per-clause
+verdicts for this bench; the ISO card in "Which test?" has a 12 V / 24 V switch
+and "Add as tests" generates recipes (§4.2 steady sweep; §4.5 slow ramp and
+§4.6.2 reset staircase as **mock-only** types in `supply_profiles.py`; the real
+path refuses them until approved). Standards are cited by clause number and
+parameters only — never copy the standard's text; never invent a clause
+association to fill a field (owner's rule). Suite: 832 non-browser tests.
+
 Remaining, in order:
+0. **Cross-check the owner's 34-item characterization list against IEC/ISO**
+   (file not yet provided as of the last session): per item report
+   *verified / wrong clause / no association verified*.
 1. **Owner hardware decision:** an external current reference (DMM + shunt on
    the output lead, ideally the input lead too) is the only way to resolve the
    ≈11 mA readback disagreement and qualify light-load efficiency.
