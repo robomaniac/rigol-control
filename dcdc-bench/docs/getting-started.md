@@ -26,11 +26,12 @@ Contents: [1. What this software does](#1-what-this-software-does) ·
 2. You describe the converter, the bench limits and the test grid (input
    voltages × output loads) in saved *profiles*; a planner expands every
    requested point and marks it `executable`, `assumption_limited`,
-   `unsupported` or `approval_blocked` before anything is powered.
+   `unsupported` or `approval_blocked` (the planner's words, defined in the
+   [glossary](glossary.md)) before anything is powered.
 3. A separate worker process then steps through the executable points, waits
    for the output to settle, records time-stamped voltage and current readings
    from both instruments, and verifies that both outputs are OFF at the end.
-4. A pure analysis stage computes path efficiency, power loss and output
+4. A pure analysis stage computes [path efficiency](glossary.md#measurement-words), power loss and output
    regulation from the preserved raw samples, and a renderer produces an
    interactive HTML report plus a matching vector PDF.
 5. Everything runs locally on a Linux computer (the development bench is a
@@ -54,9 +55,12 @@ What it does **not** do:
   converter powered and the load input OFF. That is not the controller's
   quiescent current, no efficiency is computed at 0 A, and on the real bench the
   observation is not yet qualified ([glossary](glossary.md)).
-- It does not certify measurement accuracy. Until the bench profile carries
-  transcribed readback specifications, reports say uncertainty is
-  **unquantified** ([uncertainty-budget.md](uncertainty-budget.md)).
+- It does not certify measurement accuracy. Reports from the **real** bench say
+  uncertainty is **unquantified** until its bench profile carries transcribed
+  readback specifications ([uncertainty-budget.md](uncertainty-budget.md)); the
+  simulation's reports show a ± that comes from a synthetic example
+  specification written into the mock bench profile, not from an instrument
+  (section 4.6).
 - It is not a substitute for instrument protection settings or for a person at
   the bench. Guards are polled DC stop criteria, not transient protection.
 - It publishes nothing and has no authentication; the UI binds to loopback and
@@ -138,9 +142,9 @@ What it does **not** do:
    python3 dcdc-bench/tools/setup.py
    ```
 
-   What it does ([tools/setup.py](../tools/setup.py)): creates a **second**
-   environment at `dcdc-bench/.venv` with the `report,test` extras (the
-   dcdc-bench README's demo instructions use that one; you can ignore it and
+   What it does ([tools/setup.py](../tools/setup.py)): creates an optional
+   **second** environment at `dcdc-bench/.venv` with the `report,test` extras
+   (only the dcdc-bench README's Windows demo commands use it; ignore it and
    keep using the root `.venv` from step 3), downloads **Quarto 1.10.18** for
    Linux x86_64/ARM64 or Windows x64 into `dcdc-bench/.tools/` after verifying
    the published SHA-256, and, only if no `chromium-headless-shell`, `chromium`
@@ -281,13 +285,18 @@ converter, source and load.
    *What you should see:* the same JSON summary as `validate`, and a `plan.json` file.
 
    ```bash
-   .venv/bin/dcdc-bench run --plan plan.json --mode mock --out dcdc-bench/runs
+   .venv/bin/dcdc-bench run --plan plan.json --mode mock --out dcdc-bench/examples/generated/practice
    ```
 
-   *What you should see:* the run directory path `dcdc-bench/runs/<run_id>`
-   (exit code 0 when completed, 4 otherwise). `--scenario setup-limited` or
-   `aborted` reproduces the other two demo cases. This also renders reports,
-   so the memory note above applies.
+   *What you should see:* the run directory path
+   `dcdc-bench/examples/generated/practice/<run_id>` (exit code 0 when
+   completed, 4 otherwise). `--scenario setup-limited` or `aborted` reproduces
+   the other two demo cases. This also renders reports, so the memory note
+   above applies. Keep practice runs under `dcdc-bench/examples/generated/`
+   (ignored by Git) or use the page's simulation (step 6); never write them
+   into `dcdc-bench/runs/`, which holds the project's only copy of the real
+   measurements (that is where the command's default `--out runs` lands when it
+   is run from `dcdc-bench/`).
 
 6. Optional: open the bench page with the simulation only.
 
@@ -351,8 +360,9 @@ to this software.
    demo; for a converter test the DUT sits between the two instruments.
    *Why:* the software cannot detect reversed polarity or a CH2 connection.
    You will be asked to confirm **Converter input/output wiring and polarity
-   are correct** and **The converter input is connected to power-supply
-   channel 1** before every Start.
+   are correct** and **The converter is on DP821A CH1 (not CH2) and the load
+   input** before every Start (the supply model in that label comes from the
+   bench profile).
 
 3. **Use local sensing.** The supported wiring is DP821A CH1 with **local load
    sensing**: `remote_sense_required` must be `false` for source and load,
@@ -398,9 +408,9 @@ to this software.
 
    | Field | Where | What you are asserting |
    | --- | --- | --- |
-   | `execution_approval.real_hardware_enabled` | DUT profile | This converter profile may be used on real hardware at all. UI: **This converter profile is approved for real hardware**. |
+   | `execution_approval.real_hardware_enabled` | DUT profile | This converter profile may be used on real hardware at all. UI: **This converter is approved for the real bench**. |
    | `execution_approval.wiring_and_polarity_confirmed` | DUT profile | The wiring plan and polarity for this converter were reviewed. UI: **The wiring plan and polarity for this converter were reviewed**. |
-   | `protective_controls.approved` | bench profile | The protective limits saved in the bench profile were reviewed and approved for this bench. UI: **These protective limits were reviewed and are approved for this bench**. |
+   | `protective_controls.approved` | bench profile | The protective limits saved in the bench profile were reviewed and approved for this bench. UI: **I reviewed these limits — required once** under the preset pill; once saved it reads **Limits approved for this preset**. |
 
    The bench the UI seeds for real use, `rigol-local-limited`, ships with
    `approved: false`; the shipped DUT profile ships with both approvals
@@ -457,11 +467,16 @@ to this software.
 
 8. **Keep the physical disconnect within reach and stay at the bench.** Every
    recipe carries `allow_unattended: false` and `require_operator_arming:
-   true`; the Start confirmation includes **I reviewed these limits and will
-   supervise the run**. Software cleanup can fail on a connection, identity,
-   process or power fault ([Electrical/Wiring.md](../../Electrical/Wiring.md)),
-   and a disconnected browser or SSH session must never be read as "outputs
-   OFF" ([bench-ui.md](bench-ui.md)). Never leave a real run unattended.
+   true`, and the page's **What the real bench can and cannot do** panel lists
+   running unsupervised among the things the bench cannot do: an operator
+   stays at the bench. The Start confirmation asks you to tick **I reviewed
+   the protective limits: 1 A supply · 26 V input · 13.2 V / 2.55 A output**
+   (the selected preset's limits); no checkbox asks for a supervision promise,
+   so staying is your responsibility, not a form field. Software cleanup can
+   fail on a connection, identity, process or power fault
+   ([Electrical/Wiring.md](../../Electrical/Wiring.md)), and a disconnected
+   browser or SSH session must never be read as "outputs OFF"
+   ([bench-ui.md](bench-ui.md)). Never leave a real run unattended.
 
 9. **Make sure the host is ready.** Check memory (`free -m`,
    `.venv/bin/python -m dcdc_bench.resources`), close browsers and editors you
@@ -577,7 +592,7 @@ to this software.
    takes several minutes on a Pi.
 
    *What you should see:* **Preparing HTML and PDF**, then **Complete** with
-   links **Open interactive HTML**, **Open PDF** and **Report data JSON**.
+   links **Open HTML**, **Open PDF** and **Report data JSON**.
 
 9. **Find the evidence on disk.** Each job is one folder:
 

@@ -3,8 +3,10 @@
 Words the bench page, the reports and the guides use before they define them.
 Each entry says where the term comes from in the code or the evidence, so a
 definition here can be checked rather than believed. The bench page links this
-file from its footer (**Glossary**); the [getting-started guide](getting-started.md)
-and [bench-ui.md](bench-ui.md) link it at first use.
+file from its footer (**Glossary**); the two READMEs link it at their first use
+of *path efficiency* and *qualified*, the [getting-started guide](getting-started.md)
+from section 1 and section 4.6, and [bench-ui.md](bench-ui.md) where it
+describes the footer.
 
 ## Measurement words
 
@@ -12,12 +14,12 @@ and [bench-ui.md](bench-ui.md) link it at first use.
 | --- | --- | --- |
 | **DUT** | Device under test: the converter being characterized. | Guide §1; `profiles/dut/`. |
 | **Path efficiency** | Output power ÷ input power with both measured at the *instrument* terminals: `Vin`/`Iin` at the supply output, `Vout`/`Iout` at the load input. The losses in both pairs of leads are inside the number, so it is not converter-terminal efficiency. | `analysis.py`; the run's `measurement_boundary`; [engineering-figure-labels.md](engineering-figure-labels.md). |
-| **Measurement boundary** ("source-to-DUT-output path") | The span the four readings cover: from the supply terminals to the converter output as seen by the load. Names what the efficiency figure includes. | `measurement_boundary` in the bench profile; the report's *Setup and method*. |
+| **Measurement boundary** | The span the four readings cover: from the supply terminals to the converter output as seen by the load. Names what the efficiency figure includes. The text is the bench profile's `measurement_boundary`: the shipped mock profile spells it out as "source-to-load-terminal path (input and output wiring included; load in local sense)"; `domain.py`'s default for a profile that gives none is the older "source-to-DUT-output path", which `profiles/bench/mock-remote-sense.yaml` still carries. | `measurement_boundary` in the bench profile; `domain.py`; the report's *Setup and method*. |
 | **Qualified / qualification** | Whether a point's readings met the settling and acquisition policy (fresh, complete cycles acquired after electrical settling) and may carry a nominal efficiency claim. Values seen: `valid`, `inconclusive`, `setup-limited`, `not-run`, `unsupported`. Live readings on the page are *unqualified*; the report applies qualification. | `analysis.py`; the CSV column `qualification`. |
 | **Uncertainty unquantified** | No readback uncertainty budget was evaluated because the bench profile's `readback_specification` terms are `unknown`. Displayed digits are analysis precision, not accuracy. | [uncertainty-budget.md](uncertainty-budget.md). |
 | **k = 2, expanded uncertainty, specification-bound** | Metrology terms: a coverage factor of 2 applied to a budget built only from declared instrument specifications (no calibration data). In the simulation the specifications are *examples* written into the mock bench profile. | `uncertainty.py`; `profiles/bench/mock.yaml` (`status: synthetic_example`). |
 | **Enabled with no external load** | The input consumption recorded at a requested 0 A load with the converter powered and the load input OFF. It is not the controller's quiescent current, and no efficiency is computed at 0 A. On the real bench this observation is not yet qualified. | `runner.py`; [configured-runs.md](configured-runs.md). |
-| **Local vs remote sense** | Whether the load measures voltage at its own terminals (local) or through separate sense leads at the DUT (remote). The real bench uses local sensing; the mock profile declares remote sensing. | Guide §5.3; the bench profile's `remote_sense_required`. |
+| **Local vs remote sense** | Whether the load measures voltage at its own terminals (local) or through separate sense leads at the DUT (remote). Both the real bench and the shipped mock profile (`profiles/bench/mock.yaml`, `remote_sense_required: false`) use local sensing; `profiles/bench/mock-remote-sense.yaml` is the variant that exercises the remote-sense branch. | Guide §5.3; the bench profile's `remote_sense_required`. |
 | **Freshness** | Whether an instrument's readback reflects a new conversion rather than a repeated value. Unquantified on the real bench until measured. | [m2-freshness-and-readback-evidence.md](m2-freshness-and-readback-evidence.md). |
 | **Phase / window / cycle** | Phase: one input-voltage condition (a cold start each). Window: the acquisition interval for one load point. Cycle: one complete set of the four readings within a window. | `runner.py`; `raw/samples.jsonl`. |
 
