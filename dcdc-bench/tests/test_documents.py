@@ -631,3 +631,31 @@ def test_pdf_build_manifest_reports_real_success(documents):
         for fmt in ('html','pdf'):
             artifact=directory/f'report.{fmt}'
             assert manifest['artifacts'][fmt]['sha256'] == hashlib.sha256(artifact.read_bytes()).hexdigest()
+
+
+@pytest.mark.pdf
+def test_pdf_letter_pages_carry_identity_and_page_one_reads_in_plain_words(documents):
+    """Brief §12.6: page numbers and run identity on every page; §12.3: the first page is a summary
+    whose identity block reads in plain words, with the local recording time and identifiers last."""
+    from pypdf import PdfReader
+    for directory in documents:
+        model = json.loads((directory / 'report_model.json').read_text())
+        reader = PdfReader(directory / 'report.pdf')
+        assert json.loads((directory / 'build_manifest.json').read_text())['paper'] == 'letter'
+        for page in reader.pages:
+            assert (round(float(page.mediabox.width)), round(float(page.mediabox.height))) == (612, 792)
+        pages = [' '.join((page.extract_text() or '').split()) for page in reader.pages]
+        for number, text in enumerate(pages, 1):
+            assert model['run_id'] in text and f"Report revision {model['report_revision']}" in text
+            assert f'Page {number} of {len(pages)}' in text
+            assert model['evidence_label'] in text
+        first = pages[0]
+        for label in ('About this report', 'Device tested', 'Equipment', 'Measurement points', 'Recorded',
+                      'Evidence', 'Traceability', 'these match this document to its raw data files'):
+            assert label in first, label
+        # The header band converts the run's UTC start to the bench computer's zone and names it.
+        assert re.search(r'Recorded [A-Z][a-z]{2} \d{1,2}, \d{4}, \d{2}:\d{2} \S+', first), first[:400]
+        assert 'bench-computer local time; evidence files record UTC' in first
+        assert 'Summary' in first and 'Device tested' in first
+        assert re.search(r'Figure 1\. ', '\n'.join(pages)), 'captions read "Figure N." and sit below the figure'
+        assert model['analysis_id'] in first and 'settled-dc' in first

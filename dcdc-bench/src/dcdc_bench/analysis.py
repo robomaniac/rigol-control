@@ -1511,6 +1511,9 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
         dut=plan.dut.model_dump(), bench=plan.bench.model_dump(),
         execution={"status": run.get("execution_status", "unknown"),
                    "shutdown": run.get("shutdown", {}), "scenario": run.get("scenario", "unknown"),
+                   # Acquisition span for the report's "Recorded" line, UTC as written in run.json.
+                   "created_utc": run.get("created_utc"),
+                   "finished_utc": run.get("finished_utc") or run.get("completed_utc"),
                    **({"source_limit_search": copy.deepcopy(search)} if search else {}),
                    **({"voltage_efficiency_sweep": copy.deepcopy(voltage_sweep), "voltage_comparison": comparison} if voltage_sweep else {}),
                    **({"startup_descent": copy.deepcopy(startup_descent)} if startup_descent else {}),

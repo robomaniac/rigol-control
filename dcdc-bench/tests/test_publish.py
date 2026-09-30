@@ -334,7 +334,7 @@ def sensor_placement_revision(tmp_path, photo, name="private-lab-photo.png"):
     report = run_dir / "reports" / "r0001"
     document = annotation_document(entry["sha256"], [{"sensor_id": "TC1", "x_norm": 0.25, "y_norm": 0.5, "label": "Case top"}])
     (report / "annotations.json").write_text(json.dumps(annotations_file(run_dir, document)))
-    body = with_sensor_placement("## Summary\n\ntext\n\n**Run:** x\n", report, str)
+    body = with_sensor_placement("## Summary\n\ntext\n\n**Traceability:** Run ID x\n", report, str)
     section = body.split("```{=html}", 1)[1].split("```", 1)[0]
     html = report / "report.html"
     html.write_text(html.read_text().replace("</body>", section + "</body>"))

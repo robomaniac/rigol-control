@@ -1,9 +1,12 @@
 """Rendering validates references, preserves analysis, and reports failures honestly."""
+import contextlib
 import copy
 import csv
 import hashlib
 import io
 import json
+import os
+import time
 from pathlib import Path
 
 import pytest
@@ -717,3 +720,164 @@ def test_issued_export_carries_quality_flags_next_to_qualification(model, tmp_pa
     meta = json.loads((tmp_path / "exports/points.meta.json").read_text())
     column = next(column for column in meta["columns"] if column["name"] == "quality_flags")
     assert "implausible_power_ratio" in column["description"] and column["unit"] is None
+
+
+# --- Page-1 identity in plain language, and the print theme's identity strings ---
+
+@contextlib.contextmanager
+def _local_zone(name):
+    """Pin the bench computer's zone so ``datetime.astimezone()`` is reproducible."""
+    previous = os.environ.get("TZ")
+    os.environ["TZ"] = name
+    time.tzset()
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous
+        time.tzset()
+
+
+def _measured_bench(model):
+    """A measured pass-through model as the services build it: profile bench, reported identities, run span."""
+    model["title"] = "DC–DC converter characterization · Different 5 V DUT"
+    model["dut"] = {"identity": {"model": "Different 5 V DUT", "sample_id": "sample-1"}}
+    model["evidence_label"], model["report_revision"] = "MEASURED", "r0003"
+    model["boundary"] = "source-to-load-terminal path (input and output wiring included)"
+    model["bench"] = {"bench_id": "rigol-local-passthrough-12v",
+                      "source": {"instrument_id": "source", "channel": 1, "physical_model": None, "reported_identity": None},
+                      "load": {"instrument_id": "load", "physical_model": None, "reported_identity": None},
+                      "measurements": {"Vin_V": {"instrument_id": "source", "quantity": "Vin_V", "unit": "V", "location": "source_terminals"},
+                                       "Iin_A": {"instrument_id": "source", "quantity": "Iin_A", "unit": "A", "location": "source_output"},
+                                       "Vout_V": {"instrument_id": "load", "quantity": "Vout_V", "unit": "V", "location": "load_input_terminals_local_sense"},
+                                       "Iout_A": {"instrument_id": "load", "quantity": "Iout_A", "unit": "A", "location": "load_input"}}}
+    model["provenance"] = {"formula_version": "settled-dc-1.3", "instrument_identities": {
+        "source": {"model": "DP821A", "serial": "S1", "firmware": "1", "manufacturer": "RIGOL"},
+        "load": {"model": "DL3031A", "serial": "S2", "firmware": "2", "manufacturer": "RIGOL"}}}
+    model["execution"] = {"status": "completed", "created_utc": "2026-09-29T20:37:15.209079+00:00",
+                          "finished_utc": "2026-09-29T20:38:24.124378+00:00"}
+    return model
+
+
+def test_page_one_about_table_reads_in_plain_words_with_identifiers_last(model):
+    """The reader learns what was tested, with what, where and when before any identifier (brief §12.3, §8.2)."""
+    with _local_zone("America/Los_Angeles"):
+        body = renderer._body(_measured_bench(model))
+    assert body.startswith("::: {.report-table .table-about}")
+    assert body.index("About this report") < body.index("## Summary {#summary}")
+    rows = ["| About this report |  |",
+            "| Device tested | Different 5 V DUT — Sample: sample-1 |",
+            "| Equipment | DP821A CH1 (supply), DL3031A (load); bench profile rigol-local-passthrough-12v |",
+            "| Measurement points | Input measured at the supply terminals, output at the load terminals; "
+            "wiring losses are included in the path. |",
+            "| Recorded | Sep 29, 2026, 13:37–13:38 PDT (bench-computer local time; evidence files record UTC) |",
+            "| Evidence | Measured — readings were acquired from the connected instruments during this run. |",
+            "| Traceability | Run ID synthetic-run; analysis analysis-1; method version settled-dc-1.3; "
+            "report revision r0003 — these match this document to its raw data files. |"]
+    positions = [body.index(row) for row in rows]
+    assert positions == sorted(positions), "rows keep their order; identifiers close the table"
+    # Plain labels replace the jargon in the body; the computed content is unchanged.
+    assert ("**MEASURED — Input measured at the supply terminals, output at the load terminals; "
+            "wiring losses are included in the path.**") in body
+    assert "## Device tested {#dut}" in body
+    assert "**Equipment profile:** rigol-local-passthrough-12v" in body
+    assert ("**Measurement points:** Input measured at the supply terminals, output at the load terminals; wiring losses "
+            "are included in the path. Declared path: source-to-load-terminal path (input and output wiring included).") in body
+    assert "**Traceability:** Run ID synthetic-run; analysis analysis-1; method version settled-dc-1.3; report revision r0003" in body
+    for jargon in ("**bench id:**", "**Run:** ", "**Analysis:** ", "## Device under test", "Boundary:"):
+        assert jargon not in body
+    assert body.count("these match this document to its raw data files") == 2, "page 1 and the appendix"
+
+
+def test_measurement_points_follow_the_recorded_bindings_and_declared_path(model):
+    """The sentence is derived from the bindings and the path text, never fixed for one recipe."""
+    dut_output = {"boundary": "source-to-DUT-output path", "bench": {"measurements": {
+        "Vin_V": {"location": "source_terminals"}, "Iin_A": {"location": "source_output"},
+        "Vout_V": {"location": "dut_output_sense"}, "Iout_A": {"location": "dut_output"}}}}
+    assert renderer._measurement_points(dut_output) == (
+        "Input measured at the supply terminals, output at the DUT output terminals through the remote-sense leads; "
+        "input wiring losses are included in the path, output wiring is not.")
+    bare = {"boundary": "source-to-DUT-output path", "bench": {"measurements": {
+        "Vin_V": {"location": "source_terminals"}, "Vout_V": {"location": "dut_output"}}}}
+    assert renderer._measurement_points(bare) == (
+        "Input measured at the supply terminals, output at the DUT output terminals; "
+        "input wiring losses are included in the path, output wiring is not.")
+    unknown_vocabulary = {"boundary": "custom fixture", "bench": {"measurements": {
+        "Vin_V": {"location": "jig_input"}, "Vout_V": {"location": "jig_output"}}}}
+    assert renderer._measurement_points(unknown_vocabulary) == "Input measured at jig input, output at jig output."
+    assert renderer._measurement_points(model) == "Measured across the declared path: source-to-DUT-output path."
+    assert renderer._measurement_points({"bench": {}}) == "Measurement points not recorded in this report model."
+
+
+def test_equipment_and_recorded_lines_never_invent_a_model_or_a_time(model):
+    """Without reported identities the profile's own words are used; without run times, a plain notice."""
+    assert renderer._equipment_text(model) == "Equipment not recorded in this report model"
+    mock = {"bench": {"bench_id": "mock", "source": {"channel": 1, "reported_identity": "SYNTHETIC source with CH1 envelope"},
+                      "load": {"reported_identity": None, "physical_model": None}}}
+    assert renderer._equipment_text(mock) == ("SYNTHETIC source with CH1 envelope (supply), "
+                                              "load instrument (model not reported) (load); bench profile mock")
+    assert renderer._recorded(model) == ("", "Run time not recorded in this report model")
+    with _local_zone("America/Los_Angeles"):
+        spanning = {"execution": {"created_utc": "2026-09-29T23:37:15+00:00", "finished_utc": "2026-09-30T07:38:24Z"}}
+        assert renderer._recorded(spanning) == ("Sep 29, 2026, 16:37 PDT",
+            "Sep 29, 2026, 16:37 PDT to Sep 30, 2026, 00:38 PDT (bench-computer local time; evidence files record UTC)")
+        start_only = {"execution": {"created_utc": "2026-09-29T20:37:15.209079+00:00"}}
+        assert renderer._recorded(start_only)[1] == "Sep 29, 2026, 13:37 PDT (bench-computer local time; evidence files record UTC)"
+    identity = renderer._report_identity(model)
+    assert identity == {"title": "DC–DC converter characterization", "dut": "Different 5 V DUT", "evidence": "SYNTHETIC",
+                        "recorded": "", "subtitle": "SYNTHETIC evidence", "run": "synthetic-run", "revision": "r0001",
+                        "analysis": "analysis-1"}
+    with _local_zone("America/Los_Angeles"):
+        measured = renderer._report_identity(_measured_bench(model))
+    assert measured["title"] == "DC–DC converter characterization"
+    assert measured["recorded"] == "Sep 29, 2026, 13:37 PDT"
+    assert measured["subtitle"] == "MEASURED evidence · Recorded Sep 29, 2026, 13:37 PDT"
+    assert renderer._typst_string('x" + sys.inputs.at("y") + "\\ line\nbreak') == '"x\\" + sys.inputs.at(\\"y\\") + \\"\\\\ line break"'
+
+
+def test_paper_selection_reaches_the_typst_template_partial_and_manifest(model, tmp_path, monkeypatch):
+    """Letter by default, A4 on request, nothing else; the partial and identity include travel with the document."""
+    from types import SimpleNamespace
+    import plotly.offline
+    monkeypatch.setattr(plotly.offline, "get_plotlyjs", lambda: "window.runtimeFixture=true;")
+    monkeypatch.setattr(renderer, "_quarto", lambda: "quarto-test-fixture")
+
+    async def static_fixture(model, directory):
+        for spec in model["figures"]:
+            for extension in ("svg", "pdf"):
+                (directory / (spec["id"] + "." + extension)).write_text("unit-test fixture")
+    monkeypatch.setattr(renderer, "_write_static_figures", static_fixture)
+
+    def document_fixture(command, **kwargs):
+        if command[-1] == "--version":
+            return SimpleNamespace(stdout="1.10.18\n", stderr="", returncode=0)
+        directory = Path(kwargs["cwd"])
+        (directory / "report.html").write_text("<!doctype html><html><body>"
+                                               + (directory / "interactions.html").read_text() + "</body></html>")
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+    monkeypatch.setattr(renderer.subprocess, "run", document_fixture)
+
+    def tool_fixture(command, **kwargs):
+        result = document_fixture(command, cwd=kwargs["cwd"])
+        result.usage = {"timed_out": False, "survivors": [], "command": command}
+        return result
+    monkeypatch.setattr(renderer, "_run_tool", tool_fixture)
+
+    manifest = render_report(model, tmp_path / "letter", formats=("html",))
+    qmd = (tmp_path / "letter/report.qmd").read_text()
+    assert "papersize: us-letter" in qmd and "template-partials:\n      - typst-show.typ" in qmd
+    assert 'subtitle: "SYNTHETIC evidence"' in qmd and "number-sections: true" in qmd
+    header = (tmp_path / "letter/print-header.typ").read_text()
+    assert header.startswith("#let dcdc-id = (\n") and 'paper: "us-letter",' in header and 'run: "synthetic-run",' in header
+    assert (tmp_path / "letter/typst-show.typ").read_text() == (renderer.TEMPLATES / "theme/typst-show.typ").read_text()
+    assert manifest["paper"] == "letter"
+    assert {"print-theme.typ", "typst-show.typ", "print-tables.typ"} <= set(manifest["render_sources_sha256"])
+    manifest = render_report(model, tmp_path / "a4", formats=("html",), paper="a4")
+    assert manifest["paper"] == "a4"
+    assert "papersize: a4" in (tmp_path / "a4/report.qmd").read_text()
+    assert 'paper: "a4",' in (tmp_path / "a4/print-header.typ").read_text()
+    with pytest.raises(ValueError, match="letter or a4"):
+        render_report(model, tmp_path / "legal", formats=("html",), paper="legal")
+    assert not (tmp_path / "legal").exists()

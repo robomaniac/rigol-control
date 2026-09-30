@@ -109,11 +109,94 @@ def test_short_table_moves_whole_to_the_next_page_with_its_heading(tmp_path):
     assert "After the table." in pages[1]
 
 
-def test_print_header_carries_the_table_rule_and_sticky_headings():
-    header = renderer._print_header("SYNTHETIC · 12T12-4A · run-1")
-    assert 'header: text(size: 7pt, fill: rgb("516677"), "SYNTHETIC · 12T12-4A · run-1")' in header
-    assert HEADING_RULE in header
-    assert header.endswith(THEME.read_text(encoding="utf-8"))
+THEME_IDENTITY = {"title": "DC–DC converter characterization", "dut": "FIXTURE-DUT", "evidence": "SYNTHETIC",
+                  "recorded": "Sep 29, 2026, 13:37 PDT", "subtitle": "SYNTHETIC evidence · Recorded Sep 29, 2026, 13:37 PDT",
+                  "run": "run-fixture-lone-row", "revision": "r0001", "analysis": "a-1"}
+# What Quarto emits after the header include: its page partial, then the typst-show.typ partial.
+QUARTO_PAGE_AND_SHOW = """#set page(
+  paper: "us-letter",
+  margin: (x: 1.25in,y: 1.25in,),
+  numbering: none,
+  columns: 1,
+)
+#show: doc => dcdc-report(doc)
+"""
+THEME_BODY = """
+#block[
+#table(
+  columns: (22%, 78%),
+  align: (auto,auto,),
+  table.header([About this report], [],),
+  table.hline(),
+  [Device tested], [FIXTURE-DUT — Sample: s1],
+  [Traceability], [Run ID run-fixture-lone-row; analysis a-1; method version v; report revision r0001 — these match this document to its raw data files.],
+)
+]
+= Summary
+<summary>
+#lorem(80)
+
+== Coverage
+<coverage>
+#table(
+  columns: 4,
+  align: (auto,auto,auto,auto,),
+  table.header([Test], [Requested], [Valid], [Other outcomes],),
+  table.hline(),
+  [load], [4], [1], [inconclusive: 3],
+)
+#pagebreak()
+= Results
+<results>
+#lorem(900)
+
+= Appendix
+<appendix>
+#lorem(40)
+"""
+
+
+def test_print_header_carries_identity_theme_and_table_rule():
+    header = renderer._print_header(THEME_IDENTITY)
+    assert header.startswith("#let dcdc-id = (\n")
+    for line in ('  dut: "FIXTURE-DUT",', '  evidence: "SYNTHETIC",', '  run: "run-fixture-lone-row",',
+                 '  revision: "r0001",', '  recorded: "Sep 29, 2026, 13:37 PDT",', '  paper: "us-letter",'):
+        assert line in header
+    assert '  paper: "a4",' in renderer._print_header(THEME_IDENTITY, "a4")
+    with pytest.raises(ValueError, match="letter or a4"):
+        renderer._print_header(THEME_IDENTITY, "legal")
+    theme = (renderer.TEMPLATES / "theme/print-theme.typ").read_text(encoding="utf-8")
+    assert theme in header and header.endswith(THEME.read_text(encoding="utf-8"))
+    # Headings travel with the block after them; identity and page numbers sit on every page.
+    assert "sticky: true" in theme
+    assert "Run #dcdc-id.run · Report revision #dcdc-id.revision" in theme
+    assert "Page #counter(page).display() of #counter(page).final().first()" in theme
     assert header.count("#show table: dcdc-paginate-table") == 1
     # The rule leaves tables that already carry a footer alone, so it cannot recurse on its own output.
     assert "table.footer) { return it }" in header
+    # Identity strings are literals, never code.
+    hostile = renderer._print_header(dict(THEME_IDENTITY, dut='x" + sys.inputs.at("y") + "', run="line\nbreak"))
+    assert '  dut: "x\\" + sys.inputs.at(\\"y\\") + \\"",' in hostile and '  run: "line break",' in hostile
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("paper, size", [("letter", (612, 792)), ("a4", (595, 842))])
+def test_datasheet_theme_pages_carry_identity_numbers_and_flow_continuously(tmp_path, paper, size):
+    """The theme applied exactly as Quarto assembles it: Letter/A4, identity and page number on every page,
+    numbered sections, the body's hard page breaks collapsed, and no pagination finding."""
+    from pypdf import PdfReader
+    pdf = _compile(tmp_path, paper, renderer._print_header(THEME_IDENTITY, paper) + QUARTO_PAGE_AND_SHOW + THEME_BODY)
+    reader = PdfReader(str(pdf))
+    assert {(round(float(page.mediabox.width)), round(float(page.mediabox.height))) for page in reader.pages} == {size}
+    pages = _page_texts(pdf)
+    assert len(pages) >= 2
+    for number, text in enumerate(pages, 1):
+        assert "run-fixture-lone-row" in text and "Report revision r0001" in text
+        assert f"Page {number} of {len(pages)}" in text
+        assert "SYNTHETIC · Recorded Sep 29, 2026, 13:37 PDT" in text
+    assert "About this report" in pages[0] and "Device tested FIXTURE-DUT" in pages[0]
+    result = check_pdf(pdf, MODEL)
+    assert [finding.code for finding in result.findings if finding.severity == "error"] == []
+    first = result.to_dict()["pages"][0]
+    assert first["page_number"] == f"Page 1 of {len(pages)}" and first["run_id_present"]
+    assert {"1 Summary", "1.1 Coverage", "2 Results"} <= set(first["headings"]), "numbered; the page break became a gap"

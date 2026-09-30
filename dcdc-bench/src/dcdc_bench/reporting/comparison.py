@@ -58,7 +58,7 @@ def _footer(model: dict, spec: dict, conditions: str) -> str:
     sign = f"Differences = run {labels[1]} − run {labels[0]}" if len(labels) >= 2 else "Differences = other run − reference run"
     return (f"{model.get('evidence_label', 'Evidence status not supplied')} | {model['dut']['identity']['model']} | "
             f"Comparison {model.get('comparison_id', model['run_id'])}<br>{spec['id']} | {conditions}<br>Runs: {runs}<br>"
-            f"Boundary: {model.get('boundary', 'not supplied')} | {sign}; uncertainty not evaluated unless stated")
+            f"Measured path: {model.get('boundary', 'not supplied')} | {sign}; uncertainty not evaluated unless stated")
 
 
 def plot_comparison_figure(model: dict, spec: dict, number: int):
@@ -149,7 +149,7 @@ def comparison_body(model: dict, *, figure_suffix: str = "svg") -> str:
     reference, other = (labels[0], labels[1]) if len(labels) >= 2 else ("A", "B")
     figure_registry = {figure["id"] for figure in model["figures"]}
     metric_registry = {metric["id"]: metric for metric in model["metrics"]}
-    out = ["## Summary {#summary}", "", f"**{_md(evidence)} — paired comparison — {_md(model.get('boundary', 'Boundary not supplied'))}.**", "",
+    out = ["## Summary {#summary}", "", f"**{_md(evidence)} — paired comparison. Measured path: {_md(model.get('boundary', 'not supplied'))}.**", "",
            "This issued summary is fixed. Reader filters change exploratory views only. Every difference is "
            f"run {_md(other)} minus run {_md(reference)}; both signs receive the same neutral treatment.", ""]
     references = {item["paragraph_index"]: item["metric_ids"] for item in model.get("summary_evidence", [])}
@@ -166,7 +166,7 @@ def comparison_body(model: dict, *, figure_suffix: str = "svg") -> str:
         reference_text = " See " + ", ".join("@" + fid for fid in figure_ids) + "." if figure_ids else ""
         out += [_md(text) + reference_text, ""]
     out += ["### Compared runs", "", _rows_table(
-        ["Run", "Run ID", "Analysis", "Evidence", "DUT", "Bench", "Outcome", "Acquired (UTC)", "Valid / points", "Uncertainty budget"],
+        ["Run", "Run ID", "Analysis", "Evidence", "DUT", "Equipment profile", "Outcome", "Acquired (UTC)", "Valid / points", "Uncertainty budget"],
         [[run["label"], run["run_id"], run["analysis_id"], run["evidence_label"], run["dut_model"], run["bench_id"],
           run["execution_status"], run.get("created_utc") or "not recorded", f"{run['valid_count']} / {run['point_count']}",
           run["uncertainty_status"]] for run in runs]), ""]

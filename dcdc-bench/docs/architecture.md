@@ -149,7 +149,7 @@ host's free memory.
 | Folder | Contents |
 | --- | --- |
 | `profiles/` | Checked-in YAML: `dut/12t12-4a.yaml`; `bench/mock.yaml`, `bench/mock-thermal.yaml`, `bench/rigol.example.yaml` (blocked from execution); `recipes/` for the quick grid, rated grid, extended, source-limit, voltage-efficiency, thermal-mock and UVLO example procedures; `report/engineering.yaml`. |
-| `templates/` | `characterization.qmd` (the Quarto document), `theme/report.css`, `web/report.js` (the offline interaction script embedded in each HTML report). |
+| `templates/` | `characterization.qmd` (the Quarto document), `theme/report.css`, `theme/print-theme.typ` (the PDF "datasheet" theme: Letter/A4 page, header band with evidence label and local recording time, footer with run identity and page x of y, hanging section numbers, hairline tables, "Figure N." captions; applied through the `theme/typst-show.typ` Quarto template partial, which replaces Quarto's own `#show: article(...)` block), `theme/print-tables.typ` (PDF-02 table pagination), `web/report.js` (the offline interaction script embedded in each HTML report). The renderer writes the identity dictionary the theme reads into `print-header.typ` (Quarto header include) and copies the partial next to `report.qmd`. |
 | `tools/` | `setup.py` (virtual environment, pinned Quarto with SHA-256 check, browser detection) and `theme_preview.py` (the figure-theme previews described in [report-aesthetics-options.md](report-aesthetics-options.md)). |
 | `tests/` | The pytest suite and `fixtures/`. |
 | `workspace/`, `runs/`, `examples/generated/`, `diagnostics/`, `.tools/` | Created at run time and ignored by Git: the UI workspace, CLI run folders, demo output, `doctor` reports and the downloaded Quarto. |

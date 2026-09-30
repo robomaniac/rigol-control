@@ -51,7 +51,7 @@ PUBLISHED_REPORT_FILES = ("report.html", "report_model.json", "build_manifest.js
 NEVER_PUBLISHED = ("raw/", "scpi.jsonl", "request.json", "plan.json", "run.json", "analysis/",
                    "reports/<revision>/report.qmd", "reports/<revision>/report.typ", "reports/<revision>/render-*.log",
                    "reports/<revision>/interactions.html", "reports/<revision>/metadata.html",
-                   "reports/<revision>/print-header.typ")
+                   "reports/<revision>/print-header.typ", "reports/<revision>/typst-show.typ")
 MAX_APPROVAL_BYTES = 200_000
 MAX_APPROVAL_DEPTH = 8
 MAX_APPROVAL_ATTACHMENTS = 100
