@@ -2,9 +2,22 @@
 
 Reads ``standards.catalog`` for the selected bench, converter and system class
 and turns it into what the page shows: one card per standard, and for
-ISO 16750-2 one row per clause with a badge (``runs here``, ``procedure not
-yet implemented``, or the grey reason). ``build_recipe`` turns a tickable
-clause into a saved-recipe dict for ``JobService.save_profile('recipe', ...)``:
+ISO 16750-2 one row per clause with a badge. Badge kinds and labels:
+
+* ``runs_here`` "runs here": tickable and ticked by default (4.2);
+* ``runs_after_approval`` "runs here after approval": tickable, not ticked by
+  default; the generated recipe steps below the converter's stated minimum
+  and plans as ``approval_blocked`` until approved (4.5 and 4.6.2 on the
+  simulated bench). The row's ``approval`` text says where approval happens;
+* ``mock_only`` "mock only": not tickable; the procedure exists on the
+  synthetic plant only and this is a real bench (4.5 and 4.6.2 on a real
+  profile);
+* ``procedure_pending`` "procedure not yet implemented": the requirement a
+  procedure would have to meet (4.3.1.1, 4.6.1.2);
+* ``needs_split``, ``needs_instrument`` and the grey reasons.
+
+``build_recipe`` turns a tickable clause into a saved-recipe dict for
+``JobService.save_profile('recipe', ...)``:
 
 * clause 4.2 -> an existing-type ``steady_state_load_sweep`` at UA, Usmin and
   Usmax with a small load grid (levels outside the bench envelope stay in the
@@ -15,10 +28,12 @@ clause into a saved-recipe dict for ``JobService.save_profile('recipe', ...)``:
 * clause 4.6.2 -> ``reset_staircase`` (mock only): Usmin alternating with the
   5 % lows of Usmin, held >= 5 s / >= 10 s.
 
-Profiles that step below the DUT's stated minimum ship unapproved
-(``authorization.uvlo_approved`` false): the planner blocks them until the
-owner approves the recipe under the bench's protective policy (brief 7.5),
-exactly as the shipped UVLO example does. Nothing here opens an instrument.
+Profiles that step below the DUT's stated minimum are written unapproved
+(``authorization.uvlo_approved`` false) on purpose: approving them is the
+owner's act under brief 7.5, recorded in the saved recipe file
+(``<workspace>/profiles/recipe/<recipe_id>.json``) exactly as the shipped
+UVLO example describes; ``standards.APPROVAL_HOW`` names every field. This
+module never approves a recipe and never opens an instrument.
 """
 from __future__ import annotations
 
@@ -48,9 +63,12 @@ SHORT_INSTRUMENT_NAMES = {
     S.TRANSIENT_GENERATOR: "transient generator", S.EMC_CHAMBER: "EMC chamber", S.ESD_SIMULATOR: "ESD simulator",
     S.SHAKER: "shaker", S.CLIMATIC_CHAMBER: "climatic chamber",
 }
-BADGE_LABELS = {"runs_here": "runs here", "procedure_pending": "procedure not yet implemented",
+BADGE_LABELS = {"runs_here": "runs here", "runs_after_approval": "runs here after approval", "mock_only": "mock only",
+                "needs_split": "needs split", "procedure_pending": "procedure not yet implemented",
                 "not_on_this_bench": "not on this bench", "outside_dut_rating": "outside DUT rating",
                 "excluded_by_policy": "excluded by policy", "not_applicable": "not applicable"}
+# Badge kinds whose row can be ticked; only ``runs_here`` is ticked when the standard is selected.
+TICKABLE_BADGES = ("runs_here", "runs_after_approval")
 # Fixed light load for the mock supply profiles; rated-load mode 3.4 is not reachable from the 1 A source.
 PROFILE_LOAD_A = 0.1
 DC_LOAD_GRID_A = [0.1, 0.25, 0.5]
@@ -74,19 +92,25 @@ def default_system(dut: DutProfile | dict) -> str:
 
 
 def badge(entry: S.CatalogEntry) -> dict[str, Any]:
-    """Badge kind, label and whether the row can be ticked, from the clause's verdict and procedure state."""
+    """Badge kind, label, tickability and default tick, from the clause's verdict and procedure state.
+
+    ``ticked_by_default`` is true only for ``runs_here``: a clause whose
+    recipe needs approval first is offered, never pre-selected.
+    """
     clause, verdict = entry.clause, entry.feasibility
-    if verdict.status == "runs_here" and clause.procedure_status in ("recipe", "mock_only") and entry.recipe is not None:
-        return {"kind": "runs_here", "label": BADGE_LABELS["runs_here"], "tickable": True, "text": None}
-    if clause.procedure_gap and verdict.status in ("runs_here", "needs_instrument"):
+    if verdict.status in S.RUNNABLE_STATUSES and clause.procedure_status in ("recipe", "mock_only") and entry.recipe is not None:
+        return {"kind": verdict.status, "label": BADGE_LABELS[verdict.status], "tickable": True,
+                "ticked_by_default": verdict.status == "runs_here",
+                "text": S.APPROVAL_HOW if verdict.status == "runs_after_approval" else None}
+    if clause.procedure_gap and verdict.status in (*S.RUNNABLE_STATUSES, "needs_instrument", "needs_split"):
         return {"kind": "procedure_pending", "label": BADGE_LABELS["procedure_pending"], "tickable": False,
-                "text": clause.procedure_gap}
+                "ticked_by_default": False, "text": clause.procedure_gap}
     if verdict.status == "needs_instrument":
         names = [SHORT_INSTRUMENT_NAMES.get(token, token) for token in verdict.missing if token in S.INSTRUMENT_TOKENS]
         label = "needs " + (", ".join(names[:2]) if names else "another instrument")
-        return {"kind": "needs_instrument", "label": label, "tickable": False, "text": verdict.reason}
+        return {"kind": "needs_instrument", "label": label, "tickable": False, "ticked_by_default": False, "text": verdict.reason}
     return {"kind": verdict.status, "label": BADGE_LABELS.get(verdict.status, verdict.status.replace("_", " ")),
-            "tickable": False, "text": verdict.reason}
+            "tickable": False, "ticked_by_default": False, "text": verdict.reason}
 
 
 def levels_text(entry: S.CatalogEntry, system: str) -> str:
@@ -116,30 +140,62 @@ def levels_text(entry: S.CatalogEntry, system: str) -> str:
 
 
 def clause_rows(bench: BenchProfile | dict, dut: DutProfile | dict, system: str) -> list[dict[str, Any]]:
-    """One row per ISO 16750-2 test clause for the checklist: badge, tickability, reason, conditions and levels."""
+    """One row per ISO 16750-2 test clause for the checklist.
+
+    Keys the page renders: ``badge`` (kind), ``badge_label``, ``tickable``,
+    ``ticked_by_default``, ``needs_approval``, ``approval`` (where approval is
+    recorded, for rows that need it), ``text``, ``reason``, ``conditions``,
+    ``levels`` and ``test_type`` (the saved-recipe type of a tickable row).
+    """
     bench_model, dut_model = _models(bench, dut)
     category = next(c for c in S.catalog(bench_model, dut_model, system) if c.id == S.CATEGORY_ISO16750_2)
     rows = []
     for entry in category.entries:
         kind = badge(entry)
+        verdict = entry.feasibility
         rows.append({"number": entry.clause.number, "title": entry.clause.title, "citation": entry.clause.citation,
-                     "status": entry.feasibility.status, "badge": kind["kind"], "badge_label": kind["label"],
-                     "tickable": kind["tickable"], "text": kind["text"], "reason": entry.feasibility.reason,
-                     "conditions": list(entry.feasibility.conditions), "levels": levels_text(entry, system),
-                     "test_type": {"4.2": "steady_state_load_sweep", "4.5": SLOW_SUPPLY_RAMP_TEST_TYPE,
-                                   "4.6.2": RESET_STAIRCASE_TEST_TYPE}.get(entry.clause.number) if kind["tickable"] else None})
+                     "status": verdict.status, "badge": kind["kind"], "badge_label": kind["label"],
+                     "tickable": kind["tickable"], "ticked_by_default": kind["ticked_by_default"],
+                     "needs_approval": verdict.needs_approval, "approval": S.APPROVAL_HOW if verdict.needs_approval else None,
+                     "text": kind["text"], "reason": verdict.reason,
+                     "conditions": list(verdict.conditions), "levels": levels_text(entry, system),
+                     "test_type": S.RECIPE_TEST_TYPES.get(entry.clause.recipe_kind or "") if kind["tickable"] else None})
     return rows
 
 
+def card_summary(rows: list[dict[str, Any]]) -> str:
+    """The ISO card's one-line count: runnable now, after approval, and mock only, whichever are non-zero."""
+    now = sum(1 for row in rows if row["badge"] == "runs_here")
+    after = sum(1 for row in rows if row["badge"] == "runs_after_approval")
+    mock_only = sum(1 for row in rows if row["badge"] == "mock_only")
+    parts = [f"{now} clause{'s' if now != 1 else ''} runnable now"]
+    if after:
+        parts.append(f"{after} after approval")
+    if mock_only:
+        parts.append(f"{mock_only} mock only (simulated bench)")
+    return ", ".join(parts)
+
+
 def standard_cards(bench: BenchProfile | dict, dut: DutProfile | dict, system: str) -> list[dict[str, Any]]:
-    """One card per standard in catalog order; a standard with no tickable clause carries its one-sentence reason."""
+    """One card per standard in catalog order; a standard with no tickable clause carries its one-sentence reason.
+
+    ``runnable_count`` counts clauses runnable now (``runs_here``);
+    ``after_approval_count`` and ``mock_only_count`` are separate, and
+    ``summary`` is the sentence the card prints ("1 clause runnable now, 2
+    after approval"). ``tickable_count`` is what "Add as tests" can offer.
+    """
     bench_model, dut_model = _models(bench, dut)
     rows = clause_rows(bench_model, dut_model, system)
-    runnable = sum(1 for row in rows if row["tickable"])
+    tickable = sum(1 for row in rows if row["tickable"])
+    now = sum(1 for row in rows if row["badge"] == "runs_here")
+    after = sum(1 for row in rows if row["badge"] == "runs_after_approval")
+    mock_only = sum(1 for row in rows if row["badge"] == "mock_only")
+    summary = card_summary(rows)
     cards = [{"id": S.ISO16750_2_ID, "title": STANDARD_CARD_TITLES[S.ISO16750_2_ID],
-              "subtitle": "Section 4 supply profiles as a clause checklist", "runnable": runnable > 0,
-              "reason": None if runnable else "No clause of section 4 can run on this bench for this converter",
-              "runnable_count": runnable, "clause_count": len(rows), "expandable": True}]
+              "subtitle": f"Section 4 supply profiles as a clause checklist: {summary}", "runnable": tickable > 0,
+              "reason": None if tickable else "No clause of section 4 can run on this bench for this converter",
+              "runnable_count": now, "after_approval_count": after, "mock_only_count": mock_only,
+              "tickable_count": tickable, "summary": summary, "clause_count": len(rows), "expandable": True}]
     verdicts = {(e.clause.standard_id): e.feasibility for c in S.catalog(bench_model, dut_model, system) for e in c.entries}
     for standard_id, standard in S.STANDARDS.items():
         if standard_id == S.ISO16750_2_ID:
@@ -243,9 +299,10 @@ def build_recipe(number: str, system: str, dut: DutProfile | dict, bench: BenchP
                                f"below the converter's stated {ratings.input_voltage_min_V:g} V minimum; at or above it the output "
                                "must stay in band. The standard's 0 V end level is not requested (a 0 V source setpoint is outside "
                                f"the planner's positive-input rule); the profile ends at {RAMP_FLOOR_V:g} V and the report records "
-                               "that deviation. Synthetic plant only: not yet approved for real hardware. Levels below the stated "
-                               "minimum take the approved UVLO-style path (brief 7.5): approve this recipe under the bench's "
-                               "protective policy before it will plan as executable.")
+                               "that deviation. Synthetic plant only: a real bench refuses this test type as not yet approved for "
+                               f"real hardware, and the {params['duration_per_direction_s']:g} s ramp per direction exceeds the real "
+                               f"path's {S.REAL_SOFTWARE_DEADLINE_S:g} s deadline. Levels below the stated minimum take the approved "
+                               f"UVLO-style path (brief 7.5). {S.APPROVAL_HOW}.")
     elif number == "4.6.2":
         levels = staircase_levels(params["Usmin_V"], params["low_levels_V"])
         data["tests"] = [{"id": f"iso16750-2-4-6-2-{system.lower()}", "type": RESET_STAIRCASE_TEST_TYPE,
@@ -263,9 +320,9 @@ def build_recipe(number: str, system: str, dut: DutProfile | dict, bench: BenchP
                                f"recorded state at lows below the converter's stated {ratings.input_voltage_min_V:g} V minimum; at every "
                                "recovery level the output must be back in band. The standard's 0 V end level is not requested "
                                "(a 0 V source setpoint is outside the planner's positive-input rule); the report records that "
-                               "deviation. Synthetic plant only: not yet approved for real hardware. Lows below the stated minimum "
-                               "take the approved UVLO-style path (brief 7.5): approve this recipe under the bench's protective "
-                               "policy before it will plan as executable.")
+                               "deviation. Synthetic plant only: a real bench refuses this test type as not yet approved for real "
+                               "hardware. Lows below the stated minimum take the approved UVLO-style path (brief 7.5). "
+                               f"{S.APPROVAL_HOW}.")
     else:
         raise ValueError(f"{clause.citation} has no recipe generator yet")
     return TestRecipe.model_validate(data).model_dump()
