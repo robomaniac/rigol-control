@@ -225,6 +225,12 @@ class Widget:
     def disable(self):
         self.enabled = False
 
+    def set_visibility(self, visible):
+        self.visible = visible
+
+    def tooltip(self, text):
+        return self
+
 
 class FakeUI:
     def __init__(self):
@@ -304,8 +310,14 @@ def test_editor_page_drives_select_upload_place_nudge_and_save_without_a_server(
         await ui.pages["/annotations"]()
         jobs = [w for w in ui.widgets if w.kind == "select" and w.kwargs.get("label") == "Finished run"][-1]
         assert job_id in jobs.args[0]
+        # UX M11: every option says whether the run is simulated; the uploader waits for a chosen run; no empty notice box.
+        assert jobs.args[0][job_id].count("Simulation · synthetic data") == 1 and jobs.args[0][job_id].endswith("Complete")
+        notice_box = [w for w in ui.widgets if w.kind == "label" and w.text == ""][-1]
+        assert notice_box.visible is False and ui.last("upload").enabled is False
         await jobs.kwargs["on_change"](SimpleNamespace(value=job_id))
-        assert any("No saved sensor markers" in w.text for w in ui.widgets if w.kind == "label")
+        assert ui.last("upload").enabled is True
+        assert notice_box.visible is True and notice_box.text.startswith("Simulation run — photographs describe a physical setup")
+        assert "No saved sensor markers" in notice_box.text
         assert ui.last("button", "Save as new report revision").enabled is False
         # Upload: validated by content, stored by hash, offered in the photograph list.
         await ui.last("upload").kwargs["on_upload"](SimpleNamespace(file=FakeFile("Case top.PNG", png())))

@@ -26,14 +26,82 @@ def target_values(text: str, *, quantity: str, allow_zero: bool = False) -> list
     return values
 
 
+# --- Operator-language validation ----------------------------------------------
+# The editors' visible labels, keyed by the form field (and, for pydantic errors,
+# by the saved field path), so every refusal names the field the operator sees.
+
+DUT_FIELD_LABELS = {'input_voltage_min_V': 'Minimum input (V)', 'input_voltage_max_V': 'Maximum input (V)',
+                    'output_voltage_nominal_V': 'Nominal output (V)', 'output_current_rated_A': 'Rated output current (A)',
+                    'output_power_rated_W': 'Rated output power (W)'}
+RECIPE_FIELD_LABELS = {'minimum_dwell_s': 'Minimum settling time (s)', 'duration_s': 'Measure each load for (s)',
+                       'efficiency_estimate_pct': 'Planning efficiency estimate (%)',
+                       'current_budget_pct': 'Use this share of source current (%)'}
+LIMIT_FIELD_LABELS = {'source_current_limit_A': 'Supply current limit (A)', 'dut_input_overvoltage_V': 'Input over-voltage (V)',
+                      'dut_output_overvoltage_V': 'Output voltage guard (V)', 'output_overcurrent_A': 'Output current guard (A)'}
+FIELD_LABELS = {**{'ratings.' + key: label for key, label in DUT_FIELD_LABELS.items()},
+                **{'protective_controls.' + key: label for key, label in LIMIT_FIELD_LABELS.items()},
+                'profile_id': 'Save converter as', 'identity.model': 'Converter / board model',
+                'identity.sample_id': 'Sample ID or board revision', 'recipe_id': 'Save test as',
+                'title': 'Plain name shown on the card', 'category': 'Category', 'standard_clause': 'Standard clause',
+                'description': 'Description', 'settling.minimum_dwell_s': RECIPE_FIELD_LABELS['minimum_dwell_s'],
+                'settling.timeout_s': 'Settling timeout (s)', 'acquisition.duration_s': RECIPE_FIELD_LABELS['duration_s'],
+                'planning.efficiency_estimate_fraction': RECIPE_FIELD_LABELS['efficiency_estimate_pct'],
+                'planning.source_current_budget_fraction': RECIPE_FIELD_LABELS['current_budget_pct']}
+
+
+def number(values: dict, key: str, label: str, *, minimum=None, maximum=None, exclusive_minimum: bool = False) -> float:
+    """A form number as a float, refused in operator language.
+
+    A cleared ``ui.number`` field arrives as ``None``: the message says "Enter a
+    number for “<label>”", never a Python ``TypeError``. A bound names the field.
+    """
+    raw = values.get(key)
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        raise ValueError(f'Enter a number for “{label}”.')
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f'“{label}” must be a number.') from None
+    if not math.isfinite(value):
+        raise ValueError(f'“{label}” must be a finite number.')
+    if minimum is not None and (value <= minimum if exclusive_minimum else value < minimum):
+        raise ValueError(f'“{label}” must be {"greater than" if exclusive_minimum else "at least"} {minimum:g}.')
+    if maximum is not None and value > maximum:
+        raise ValueError(f'“{label}” must be at most {maximum:g}.')
+    return value
+
+
+def friendly_error(exc) -> str:
+    """A validation error as one operator sentence per field.
+
+    pydantic errors name the saved field path; the page shows the editor label
+    for it when one exists and drops pydantic's "Value error, " prefix. Any
+    other exception is shown as its own text.
+    """
+    if not hasattr(exc, 'errors'):
+        return str(exc)
+    parts = []
+    for item in exc.errors()[:4]:
+        loc = '.'.join(str(part) for part in item.get('loc', ()))
+        label = FIELD_LABELS.get(loc)
+        message = re.sub(r'^Value error, ', '', str(item.get('msg', '')))
+        parts.append((f'“{label}”: ' if label else loc + ': ' if loc else '') + message)
+    return '; '.join(parts)
+
+
 def edited_dut(original: dict, values: dict) -> dict:
     result = copy.deepcopy(original)
-    result['profile_id'] = str(values['profile_id']).strip()
-    result['identity'].update(model=str(values['model']).strip(),
+    result['profile_id'] = str(values['profile_id'] or '').strip()
+    if not result['profile_id']:
+        raise ValueError('Enter a file name under “Save converter as”.')
+    result['identity'].update(model=str(values['model'] or '').strip(),
                               sample_id=str(values.get('sample_id') or '').strip() or None)
-    for key in ('input_voltage_min_V', 'input_voltage_max_V', 'output_voltage_nominal_V',
-                'output_current_rated_A', 'output_power_rated_W'):
-        result['ratings'][key] = float(values[key])
+    if not result['identity']['model']:
+        raise ValueError('Enter the “Converter / board model”.')
+    for key, label in DUT_FIELD_LABELS.items():
+        result['ratings'][key] = number(values, key, label, minimum=0, exclusive_minimum=True)
+    if result['ratings']['input_voltage_min_V'] > result['ratings']['input_voltage_max_V']:
+        raise ValueError(f'“{DUT_FIELD_LABELS["input_voltage_min_V"]}” must not exceed “{DUT_FIELD_LABELS["input_voltage_max_V"]}”.')
     result['ratings']['verified_from_sample_label'] = bool(values.get('verified_from_sample_label', False))
     # Saved approvals gate whether a real plan can be previewed at all; each Start
     # additionally binds a fresh physical confirmation to the plan and inventory hashes.
@@ -53,7 +121,9 @@ def edited_recipe(original: dict, values: dict, *, dut_id: str, test_id: str, mo
     ``standard_clause``) is applied only when the form supplies it.
     """
     result = copy.deepcopy(original)
-    result.update(recipe_id=str(values['recipe_id']).strip(), dut_profile_id=dut_id, execution_mode=mode)
+    result.update(recipe_id=str(values['recipe_id'] or '').strip(), dut_profile_id=dut_id, execution_mode=mode)
+    if not result['recipe_id']:
+        raise ValueError('Enter a file name under “Save test as”.')
     for key in ('title', 'category', 'description', 'standard_clause'):
         if key in values:
             result[key] = str(values[key] or '').strip() or None
@@ -62,10 +132,18 @@ def edited_recipe(original: dict, values: dict, *, dut_id: str, test_id: str, mo
         raise ValueError('Select a test from the saved recipe before editing it.')
     test['input_voltage_targets_V'] = target_values(values['voltages'], quantity='input voltage')
     test['output_current_targets_A'] = target_values(values['currents'], quantity='load current', allow_zero=True)
-    result['settling']['minimum_dwell_s'] = float(values['minimum_dwell_s'])
-    result['acquisition']['duration_s'] = float(values['duration_s'])
-    result['planning']['efficiency_estimate_fraction'] = float(values['efficiency_estimate_pct']) / 100
-    result['planning']['source_current_budget_fraction'] = float(values['current_budget_pct']) / 100
+    labels = RECIPE_FIELD_LABELS
+    dwell = number(values, 'minimum_dwell_s', labels['minimum_dwell_s'], minimum=0)
+    timeout = result['settling'].get('timeout_s', 30)
+    if isinstance(timeout, (int, float)) and dwell > timeout:
+        # The saved settling timeout is not a visible field; the message names the one that is.
+        raise ValueError(f'“{labels["minimum_dwell_s"]}” must be at most {timeout:g} s, this test’s settling timeout.')
+    result['settling']['minimum_dwell_s'] = dwell
+    result['acquisition']['duration_s'] = number(values, 'duration_s', labels['duration_s'], minimum=0, exclusive_minimum=True)
+    result['planning']['efficiency_estimate_fraction'] = number(values, 'efficiency_estimate_pct', labels['efficiency_estimate_pct'],
+                                                                minimum=0, maximum=100, exclusive_minimum=True) / 100
+    result['planning']['source_current_budget_fraction'] = number(values, 'current_budget_pct', labels['current_budget_pct'],
+                                                                  minimum=0, maximum=100, exclusive_minimum=True) / 100
     return result
 
 
@@ -75,13 +153,22 @@ def quantity(value, unit: str, *, digits: int = 4) -> str:
     return f'{value:.{digits}g} {unit}'
 
 
+# One vocabulary for a requested point's fate: the planner's own status words, as the
+# CLI JSON and the saved plan print them, with a legend the page shows once.
+PLAN_STATUS_LEGEND = (
+    ('executable', 'will run'),
+    ('assumption_limited', 'kept in the plan but skipped: the planning budget (assumed efficiency × share of the supply '
+                           'current) says the supply cannot feed it; the request is not reduced to fit'),
+    ('approval_blocked', 'kept in the plan but skipped until the saved approvals (converter, wiring, limits) are true'),
+    ('unsupported', 'kept in the plan but skipped: outside what this bench or its backend can do'),
+)
+
+
 def plan_rows(preview: dict) -> list[dict]:
-    labels = {'executable': 'Ready', 'assumption_limited': 'Outside planning budget',
-              'approval_blocked': 'Needs approval', 'unsupported': 'Not supported'}
     return [{**point, 'input_display': quantity(point.get('vin_target_V'), 'V'),
              'load_display': quantity(point.get('iout_target_A'), 'A'),
              'estimated_display': quantity(point.get('estimated_input_current_A'), 'A'),
-             'status_display': labels.get(point.get('status'), str(point.get('status', 'Unknown')).replace('_', ' '))}
+             'status_display': str(point.get('status') or 'unknown')}
             for point in preview.get('points', [])]
 
 
@@ -126,10 +213,20 @@ def job_actions(snapshot: dict) -> list[str]:
     return []
 
 
+DEQUEUED_ERROR_PREFIX = 'Report generation was removed from the queue'
+
+
+def dequeued(snapshot: dict) -> bool:
+    """The operator removed this job's report from the queue: no report was generated, none failed."""
+    return bool(snapshot.get('dequeued')) or str(snapshot.get('error') or '').startswith(DEQUEUED_ERROR_PREFIX)
+
+
 def state_label(snapshot: dict) -> str:
     state = str(snapshot.get('state', 'unknown'))
     if snapshot.get('cancel_requested') and state in ('queued', 'acquiring', 'reporting'):
         return 'Stop requested — waiting for the worker'
+    if state == 'cancelled' and dequeued(snapshot):
+        return 'Removed from the report queue'
     labels = {'queued': 'Waiting to start', 'running': 'Acquiring measurements', 'acquiring': 'Acquiring measurements',
               'starting': 'Checking the bench', 'rendering': 'Preparing HTML and PDF',
               'reporting': 'Preparing HTML and PDF',
@@ -230,31 +327,87 @@ def event_text(event, *, zone: tzinfo | None = None) -> str:
 # acquisition worker, the report dispatcher's queue, or the report-only worker.
 ACTIVITY_STATES = ('queued', 'starting', 'running', 'acquiring', 'stopping', 'cancel_requested',
                    'analyzing', 'rendering', 'reporting', 'report-queued')
+# States in which a worker process owns the bench (the three questions lock, Start is refused).
+WORKING_STATES = ('queued', 'starting', 'running', 'acquiring', 'stopping', 'cancel_requested',
+                  'analyzing', 'rendering', 'reporting')
+# The mode word every job-related phrase starts with, so a passer-by can tell from the header.
+MODE_PREFIX = {'mock': 'Simulation: ', 'real': 'Real bench: '}
+
+
+def deferred_text(snapshot: dict | None) -> str:
+    """Why a queued report has not started, in operator language; '' when nothing is deferred.
+
+    The dispatcher records the memory gate's stable reason (``MemAvailable below
+    150 MiB``) and, in ``deferred_memory``, the numbers it saw. The page says
+    "Waiting for free memory: 96 MiB available, 150 MiB needed" instead of the
+    ``/proc/meminfo`` field name; the raw reason stays available as a tooltip.
+    """
+    reason = (snapshot or {}).get('deferred_reason')
+    if not reason:
+        return ''
+    reason = str(reason)
+    # Whole-reason cases first: the lease and gate messages carry their own "; ".
+    if reason.startswith('bench lease held'):
+        return 'Waiting for the bench: another acquisition or report is still running'
+    if reason.startswith('memory gate misconfigured'):
+        return 'Waiting: the memory gate is misconfigured — ' + reason.split(': ', 1)[-1]
+    memory = (snapshot or {}).get('deferred_memory') or {}
+    parts = []
+    for piece in reason.split('; '):
+        low = re.fullmatch(r'MemAvailable below (\S+) MiB', piece)
+        if low:
+            seen = memory.get('available_mib')
+            have = f'{seen:.0f} MiB available' if isinstance(seen, (int, float)) else 'less than that available'
+            parts.append(f'Waiting for free memory: {have}, {low.group(1)} MiB needed')
+            continue
+        combined = re.fullmatch(r'MemAvailable\+SwapFree below (\S+) MiB', piece)
+        if combined:
+            seen = memory.get('available_plus_swap_free_mib')
+            have = f'{seen:.0f} MiB free memory and swap together' if isinstance(seen, (int, float)) else 'less than that free'
+            parts.append(f'Waiting for free memory and swap: {have}, {combined.group(1)} MiB needed')
+            continue
+        parts.append('Waiting: ' + piece)
+    return '; '.join(parts)
 
 
 def activity_text(snapshot: dict | None) -> str:
-    """Short header phrase for work in progress; '' when the job needs no indicator."""
+    """Short header phrase for work in progress, prefixed with the mode; '' when the job needs no indicator."""
     if not snapshot:
         return ''
     state = str(snapshot.get('state', ''))
     if state not in ACTIVITY_STATES:
         return ''
+    prefix = MODE_PREFIX.get(snapshot.get('mode'), '')
     if snapshot.get('cancel_requested') or state in ('stopping', 'cancel_requested'):
-        return 'Stopping… waiting for both outputs to be verified OFF'
+        return prefix + 'Stopping… waiting for both outputs to be verified OFF'
     if state == 'queued':
-        return 'Queued — waiting for the worker to start'
+        return prefix + 'Queued — waiting for the worker to start'
     if state == 'starting':
-        return 'Starting — checking the bench'
+        return prefix + 'Starting — checking the bench'
     if state in ('running', 'acquiring'):
         progress = snapshot.get('progress') or {}
         total = progress.get('total') or 0
         if total:
-            return f'Acquiring… point {min((progress.get("completed") or 0) + 1, total)} of {total}'
-        return 'Acquiring… preparing the run'
+            return prefix + f'Acquiring… point {min((progress.get("completed") or 0) + 1, total)} of {total}'
+        return prefix + 'Acquiring… preparing the run'
     if state == 'report-queued':
-        reason = snapshot.get('deferred_reason')
-        return 'Report queued — waiting: ' + str(reason) if reason else 'Report queued — starts when the bench is idle'
-    return 'Generating report…'
+        waiting = deferred_text(snapshot)
+        return prefix + ('Report queued — ' + waiting[0].lower() + waiting[1:] if waiting
+                         else 'Report queued — starts when the bench is idle')
+    return prefix + 'Generating report…'
+
+
+def bench_job(jobs: list[dict]) -> dict | None:
+    """The job the page follows when it has none of its own: the newest working job, else the oldest queued report.
+
+    Page load, F5 and a second tab all attach through this, so the header, the
+    lock and Start describe the bench rather than the job one tab happened to start.
+    """
+    working = [job for job in jobs if str(job.get('state')) in WORKING_STATES]
+    if working:
+        return working[0]  # list_jobs() is newest first
+    queued = [job for job in jobs if job.get('state') == 'report-queued']
+    return min(queued, key=lambda job: str(job.get('queued_utc') or '')) if queued else None
 
 
 def saved_runs_key(snapshot: dict) -> tuple:
@@ -276,11 +429,88 @@ def report_became_ready(previous: tuple | None, current: tuple) -> bool:
 # preview/status dicts; nothing is written back.
 
 DEFAULT_CATEGORY = 'Normal operating voltage'
-START_LABELS = {'mock': 'Start simulated test', 'real': 'Start test on the real bench'}
-BENCH_NAMES = {'mock': 'Simulated bench', 'real': 'Real bench'}
+# The mode is named "Simulation" everywhere it is named: tile, header pill, Start, Reports rows.
+START_LABELS = {'mock': 'Start simulation', 'real': 'Start test on the real bench'}
+BENCH_NAMES = {'mock': 'Simulation', 'real': 'Real bench'}
+REPORT_BENCH_LABELS = {'mock': 'Simulation · synthetic data', 'real': 'Real bench · measured'}
 DELETE_PROMPTS = {'dut': 'Delete this saved converter? Past runs keep their own copy.',
                   'recipe': 'Delete this saved test? Past runs keep their own copy.',
                   'bench': 'Delete this saved bench preset? Past runs keep their own copy.'}
+
+# What each bench can and cannot do, shown on its tile at all times. The real
+# bench's lines follow the supported envelope in docs/configured-runs.md.
+SIMULATION_CAN = (
+    'Runs a deterministic synthetic converter, source and load: a software model on a virtual clock.',
+    'Reproduces realistic supply current limiting and start-up behaviour.',
+    'Labels every output SYNTHETIC: this page, the HTML, the PDF and the CSV export.',
+    'Touches no instrument: no driver is loaded and nothing is switched on.',
+    'Uses the same report layout and the same workflow as the real bench.',
+)
+SIMULATION_CANNOT = (
+    'Measure your converter: the numbers describe the model, not the sample on the bench.',
+    'Prove anything about safety, protective limits or a real start-up.',
+    'Show ripple, transients or thermal behaviour.',
+    'Give an instrument uncertainty: any ± in its report comes from the synthetic specification, not from an instrument.',
+)
+REAL_CAN = (
+    'Measure steady DC efficiency, output regulation and power loss at loaded points of 0.05–2.5 A and at most 34 W.',
+    'Program 1–35.8 V input inside the converter rating, cold-starting the converter once per input voltage.',
+    'Stop the run on the input over-voltage guard, the output guards and the supply current limit (polled DC criteria).',
+)
+REAL_CANNOT = (
+    'Reach the 48 W rating: the 1 A source cannot feed it; over-budget points stay in the plan and are skipped.',
+    'Run unsupervised: an operator stays at the bench, and Start needs the saved approvals plus a fresh wiring, CH1, limits and serial confirmation.',
+    'Measure temperature, ripple, transients or dynamic response; the guards are not transient protection.',
+    'Certify accuracy: uncertainty is unquantified until the readback specifications are transcribed.',
+)
+SYNTHETIC_UNCERTAINTY_NOTE = ('Any ± in this report is uncertainty from the synthetic specification, not an instrument: '
+                              'the mock bench profile carries example readback specifications so the budget can be demonstrated.')
+
+# What follows Start in the simulation, in the order the page will show it, with the time each step takes.
+SIMULATION_SEQUENCE = (
+    ('Acquiring measurements', 'seconds — the model runs on a virtual clock'),
+    ('Measurements saved — report queued', 'waits until no test is running and enough memory is free'),
+    ('Preparing HTML and PDF', 'typically one to four minutes on a Raspberry Pi, longer while memory is short'),
+    ('Complete', 'the links appear under Run and in Reports'),
+)
+SIMULATION_TIME_ESTIMATE = 'Measurements: seconds (virtual clock) · Report: typically 1–4 min on a Raspberry Pi'
+
+
+def sequence_step(snapshot: dict | None) -> int | None:
+    """Index into SIMULATION_SEQUENCE for a simulation job's current step; None when it does not apply."""
+    if not snapshot or snapshot.get('mode') != 'mock':
+        return None
+    state = str(snapshot.get('state', ''))
+    if state in ('queued', 'starting', 'running', 'acquiring', 'stopping', 'cancel_requested'):
+        return 2 if snapshot.get('action') == 'report-only' else 0
+    if state == 'report-queued':
+        return 1
+    if state in ('analyzing', 'rendering', 'reporting'):
+        return 2
+    if state == 'completed':
+        return 3
+    return None
+
+
+def envelope_rows(bench: dict) -> list[tuple[str, str]]:
+    """The simulated bench's envelope as (label, value) rows, so a skipped simulated point is predictable from the tile."""
+    source, load = bench.get('source') or {}, bench.get('load') or {}
+
+    def span(low, high, unit):
+        if not all(isinstance(v, (int, float)) for v in (low, high)):
+            return '—'
+        return f'{low:g}–{high:g} {unit}'
+
+    def value(item, unit):
+        return f'{item:g} {unit}' if isinstance(item, (int, float)) and not isinstance(item, bool) else '—'
+    rows = [('Synthetic source', span(source.get('min_voltage_V'), source.get('max_voltage_V'), 'V') + ' · ' +
+             value(source.get('max_current_A'), 'A') + ' · ' + value(source.get('max_power_W'), 'W')),
+            ('Synthetic load', f"constant current, up to {value(load.get('max_current_A'), 'A')}")]
+    limits = [(label, shown) for label, shown in limits_rows(bench) if shown != '—']
+    rows.append(('Protective limits', '; '.join(f'{label} {shown}' for label, shown in limits) if limits
+                 else 'none — only the planning budget bounds the plan'))
+    rows.append(('Readback uncertainty', 'synthetic example specification, not an instrument'))
+    return rows
 
 
 def _unique(values) -> list[float]:
@@ -395,14 +625,15 @@ def limits_summary(bench: dict) -> str:
             quantity(controls.get('output_overcurrent_A'), 'A') + ' output')
 
 
-def skip_reasons(preview: dict) -> list[tuple[int, str]]:
-    """(count, reason) for every point that will not run, most frequent first; identical reasons are merged."""
-    counts: dict[str, int] = {}
+def skip_reasons(preview: dict) -> list[tuple[int, str, str]]:
+    """(count, planner status, reason) for every point that will not run, most frequent first; identical reasons are merged."""
+    counts: dict[tuple[str, str], int] = {}
     for point in preview.get('points', []):
         if point.get('status') != 'executable':
-            reason = str(point.get('reason') or 'no reason recorded')
-            counts[reason] = counts.get(reason, 0) + 1
-    return sorted(((count, reason) for reason, count in counts.items()), key=lambda item: (-item[0], item[1]))
+            key = (str(point.get('status') or 'unknown'), str(point.get('reason') or 'no reason recorded'))
+            counts[key] = counts.get(key, 0) + 1
+    return sorted(((count, status, reason) for (status, reason), count in counts.items()),
+                  key=lambda item: (-item[0], item[1], item[2]))
 
 
 def summary_text(dut: dict | None, mode: str, bench: dict | None, recipe: dict | None) -> str:
@@ -429,12 +660,20 @@ def report_rows(jobs: list[dict], *, zone: tzinfo | None = None, recipes: dict[s
         progress = job.get('progress') or {}
         total = progress.get('total') or 0
         terminal = job.get('state') in ('completed', 'aborted', 'failed', 'cancelled', 'report_failed')
+        real = job.get('mode') == 'real'
         rows.append({'job_id': job['job_id'], 'when': local_time_text(job.get('created_utc'), zone=zone),
                      'run': ' · '.join(part for part in (str(job.get('dut_model') or 'Converter test'), test) if part),
-                     'bench': 'Real' if job.get('mode') == 'real' else 'Simulated',
+                     'bench': REPORT_BENCH_LABELS['real' if real else 'mock'], 'real': real,
                      'status': state_label(job),
+                     'waiting': deferred_text(job) if job.get('state') == 'report-queued' else '',
                      'points': f"{progress.get('completed', 0)} / {total} points" if total else '',
                      'links': [(label, relative) for label, relative in report_link_rows(job) if not relative.endswith('.json')],
                      'regenerate': bool(terminal and job.get('run_dir')),
                      'dequeue': 'dequeue' in job_actions(job)})
     return rows
+
+
+def run_option_text(job: dict, *, zone: tzinfo | None = None) -> str:
+    """'<converter> · <local start> · Simulation · synthetic data · Complete' for a run chooser such as /annotations."""
+    return ' · '.join((job_title(job, zone=zone), REPORT_BENCH_LABELS['real' if job.get('mode') == 'real' else 'mock'],
+                       state_label(job)))

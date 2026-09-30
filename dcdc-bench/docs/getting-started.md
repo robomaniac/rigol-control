@@ -47,9 +47,13 @@ What it does **not** do:
   command is deliberately disabled (`cli.py`); real jobs go through the UI's
   job service or the fixed, explicitly `--arm`ed procedures described in the
   test documents.
-- It does not measure no-load consumption, temperature, transients or ripple,
-  does not use remote (4-wire) sensing and does not send arbitrary SCPI
-  commands from the UI workflow ([configured-runs.md](configured-runs.md)).
+- It does not measure temperature, transients or ripple, does not use remote
+  (4-wire) sensing and does not send arbitrary SCPI commands from the UI
+  workflow ([configured-runs.md](configured-runs.md)). A requested 0 A load is
+  recorded as *enabled with no external load*: the input consumption with the
+  converter powered and the load input OFF. That is not the controller's
+  quiescent current, no efficiency is computed at 0 A, and on the real bench the
+  observation is not yet qualified ([glossary](glossary.md)).
 - It does not certify measurement accuracy. Until the bench profile carries
   transcribed readback specifications, reports say uncertainty is
   **unquantified** ([uncertainty-budget.md](uncertainty-budget.md)).
@@ -279,14 +283,35 @@ converter, source and load.
    `aborted` reproduces the other two demo cases. This also renders reports,
    so the memory note above applies.
 
-6. Optional: open the bench page with the simulated bench only.
+6. Optional: open the bench page with the simulation only.
 
    ```bash
    .venv/bin/dcdc-bench ui --root dcdc-bench/workspace
    ```
 
-   Without `--inventory` no real bench can start; the button reads **Start
-   simulated test**. Section 6 describes the page.
+   Without `--inventory` no real bench can start. Under **2 Simulated or real
+   bench?** the **Simulation** tile is selected; it shows the synthetic
+   envelope (0–60 V, 1 A, 60 W, no protective limits) and a panel **What the
+   simulation can and cannot do**. Click **Preview**, then **Start simulation**.
+   The bottom bar says why Start is disabled until then (**Preview first — Start
+   unlocks after a fresh plan.**).
+
+   *What you should see after Start:* the header pill reads **Simulation:
+   Acquiring… point 2 of 21** (the mode word leads every phrase), and the
+   **Run** section lists the four steps with the current one marked:
+   **Acquiring measurements** (seconds, on a virtual clock) →
+   **Measurements saved — report queued** (waits until no test is running and
+   enough memory is free; a held-back report says, for example, **Waiting for
+   free memory: 96 MiB available, 150 MiB needed**) → **Preparing HTML and PDF**
+   (typically one to four minutes on a Raspberry Pi) → **Complete**, when
+   **Open HTML** and **Open PDF** appear under **Run** and in the **Reports**
+   row labelled **Simulation · synthetic data**. Any ± in that report is
+   uncertainty from the synthetic specification, not an instrument: the mock
+   bench profile carries example readback specifications so the budget's
+   format can be demonstrated. Skipped points appear in the plan with the
+   planner's own words (`assumption_limited`, `unsupported`, `approval_blocked`)
+   and a legend; the page footer links the [glossary](glossary.md). Section 6
+   describes the rest of the page.
 
 ## 5. Critical before any real test
 

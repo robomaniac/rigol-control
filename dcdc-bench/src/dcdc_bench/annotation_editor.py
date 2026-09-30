@@ -16,7 +16,7 @@ from .annotations import (AnnotationError, annotation_document, load_annotations
                           nearest_marker, new_sensor_id, normalized_point, nudge_marker)
 from .attachments import (BYTE_LIMITS, IMAGE_TYPES, MEDIA_TYPES, AssetHashMismatch, AssetNotFound, AssetStore,
                           AttachmentRejected)
-from .ui_models import artifact_url, job_title, state_label
+from .ui_models import artifact_url, run_option_text
 
 ACTIVE = ("queued", "acquiring", "reporting")
 UPLOAD_LIMIT = max(BYTE_LIMITS.values())
@@ -271,10 +271,16 @@ def register_annotation_editor(ui, run, service, style: str) -> None:
             state['assets'] = assets
             set_asset_options(select_sha)
 
+        def notice(text, *, warning=False):
+            """The box under the run chooser: hidden when there is nothing to say, never an empty bar."""
+            widgets['notice'].set_text(text)
+            widgets['notice'].classes(add='bench-warning' if warning else '', remove='' if warning else 'bench-warning')
+            widgets['notice'].set_visibility(bool(text))
+
         async def load_job(job_id):
             state.update(job_id=job_id, run_dir=None, assets=[], asset=None, markers=[], selected=None, dragging=False)
-            widgets['notice'].set_text('')
-            widgets['notice'].classes(remove='bench-warning')
+            notice('')
+            widgets['upload'].disable()
             try:
                 snapshot = await run.io_bound(service.status, job_id)
                 run_dir = snapshot.get('run_dir') if snapshot else None
@@ -295,20 +301,24 @@ def register_annotation_editor(ui, run, service, style: str) -> None:
             if client.is_deleted or state['job_id'] != job_id:
                 return
             state['run_dir'], state['assets'] = run_dir, assets
-            widgets['job_label'].set_text(job_title(snapshot) + ' · ' + state_label(snapshot))
+            widgets['job_label'].set_text(run_option_text(snapshot))
+            # A photograph documents a physical setup; on a synthetic run that is a category error worth a sentence.
+            synthetic = ('Simulation run — photographs describe a physical setup; add them only if this run documents a real bench. '
+                         if snapshot.get('mode') == 'mock' else '')
             if isinstance(existing, Exception):
-                widgets['notice'].set_text('Saved markers were not loaded because their photograph could not be verified: ' + str(existing))
-                widgets['notice'].classes(add='bench-warning')
+                notice(synthetic + 'Saved markers were not loaded because their photograph could not be verified: ' + str(existing),
+                       warning=True)
                 set_asset_options()
             elif existing is not None:
                 annotations, asset = existing
                 state['markers'] = [dict(marker) for marker in annotations['markers']]
-                widgets['notice'].set_text(f"Loaded {len(state['markers'])} saved marker(s) from the latest report revision; "
-                                           'saving creates a further revision.')
+                notice(synthetic + f"Loaded {len(state['markers'])} saved marker(s) from the latest report revision; "
+                       'saving creates a further revision.', warning=bool(synthetic))
                 set_asset_options(asset['sha256'])
             else:
-                widgets['notice'].set_text('No saved sensor markers for this run yet.')
+                notice(synthetic + 'No saved sensor markers for this run yet.', warning=bool(synthetic))
                 set_asset_options()
+            widgets['upload'].enable()
             if state['asset'] is None:
                 show_asset()
 
@@ -367,16 +377,19 @@ def register_annotation_editor(ui, run, service, style: str) -> None:
                 ui.label('1. Choose a finished run').classes('bench-section-title')
                 if not jobs:
                     ui.label('No finished runs with preserved measurements are available yet.').classes('bench-muted')
-                ui.select({job['job_id']: job_title(job) + ' · ' + state_label(job) for job in jobs},
+                ui.select({job['job_id']: run_option_text(job) for job in jobs},
                           label='Finished run', on_change=lambda e: load_job(e.value)).props('outlined dense')
                 widgets['job_label'] = ui.label('').classes('bench-muted')
                 widgets['notice'] = ui.label('').classes('bench-message')
+                widgets['notice'].set_visibility(False)
             with ui.card().classes('bench-card gap-4'):
                 ui.label('2. Photograph').classes('bench-section-title')
                 widgets['caption'] = ui.input('Caption for the next upload', placeholder='Case top view, sensors attached with thermal tape').props('outlined dense')
-                ui.upload(label='Add a photograph (PNG, JPEG or SVG; PDF pages are stored as documents)', auto_upload=True,
-                          max_file_size=max(BYTE_LIMITS.values()), on_upload=handle_upload).props(
+                widgets['upload'] = ui.upload(label='Add a photograph (PNG, JPEG or SVG; PDF pages are stored as documents)', auto_upload=True,
+                                              max_file_size=max(BYTE_LIMITS.values()), on_upload=handle_upload).props(
                     'accept=".png,.jpg,.jpeg,.svg,.pdf" flat bordered').classes('w-full')
+                widgets['upload'].disable()  # enabled once a finished run is chosen
+                ui.label('Choose a finished run first; the uploader unlocks for it.').classes('bench-muted')
                 ui.label('Every file is checked by content: type, size, dimensions and SVG/PDF active content. '
                          'Originals are stored by hash and never modified.').classes('bench-muted')
                 widgets['asset_select'] = ui.select({}, label='Photograph for markers', on_change=choose_asset).props('outlined dense')

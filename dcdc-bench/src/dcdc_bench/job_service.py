@@ -298,23 +298,53 @@ class JobService:
             data[IDENTIFIERS[kind]] = new
             atomic_json(target, MODELS[kind].model_validate(data).model_dump())
             if kind == "dut":
-                for name in self.list_profiles()["recipe"]:
-                    recipe = self.load_profile("recipe", name)
-                    if recipe.get("dut_profile_id") == old:
-                        recipe["dut_profile_id"] = new
-                        atomic_json(self._profile("recipe", name), TestRecipe.model_validate(recipe).model_dump())
+                self._repoint_recipes(old, new)
             source.unlink()
         return new
 
-    def save_profile(self, kind, data):
+    def _repoint_recipes(self, old, new):
+        """Saved recipes that referenced converter ``old`` now reference ``new`` (caller holds the lock)."""
+        for name in self.list_profiles()["recipe"]:
+            recipe = self.load_profile("recipe", name)
+            if recipe.get("dut_profile_id") == old:
+                recipe["dut_profile_id"] = new
+                atomic_json(self._profile("recipe", name), TestRecipe.model_validate(recipe).model_dump())
+
+    def save_profile(self, kind, data, *, overwrite=True, replaces=None):
+        """Validate and write one profile; returns its identifier.
+
+        ``overwrite=False`` (the page's "+ Add a converter" / "+ New test" editors)
+        refuses to write over an existing file of the same name, so a typo can
+        never silently replace a saved converter's ratings and approvals.
+        ``replaces=<old name>`` (Edit with a changed file name) writes the new
+        file and removes the old one under the lock, refusing while an active
+        job was started from the old name; recipes that referenced a renamed
+        converter follow it. Past jobs keep their own plan snapshot either way.
+        """
         if kind not in MODELS:
             raise ValueError("Unknown profile kind")
         if len(json.dumps(data)) > 2_000_000:
             raise ValueError("Profile exceeds 2 MB")
         profile = MODELS[kind].model_validate(data)
         name = getattr(profile, IDENTIFIERS[kind])
+        words = {"dut": "converter", "bench": "bench preset", "recipe": "test"}
         with self.lock:
-            atomic_json(self._profile(kind, name), profile.model_dump())
+            target = self._profile(kind, name)
+            if replaces is not None and replaces == name:
+                replaces = None
+            if (not overwrite or replaces is not None) and target.exists():
+                raise ValueError(f"A {words[kind]} with the file name {name!r} already exists; choose another file name "
+                                 f"or open that {words[kind]} with Edit")
+            if replaces is not None:
+                old = self._profile(kind, replaces)
+                if not old.is_file():
+                    raise ValueError(f"No saved {kind} profile named {replaces!r}")
+                self._refuse_if_active(kind, replaces)
+            atomic_json(target, profile.model_dump())
+            if replaces is not None:
+                if kind == "dut":
+                    self._repoint_recipes(replaces, name)
+                old.unlink()
         return name
 
     def _inventory(self):
@@ -503,9 +533,28 @@ class JobService:
                 request.unlink(missing_ok=True)
             record = _read(job / "job.json")
             record.update(state=REPORT_QUEUED, pid=None, error=None, action="report-only", run_dir=str(path),
-                          queued_utc=_utc_now(), deferred_reason=None, deferred_utc=None)
+                          queued_utc=_utc_now(), deferred_reason=None, deferred_utc=None, deferred_memory=None,
+                          dequeued=False)
             atomic_json(job / "job.json", record)
             return {"job_id": job_id, "state": REPORT_QUEUED}
+
+    def active_job(self):
+        """The job the bench is working on or holding for a report, for the page's 2 s poll.
+
+        Newest job whose state is queued/acquiring/reporting (re-derived through
+        ``status()`` so a dead worker or an expired launch is not reported as
+        active), else the oldest report-queued job, else None. Every page tab
+        follows this rather than the job it happened to start.
+        """
+        records = self._job_records()
+        for name in sorted((name for name, record in records.items() if record.get("state") in ACTIVE), reverse=True):
+            snapshot = self.status(name)
+            if snapshot["state"] in ACTIVE:
+                return {"job_id": name, "state": snapshot["state"], "mode": snapshot.get("mode")}
+        queue = self._report_queue(records)
+        if queue:
+            return {"job_id": queue[0], "state": REPORT_QUEUED, "mode": records[queue[0]].get("mode")}
+        return None
 
     def _job_records(self):
         """Raw job.json records by job name; no run.json or sample-tail reads (cheap for a 2 s timer)."""
@@ -569,8 +618,9 @@ class JobService:
             if not ok:
                 return self._defer(directory, record, reason, snap, logs)
             (directory / "cancel.request").unlink(missing_ok=True)
+            (directory / "cancel.signalled").unlink(missing_ok=True)
             record.update(state="queued", pid=None, error=None, action="report-only",
-                          deferred_reason=None, deferred_utc=None, dispatched_utc=_utc_now())
+                          deferred_reason=None, deferred_utc=None, deferred_memory=None, dispatched_utc=_utc_now())
             atomic_json(directory / "job.json", record)
             for path in logs:
                 try_log_event(path, "dispatch", "start", job_id=job_id, snap=snap, gate_reason=reason)
@@ -616,7 +666,12 @@ class JobService:
             current = _read(directory / "job.json")
             if current.get("state") != REPORT_QUEUED:
                 return {"job_id": job_id, "state": current.get("state"), "deferred_reason": None}
-            record.update(deferred_reason=reason, deferred_utc=_utc_now())
+            # The numbers the gate saw, so the page can say "96 MiB available, 150 MiB needed"
+            # instead of the /proc field name; refreshed with the record (at most every minute).
+            memory = ({"available_mib": snap.get("mem_available_mib"),
+                       "available_plus_swap_free_mib": snap.get("mem_available_plus_swap_free_mib")}
+                      if isinstance(snap, dict) else None)
+            record.update(deferred_reason=reason, deferred_utc=_utc_now(), deferred_memory=memory)
             atomic_json(directory / "job.json", record)
             for path in logs:
                 try_log_event(path, "dispatch", "deferred", job_id=job_id, reason=reason, snap=snap)
@@ -668,13 +723,17 @@ class JobService:
                 launch_age_s = None
             starting = launch_age_s is not None and launch_age_s <= LAUNCH_GRACE_S and _pid_starting(value["pid"])
             if not starting:
-                value.update(state="failed", error="Worker exited unexpectedly; inspect shutdown evidence before another real run")
+                value.update(state="failed", error="Worker exited unexpectedly; the simulated run was not finalized"
+                             if value.get("mode") == "mock" else
+                             "Worker exited unexpectedly; inspect shutdown evidence before another real run")
         elif value["state"] == "queued" and launch.get("requested_utc"):
             if (datetime.now(timezone.utc)-datetime.fromisoformat(launch["requested_utc"])).total_seconds() > 120:
                 value.update(state="failed", error="Worker launch expired before acquisition; no automatic restart")
         elif value["state"] == REPORT_QUEUED:
             value["pid"] = None  # the acquisition worker has exited; no process owns this job yet
         value.setdefault("deferred_reason", None)
+        value.setdefault("deferred_memory", None)
+        value.setdefault("dequeued", False)
         value["report_pending"] = value["state"] == REPORT_QUEUED
         value["cancel_requested"] = (job / "cancel.request").exists()
         return value
@@ -683,6 +742,16 @@ class JobService:
         return [self.status(p.name) for p in sorted((self.root / "jobs").iterdir(), reverse=True) if (p / "job.json").is_file()]
 
     def cancel(self, job_id):
+        """Ask the job to stop; idempotent.
+
+        The first call writes ``cancel.request`` (its content is the stop time)
+        and sends one SIGINT to the worker. A later call for the same job
+        neither rewrites the marker (the first stop time is kept) nor signals
+        again: a second KeyboardInterrupt would land inside run_mock's own
+        cancel handler and abandon the report. Only when the first call could
+        not signal (the worker had not published its pid yet) does a later call
+        signal, once. A report-queued job is dequeued instead.
+        """
         job = self._job(job_id)
         with self.lock:
             # dispatch_reports and _defer read-modify-write this record under the
@@ -694,28 +763,33 @@ class JobService:
                 record = _read(job / "job.json")
                 if record.get("state") != REPORT_QUEUED:
                     return self.status(job_id)
-                record.update(state="cancelled", pid=None, deferred_reason=None,
+                record.update(state="cancelled", pid=None, deferred_reason=None, deferred_memory=None, dequeued=True,
                               error="Report generation was removed from the queue; saved measurements are preserved")
                 atomic_json(job / "job.json", record)
                 return self.status(job_id)
-        if value["state"] not in ACTIVE:
-            return value
-        # The marker carries the request time: run_mock swallows the SIGINT below
-        # itself, so the worker's KeyboardInterrupt message never lands for a
-        # mock job, and the dispatcher deletes this file before the report runs.
-        (job / "cancel.request").write_text(_utc_now())
-        pid = value.get("pid")
-        if _pid_matches(pid, job):
-            try:
-                # Pin the process identity while checking and signalling it.
-                fd = os.pidfd_open(pid)
+            if value["state"] not in ACTIVE:
+                return value
+            marker, signalled = job / "cancel.request", job / "cancel.signalled"
+            if signalled.exists():
+                return value
+            if not marker.exists():
+                # The marker carries the request time: run_mock swallows the SIGINT below
+                # itself, so the worker's KeyboardInterrupt message never lands for a
+                # mock job, and the dispatcher deletes this file before the report runs.
+                marker.write_text(_utc_now())
+            pid = value.get("pid")
+            if _pid_matches(pid, job):
                 try:
-                    if _pid_matches(pid, job):
-                        signal.pidfd_send_signal(fd, signal.SIGINT)
-                finally:
-                    os.close(fd)
-            except ProcessLookupError:
-                pass
+                    # Pin the process identity while checking and signalling it.
+                    fd = os.pidfd_open(pid)
+                    try:
+                        if _pid_matches(pid, job):
+                            signal.pidfd_send_signal(fd, signal.SIGINT)
+                            signalled.write_text(str(pid))
+                    finally:
+                        os.close(fd)
+                except ProcessLookupError:
+                    pass
         return self.status(job_id)
 
     def resolve_file(self, job_id, relative):
@@ -908,7 +982,8 @@ def worker(directory: Path, *, report_only=False):
             save(state="cancelled" if cancelled else "completed" if run["execution_status"] == "completed" else "aborted",
                  report_dir=str(report), report_note=note)
     except KeyboardInterrupt:
-        save(state="cancelled", error="Operator cancelled the job; inspect recorded shutdown status")
+        save(state="cancelled", error="Operator cancelled the simulation" if state.get("mode") == "mock"
+             else "Operator cancelled the job; inspect recorded shutdown status")
     except BaseException as exc:
         save(state="failed", error=f"{type(exc).__name__}: {exc}")
     finally:
