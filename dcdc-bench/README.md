@@ -24,10 +24,16 @@ The short version, from the **repository root** (nothing here touches an instrum
 python3 -m venv .venv
 .venv/bin/python -m pip install -e . -e './dcdc-bench[ui,report,real]'
 sudo apt-get install --no-install-recommends chromium-headless-shell poppler-utils
-python3 dcdc-bench/tools/setup.py                              # pinned Quarto into dcdc-bench/.tools/
+python3 dcdc-bench/tools/setup.py                              # pinned Quarto into dcdc-bench/.tools/ (the dcdc-bench/.venv it also creates is optional)
 .venv/bin/dcdc-bench demo --out dcdc-bench/examples/generated  # three simulated reports; run on a laptop if you can
 .venv/bin/dcdc-bench ui --root dcdc-bench/workspace            # bench page on http://localhost:8082, simulated bench
 ```
+
+The `pip` line is the one install for both packages: `benchctl` from the
+repository root and the bench with its `ui`, `report` and `real` extras.
+`tools/setup.py` is for the pinned Quarto download (and a Playwright Chromium
+when no system Chromium is found); the second environment it creates at
+`dcdc-bench/.venv` is optional and none of the commands here use it.
 
 A real test additionally needs the private `Software/config/lab.yaml` with both
 instrument serials, the three saved approvals in the DUT and bench profiles, a
@@ -35,15 +41,30 @@ read-only `dcdc-bench doctor` pass, and a fresh wiring / CH1 / protection /
 serial confirmation at every Start; see
 [Getting started, section 5](docs/getting-started.md#5-critical-before-any-real-test).
 Then start the page with `--inventory Software/config/lab.yaml` and follow
-**Select → Preview → Confirm → Start → Stop**. On a 1 GB Pi the demo and report
-rendering take several minutes and have needed extra swap; acquisition is light.
+**Select → Preview → Confirm → Start → Stop**. The simulated bench (the default
+without `--inventory`) has no Confirm step — **Preview**, then **Start
+simulation** — and labels every output SYNTHETIC. On a 1 GB Pi the demo and
+report rendering take several minutes and have needed extra swap; acquisition
+is light.
 
 ## Status
 
 **Status as of 2026-09-28 (branch dcdc-bench-hardening): M0 reached; M1 substantially reached; M2 partial (software side implemented: structured uncertainty budget, read-only `doctor`, outputs-OFF readback-cadence probe; the real bench's freshness, readback accuracy and uncertainty stay unquantified until datasheet/calibration terms are entered and qualified on the bench; enabled-no-load unqualified); an M3 workflow slice demonstrated but M3 not complete by the spec's exit criteria; M4 software implemented on mock and stored data (paired-run comparison, sensor-placement editor with attachment hygiene, synthetic thermal channel with thermal settling) but M4 exit not met (no real temperature adapter; no comparison document rendered); M5 partial (UVLO input-ramp procedure on the synthetic plant only; full-power source, scope tests and public examples not started).**
 This position is stated identically in [acceptance coverage](docs/acceptance.md)
-and [implementation status](docs/implementation_status.md). For current test
-totals see the branch's final verification record.
+and [implementation status](docs/implementation_status.md). The current test
+total is the one figure quoted in
+[Architecture and verification](#architecture-and-verification) below.
+
+The codes are the milestones of the
+[implementation brief, section 15](docs/implementation-brief.md#15-implementation-milestones);
+the [glossary](docs/glossary.md#milestones-m0m5) tabulates their exit criteria:
+
+- **M0** — audit and contracts: typed profile and result schemas, the first DUT and mock bench profiles, the feasible-point planner and core constraint tests.
+- **M1** — complete mock-to-report path: mock adapters, worker lifecycle, streaming evidence, deterministic analysis and one report template, so one demo command produces standalone HTML and a matching vector PDF without hardware.
+- **M2** — supervised real point: adapted drivers validated, the bench protective profile complete, the approved no-load / 24 V / 0.1 A bring-up after explicit authorization.
+- **M3** — partial-power sweep and simple UI: the approved small grid, setup limits distinguished from DUT behaviour, reports without manual copying, profile and recipe forms, progress and report access.
+- **M4** — comparisons and thermal extension: paired-run comparison, difference plots, photo and sensor annotation, temperature adapters and separate thermal settling.
+- **M5** — expanded capability: full-power source profile, reviewed uncertainty improvements, the approved UVLO recipe, scope captures, richer imports and approved public examples.
 
 ## What it does and what it does not do
 
@@ -55,7 +76,9 @@ guards while retaining every requested point with its reason, acquires settled
 DC readings from a deterministic simulated bench (the normal demonstration) or,
 when explicitly armed, from the reviewed DP821A CH1 / DL3031A bench through
 bounded real recipes, appends the evidence during acquisition and hashes it at
-finalization, calculates path efficiency, power loss, regulation and
+finalization, calculates [path efficiency](docs/glossary.md#measurement-words)
+(output power ÷ input power at the instrument terminals, so the losses in both
+pairs of leads are inside the number), power loss, regulation and
 enabled-no-load consumption with a structured uncertainty budget, and renders
 an offline interactive HTML report and a matching vector PDF from one report
 model after verified shutdown.
@@ -76,6 +99,11 @@ measured artifacts are future work.
 ## Use the bench interface
 
 **Select converter → choose voltages and loads → preview limits → Start → watch progress → open HTML/PDF.**
+On the simulated bench — the default when the page starts without
+`--inventory` — the button reads **Start simulation** and nothing is confirmed;
+on the real bench it reads **Start test on the real bench** and opens
+**Confirm the physical setup** before anything is switched on. Both end in
+reports labelled **Simulation · synthetic data** or **Real bench · measured**.
 
 From the parent repository root, install both the existing instrument drivers
 and the interface dependencies, then start the page:
@@ -116,24 +144,27 @@ for load regulation, line regulation, and the separate meaning of dropout voltag
 
 ## Try the demonstration
 
-Use Python 3.11 or later. From this directory:
+Use Python 3.11 or later. From the repository root, after the `pip` line in
+[Start here](#start-here):
 
 ```sh
 sudo apt-get install --no-install-recommends chromium-headless-shell poppler-utils   # Debian/Pi, once
-python3 tools/setup.py
-.venv/bin/dcdc-bench demo --out examples/generated
+python3 dcdc-bench/tools/setup.py                                                    # pinned Quarto only
+.venv/bin/dcdc-bench demo --out dcdc-bench/examples/generated
 ```
 
-The setup command installs the Python dependencies and downloads the pinned
-official Quarto release, verifying its published SHA-256; Quarto includes
-Typst. Chrome/Chromium renders the vector figures before both the HTML and the
+The setup script downloads the pinned official Quarto release into
+`dcdc-bench/.tools/`, verifying its published SHA-256 (Quarto includes Typst);
+the second environment it creates at `dcdc-bench/.venv` is optional and unused
+here. Chrome/Chromium renders the vector figures before both the HTML and the
 PDF build (the renderer prefers `chromium-headless-shell`, an installed
 `chromium` or `google-chrome` also works, and `BROWSER_PATH` selects another
 executable; `poppler-utils` serves the PDF inspection tests, not acquisition).
 A source checkout is required for the included profiles and templates. The
-Windows commands (`py tools/setup.py`, then
-`.venv\Scripts\dcdc-bench.exe demo --out examples/generated`) are provided for
-contributors; release verification for this increment is on Debian 13 ARM64.
+Windows commands (from `dcdc-bench/`: `py tools/setup.py`, then
+`.venv\Scripts\dcdc-bench.exe demo --out examples/generated`, which use that
+optional environment) are provided for contributors; release verification for
+this increment is on Debian 13 ARM64.
 
 The demo asks a simulated supply for **12, 24 and 30 V** and a simulated load
 for **0, 0.05, 0.1, 0.25, 0.5, 0.75 and 1 A**. At each feasible point it waits
@@ -149,7 +180,7 @@ and evidence), **Setup limited** (a simulated source enters current limiting;
 that point cannot support a nominal efficiency claim) and **Aborted** (an early
 stop preserves completed points, unrun points and shutdown evidence).
 
-Open **`examples/generated/index.html`** when the command completes. Every
+Open **`dcdc-bench/examples/generated/index.html`** when the command completes. Every
 report works offline with JavaScript enabled and no Python server: choose
 input curves and quantities, hover the actual markers, inspect raw readings,
 zoom, export CSV/SVG/PNG and save a view; **Reset zoom** keeps your selections
@@ -234,8 +265,13 @@ The four independent inputs are DUT, bench, recipe and report profiles.
 dcdc-bench plan --dut profiles/dut/12t12-4a.yaml \
   --bench profiles/bench/mock.yaml \
   --recipe profiles/recipes/12t12-4a-quick.yaml --out plan.json
-dcdc-bench run --plan plan.json --mode mock --out runs
+dcdc-bench run --plan plan.json --mode mock --out examples/generated/practice
 ```
+
+Write practice runs under `examples/generated/` (ignored by Git), as above, or
+use the page's simulated bench. Never use `runs/` — the command's default
+`--out` — for practice: `dcdc-bench/runs/` holds the project's only copy of the
+real measurements, and a simulated run would land beside them.
 
 Change the YAML to describe another DUT; no converter-specific Python class is
 needed. Unknown tolerances and uncertainty remain unknown. This source cannot
@@ -336,7 +372,7 @@ platform, acceptance coverage and limitations, and the
 
 ## What comes next
 
-Status as of 2026-09-28 (branch dcdc-bench-hardening): M0 reached; M1 substantially reached; M2 partial (software side implemented: structured uncertainty budget, read-only `doctor`, outputs-OFF readback-cadence probe; the real bench's freshness, readback accuracy and uncertainty stay unquantified until datasheet/calibration terms are entered and qualified on the bench; enabled-no-load unqualified); an M3 workflow slice demonstrated but M3 not complete by the spec's exit criteria; M4 software implemented on mock and stored data (paired-run comparison, sensor-placement editor with attachment hygiene, synthetic thermal channel with thermal settling) but M4 exit not met (no real temperature adapter; no comparison document rendered); M5 partial (UVLO input-ramp procedure on the synthetic plant only; full-power source, scope tests and public examples not started).
+The milestone position is stated once, in the bold paragraph under [Status](#status).
 
 The next bounded task, before any further energizing, is to finish M2
 qualification — measurement freshness, useful readback accuracy, an evaluated

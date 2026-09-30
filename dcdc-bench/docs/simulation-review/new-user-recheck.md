@@ -151,3 +151,21 @@ pledge from the guide; (c) corrected the two stale glossary lines and the §1
 "unquantified" sentence. Those are an afternoon's edits; after them a
 first-time user can go from clone to a labelled synthetic report without
 forming a wrong belief about what is real.
+
+## 7. Follow-up pass
+
+Written 2026-09-30, after this re-check, at the head of `dcdc-bench-hardening`.
+The verdict's items (a)–(c) were done in one documentation pass: both READMEs
+(one install line, an M0–M5 legend, glossary links, the practice-run path, the
+duplicated status paragraph, the two flow summaries), guide §5 with the label
+test extended to it, the glossary lines and the guide's §1 sentence. N1–N7:
+
+| # | Resolution | Where |
+| --- | --- | --- |
+| N1 | **Fixed** — *Local vs remote sense* now says both the real bench and `mock.yaml` use local sensing and names `mock-remote-sense.yaml` as the remote-sense variant; *Measurement boundary* quotes the shipped `mock.yaml` string and calls `source-to-DUT-output path` the `domain.py` default that `mock-remote-sense.yaml` still carries. | `docs/glossary.md` |
+| N2 | **Fixed** — the header now says where the links are (both READMEs at their first use of *path efficiency* / *qualified*, guide §1 and §4.6, bench-ui.md where it describes the footer), and the README and §1 links it names were added. | `docs/glossary.md`; root `README.md`; `dcdc-bench/README.md`; `docs/getting-started.md` §1 |
+| N3 | **Fixed** — §1 now says reports from the real bench call uncertainty unquantified until the readback specifications are transcribed, and that the simulation's ± comes from a synthetic example specification (section 4.6). | `docs/getting-started.md` §1 |
+| N4 | **Not fixed** — the `/glossary` page title is set in code (`ui.py`), outside this documentation pass. | `src/dcdc_bench/ui.py` |
+| N5 | **Not fixed** — bench-ui.md's length is noted and the document is left as it is. | `docs/bench-ui.md` |
+| N6 | **Fixed** — the **Status** sentence now points at the one test total in **Architecture and verification**, and the plain copy of the status paragraph in **What comes next** is replaced by a pointer to **Status**. | `dcdc-bench/README.md` |
+| N7 | **Fixed** — §6.8 reads **Open HTML**, and `KNOWN_GUIDE_MISMATCHES` in the test is empty; the same test now also reads §5, whose three wrong labels were replaced by the page's (`The converter is on DP821A CH1 (not CH2) and the load input`, `This converter is approved for the real bench`, `I reviewed these limits — required once` / `Limits approved for this preset`) and whose supervision pledge was removed. | `docs/getting-started.md` §5, §6.8; `tests/test_ui.py` |

@@ -1704,29 +1704,38 @@ def guide_section(text, heading):
     return text[start:following if following != -1 else None]
 
 
-# Bold phrases of the guide's page walkthroughs that are prose, not labels on the page.
-NOT_UI_LABELS = {'8082', '8081', 'Ports → Forward a Port → 8082', 'Select.', 'Preview.', 'Confirm.', 'Start.',
-                 'Wait for the reports.', 'Find the evidence on disk.', 'Retry a report', 'no job is active', 'and'}
+# Bold phrases of the guide's page walkthroughs and safety checklist that are prose, not labels on the page.
+NOT_UI_LABELS = {'8082', '8081', 'Ports → Forward a Port → 8082', 'no job is active', 'and',
+                 # §5 emphasis: wiring, sensing, exit codes and the measurement boundary
+                 'channel 1', 'local load sensing', 'path efficiency includes input and output wiring losses',
+                 'REAL HARDWARE, read-only `*IDN?`', 'both with `expected_serial` set', '26 V input OVP',
+                 'Exit 0', 'Exit 4', 'Exit 2'}
 # Labels the guide quotes with a placeholder or a runtime value: the literal fragments the page source must contain.
 COMPOSED_LABELS = {'Acquiring… point n of m': ('Acquiring… point ', ' of '),
                    'Simulation: Acquiring… point 2 of 21': ('Simulation: ', 'Acquiring… point ', ' of '),
                    'Waiting for free memory: 96 MiB available, 150 MiB needed': ('Waiting for free memory: ', ' MiB available', ' MiB needed'),
                    'Report generation needs attention: PDF. Saved measurements are preserved.':
-                       ('Report generation needs attention: ', '. Saved measurements are preserved.')}
+                       ('Report generation needs attention: ', '. Saved measurements are preserved.'),
+                   'The converter is on DP821A CH1 (not CH2) and the load input': ('The converter is on ', ' (not CH2) and the load input'),
+                   'I reviewed the protective limits: 1 A supply · 26 V input · 13.2 V / 2.55 A output':
+                       ('I reviewed the protective limits: ', ' supply · ', ' input · ', ' / ', ' output')}
 # Bold UI labels in the guide that do not occur on the page today; each names its owner. Remove the entry when the guide is fixed.
-KNOWN_GUIDE_MISMATCHES = {'Open interactive HTML': 'getting-started §6.8: the link reads "Open HTML" (new-user C28); owned by the guide editor'}
+KNOWN_GUIDE_MISMATCHES = {}
 
 
 def test_every_bold_ui_label_quoted_in_the_guide_exists_in_the_page_source():
-    """New-user C27: the guide's bold labels are the page's labels, byte for byte (the simulated walkthrough in §4.6
-    and the real-test walkthrough in §6). A label composed at run time is checked by its literal fragments."""
+    """New-user C27 and its re-check: the guide's bold labels are the page's labels, byte for byte, in the simulated
+    walkthrough (§4.6), the safety checklist (§5) and the real-test walkthrough (§6). A numbered item's bold opening
+    sentence is the guide's own heading, not a label. A label composed at run time is checked by its literal fragments."""
     import re
     guide = (DOCS / 'getting-started.md').read_text(encoding='utf-8')
     source = '\n'.join((SRC / name).read_text(encoding='utf-8') for name in ('ui.py', 'ui_models.py', 'job_service.py'))
-    simulated = guide_section(guide, '6. Optional: open the bench page')
-    real = guide_section(guide, '## 6. Run a real test through the UI')
-    phrases = [re.sub(r'\s+', ' ', phrase) for phrase in re.findall(r'\*\*(.+?)\*\*', simulated + real, flags=re.S)]
-    assert len(phrases) > 60, 'both walkthroughs were found'
+    sections = ''.join(guide_section(guide, heading) for heading in (
+        '6. Optional: open the bench page', '## 5. Critical before any real test', '## 6. Run a real test through the UI'))
+    normalise = lambda phrase: re.sub(r'\s+', ' ', phrase)
+    titles = {normalise(title) for title in re.findall(r'^\s*\d+\.\s+\*\*(.+?)\*\*', sections, flags=re.M | re.S)}
+    phrases = [normalise(phrase) for phrase in re.findall(r'\*\*(.+?)\*\*', sections, flags=re.S)]
+    assert len(phrases) > 80 and 'I checked these ratings against the sample label' in phrases, 'all three sections were found'
 
     def present(phrase):
         phrase = re.sub(r'^\d+ ', '', phrase)  # '1 Which converter?': the number is its own label
@@ -1736,7 +1745,7 @@ def test_every_bold_ui_label_quoted_in_the_guide_exists_in_the_page_source():
             return True
         parts = [part for separator in (' → ', ' / ') for part in phrase.split(separator) if separator in phrase]
         return bool(parts) and all(part in source for part in parts)
-    missing = sorted({phrase for phrase in phrases if phrase not in NOT_UI_LABELS and not present(phrase)})
+    missing = sorted({phrase for phrase in phrases if phrase not in titles and phrase not in NOT_UI_LABELS and not present(phrase)})
     assert missing == sorted(KNOWN_GUIDE_MISMATCHES), missing
     assert all(mismatch in guide for mismatch in KNOWN_GUIDE_MISMATCHES), 'a fixed mismatch must be removed from the list'
 

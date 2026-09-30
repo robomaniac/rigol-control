@@ -20,7 +20,11 @@ provides saved converter profiles, a local test interface, bounded real DC sweep
 and interactive HTML/vector PDF reports. See [the bench workflow](dcdc-bench/docs/bench-ui.md)
 and its milestone position in [implementation status](dcdc-bench/docs/implementation_status.md)
 (M0 reached; M1 substantially reached; M2 partial; an M3 workflow slice
-demonstrated; M4 and M5 software present on mock and stored data only). Real
+demonstrated; M4 and M5 software present on mock and stored data only). Those
+codes are the implementation brief's milestones — M0 contracts and planner,
+M1 mock-to-report path, M2 supervised real point, M3 partial-power sweep and
+simple UI, M4 comparisons and thermal, M5 expanded capability — listed with
+their exit criteria in the [glossary](dcdc-bench/docs/glossary.md#milestones-m0m5). Real
 converter runs additionally require saved-profile approvals and a fresh
 wiring/serial confirmation at each Start. The bench interface listens only on
 the bench computer's loopback interface (`http://localhost:8081/` on the
@@ -33,7 +37,7 @@ The newer [test near the supply limit](dcdc-bench/README.md#test-near-the-supply
 reached **1.725 A output** while drawing **0.987 A from the 24 V supply**.
 The latest [efficiency comparison](dcdc-bench/README.md#efficiency-at-different-input-voltages)
 adds **24 V and near-36 V curves**, reaching **2.5 A output**. Its separate
-12 V startup attempt stopped without a qualified efficiency result.
+12 V startup attempt stopped without a [qualified](dcdc-bench/docs/glossary.md#measurement-words) efficiency result.
 A later [startup experiment](dcdc-bench/docs/startup-descent-results-review.md)
 started at 15 V and kept the output at **12.134 V with a 100 mA load** while
 reducing measured input to **9.108 V**, without restarting the converter.
@@ -94,9 +98,17 @@ To run the software, work from the **repository root**:
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install -e '.[dev]'
+python -m pip install -e . -e './dcdc-bench[ui,report,real]'
 cp -n Software/config/lab.example.yaml Software/config/lab.yaml
 ```
+
+That one `pip` line installs both `benchctl` (this demo) and the
+[dcdc-bench](dcdc-bench/README.md) converter bench; it is the same line as in
+[Getting started, section 3](dcdc-bench/docs/getting-started.md#3-install).
+The converter bench's report tools are separate: `python3 dcdc-bench/tools/setup.py`
+downloads the pinned Quarto (that is its purpose; the second `dcdc-bench/.venv`
+it also creates is optional), and Chromium comes from `apt`. `benchctl` needs
+neither.
 
 The local `lab.yaml` is ignored by Git. Replace its two `.invalid` hostnames
 with your instruments' addresses. Read their identities, then put the returned
@@ -410,6 +422,8 @@ python -m pytest Software/tests -q
 python -m pytest dcdc-bench/tests -q -m 'not browser and not pdf and not integration'
 ```
 
+`pytest` is not in the **Start here** install line; add the test extras first
+(`python -m pip install -e '.[dev]' -e './dcdc-bench[test]'`).
 Tests use fake instruments; the same commands run in
 [GitHub Actions](.github/workflows/ci.yml) on Python 3.11 and 3.13. The
 browser/PDF gates need Chromium and Quarto and run in a separate, non-blocking
