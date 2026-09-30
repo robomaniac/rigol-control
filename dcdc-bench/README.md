@@ -313,7 +313,7 @@ module-by-module map, with each module's entry points, forbidden dependencies
 and covering tests, is in [Architecture](docs/architecture.md); the
 acquisition/report process separation is in [the Pi process model](docs/pi-process-model.md).
 
-Current test total (2026-09-30, `dcdc-bench-hardening` after `9043649`): `pytest --collect-only -m 'not browser and not pdf'` collects **812 of 828 tests** in `dcdc-bench/tests` (16 browser/PDF gates deselected; 569 `def test_` functions in 44 files, the rest parametrized). This is the one figure to quote; the numbers below are dated checkpoints and are not added together. On 2026-09-28 the ordinary suite passed 653 tests with 15 browser/PDF tests deselected (Raspberry Pi, 478 s); at an earlier checkpoint it passed 378 tests with 13 deselected, and a focused UI, job and report regression passed 57. The configured real run passed a
+Current test total (2026-09-30, `dcdc-bench-hardening` at the end of the simulation review round): the full run `pytest dcdc-bench/tests -m 'not browser and not pdf'` passed **874 tests** with 16 browser/PDF gates deselected (Raspberry Pi 4, 199 s). This is the one figure to quote; the numbers below are dated checkpoints and are not added together. On 2026-09-28 the ordinary suite passed 653 tests with 15 browser/PDF tests deselected (Raspberry Pi, 478 s); at an earlier checkpoint it passed 378 tests with 13 deselected, and a focused UI, job and report regression passed 57. The configured real run passed a
 separate **67-check evidence audit**, and the startup/descent run passed 51 checks.
 At the earlier M1 checkpoint the ordinary suite passed **214 tests**, one
 complete mock demo command finished successfully with five visually reviewed

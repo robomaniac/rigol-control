@@ -202,11 +202,7 @@ hardware execution; configured real jobs use `JobService` through the UI.
 
 ### Current verification record
 
-Current test total (2026-09-30, `dcdc-bench-hardening` after `9043649`):
-`pytest --collect-only -m 'not browser and not pdf'` collects **812 of 828
-tests** in `dcdc-bench/tests` (16 browser/PDF gates deselected; 569 `def
-test_` functions in 44 files, the rest parametrized). This is the one figure
-the README and HANDOFF quote; the run totals below are dated checkpoints.
+Current test total (2026-09-30, `dcdc-bench-hardening` at the end of the simulation review round): the full run `pytest dcdc-bench/tests -m 'not browser and not pdf'` passed **874 tests** with 16 browser/PDF gates deselected (Raspberry Pi 4, 199 s). This is the one figure the README and HANDOFF quote; the run totals below are dated checkpoints.
 CI note: the Python 3.11 job had failed on seven `Path.read_text(newline=)`
 test sites (3.13-only), fixed on 2026-09-30; the two 390 px browser gates
 that failed on CI's Chromium were made font-tolerant the same day and have

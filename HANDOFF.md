@@ -78,11 +78,7 @@ to a fresh card instead of swapping this one):
 
 ## 4. Branch state and how to verify it
 
-Current test total (2026-09-30, `dcdc-bench-hardening` after `9043649`):
-`pytest --collect-only -m "not browser and not pdf"` collects **812 of 828
-tests** in `dcdc-bench/tests` (16 browser/PDF gates deselected; 569 `def
-test_` functions in 44 files, the rest parametrized). Quote that figure; the
-counts in the block below are from the last full run on the Pi and are dated.
+Current test total (2026-09-30, `dcdc-bench-hardening` at the end of the simulation review round): the full run `pytest dcdc-bench/tests -m "not browser and not pdf"` passed **874 tests** with 16 browser/PDF gates deselected (Raspberry Pi 4, 199 s). Quote that figure; the counts in the block below are dated checkpoints.
 
 Last fully verified state (2026-09-28, commit `cc98899` on `dcdc-bench-hardening`):
 
