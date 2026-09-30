@@ -228,7 +228,7 @@ def test_issued_csv_export_matches_interactive_export_byte_for_byte(tmp_path):
     model["points"][2]["quality_flags"] = []
     model["figures"].append({**model["figures"][0], "id": "fig-demand-time", "x_key": "elapsed_s"})
     renderer.write_exports(model, tmp_path)
-    issued = (tmp_path / "exports/points.csv").read_text(encoding="utf-8", newline="")
+    issued = (tmp_path / "exports/points.csv").open(encoding="utf-8", newline="").read()
     harness = r"""
 const {script, model} = JSON.parse(require('fs').readFileSync(0, 'utf8'));
 """ + SLICE_SUPPORT + r"""

@@ -170,7 +170,22 @@ def test_web_chart_captions_remain_below_svg_on_desktop_and_mobile(viewer):
                     captionTop: view.querySelector('figcaption').getBoundingClientRect().top};
             })""")
             assert boxes and all(box["captionTop"] >= box["svgBottom"] - 1 for box in boxes), boxes
-            assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), width
+            # No horizontal overflow: the document is no wider than the layout viewport.
+            # `clientWidth` excludes a classic (non-overlay) scrollbar, which CI's Chromium
+            # draws and the bench Pi's does not; 2 px absorbs fractional layout rounding.
+            # On failure, name the elements that stick out so the offender is known.
+            overflow = page.evaluate("""() => {
+                const limit = document.documentElement.clientWidth + 2;
+                const wide = document.documentElement.scrollWidth > limit;
+                const offenders = wide ? [...document.body.querySelectorAll('*')]
+                    .filter(el => el.getBoundingClientRect().right > limit && el.getClientRects().length)
+                    .slice(0, 12).map(el => (el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') +
+                        (el.className && typeof el.className === 'string' ? '.' + el.className.trim().split(/\\s+/).join('.') : '')
+                        + ' right=' + Math.round(el.getBoundingClientRect().right))) : [];
+                return {viewport: innerWidth, layout: document.documentElement.clientWidth,
+                        document: document.documentElement.scrollWidth, offenders};
+            }""")
+            assert overflow["document"] <= overflow["layout"] + 2, (width, overflow)
     finally:
         page.set_viewport_size({"width": 1365, "height": 980})
 
@@ -456,8 +471,14 @@ def test_web_compact_hover_desktop_mobile_and_alternate_axis(viewer):
             coordinate = _hover_point(page, point["point_id"])
             tooltip = page.locator('#plot-fig-efficiency .hoverlayer .hovertext')
             box = tooltip.bounding_box()
-            # Chromium reports fractional layout boxes (300.03 px seen); allow sub-pixel rounding.
-            assert box and box["width"] <= 301 and box["height"] <= 101, box
+            # Compact: at most four 12 px lines, none longer than 60 characters, in the report's
+            # hover type size. A pixel width would measure the fallback font, not the label: CI's
+            # Chromium (DejaVu Sans) drew the same text 347 px wide where the bench Pi's UI font
+            # gave 300 px. Chromium reports fractional layout boxes; allow sub-pixel rounding.
+            texts = tooltip.locator('tspan.line').all_text_contents()
+            font_size = tooltip.evaluate("el => parseFloat(getComputedStyle(el.querySelector('text')).fontSize)")
+            assert box and box["height"] <= 101 and font_size <= 13, (box, font_size)
+            assert texts and max(len(text) for text in texts) <= 60, texts
             assert box["x"] >= -1 and box["x"] + box["width"] <= width + 1, box
             assert box["y"] >= -1 and box["y"] + box["height"] <= height + 1, box
             # Condition, x, y — plus one labeled line only where a readback budget was evaluated (UNC-02).
