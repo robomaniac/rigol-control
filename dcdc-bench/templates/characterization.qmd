@@ -14,16 +14,14 @@ format:
     include-after-body: interactions.html
     include-in-header: metadata.html
     anchor-sections: true
-    number-sections: false
+    number-sections: true
   typst:
-    papersize: a4
-    fontsize: 9.5pt
-    margin:
-      x: 18mm
-      y: 16mm
+    papersize: __PAPER__
     toc: false
     keep-typ: true
     include-in-header: print-header.typ
+    template-partials:
+      - typst-show.typ
 execute:
   enabled: false
 ---

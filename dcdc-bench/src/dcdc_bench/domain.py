@@ -575,6 +575,8 @@ class ReportProfile(Contract):
     publication_enabled: Literal[False] = False
     embed_assets: Literal[True] = True
     noindex: Literal[True] = True
+    # PDF page size (brief §12.6); the HTML is unaffected.
+    paper: Literal["letter", "a4"] = "letter"
 
 
 class PlannedPoint(Contract):
@@ -782,4 +784,4 @@ class ReportRenderer(Protocol):
     """
 
     def __call__(self, report_model: dict[str, Any], out_dir: Path,
-                 formats: Sequence[str] = ...) -> dict[str, Any]: ...
+                 formats: Sequence[str] = ..., *, paper: str = ...) -> dict[str, Any]: ...

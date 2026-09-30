@@ -2,10 +2,14 @@
 
 Importing, planning and confirmation validation never open an instrument. The
 existing fixed-procedure lifecycle owns locks, raw persistence and independent
-shutdown. This backend supports positive-load steady-state sweeps only.
+shutdown. This backend supports steady-state load sweeps; an enabled no-load
+request (0 A) is a distinct observation acquired with the load input OFF, only
+as the first request of its input-voltage phase and only after the source-only
+startup gate has passed (plan Gap E).
 """
 from __future__ import annotations
 
+from itertools import groupby
 import math
 from pathlib import Path
 from statistics import mean
@@ -18,6 +22,13 @@ from .storage import atomic_json
 from .voltage_sweep import VoltageSweepProcedure
 
 POLICY = "profile-dc-dp821a-ch1-v1"
+# Enabled no-load (plan Gap E): the load input stays OFF (input disabled, not CC 0 A),
+# the startup gate must have passed, and the input current must be stable within
+# this span over the settling and acquisition windows. A software default for the
+# owner to confirm; observed source-only spreads were 0.3–0.6 mA.
+NO_LOAD_IIN_SPAN_A = .002
+NO_LOAD_REASON = ("Eligible enabled no-load observation (load input OFF): acquired only after the source-only startup "
+                  "gate; input consumption only, efficiency not applicable; fresh physical confirmation is required to arm")
 
 
 def prepare_real_plan(original: Plan) -> tuple[Plan, list[str], float]:
@@ -72,10 +83,13 @@ def prepare_real_plan(original: Plan) -> tuple[Plan, list[str], float]:
         errors.append("Acquisition requires 5–15 s, 1–2 s polling, 5–15 cycles and <=750 ms query skew")
     if not 0 < r.settling.maximum_vout_span_V <= .05:
         errors.append("Settling voltage span must be >0 and <=50 mV")
+    started_phases: set[tuple[str, float]] = set()
     for point in plan.points:
         if point.status not in ("approval_blocked", "executable"):
             continue
         reasons = []
+        no_load = point.iout_target_A == 0
+        phase_key = (point.test_id, point.vin_target_V)
         if not 1 <= point.vin_target_V <= 35.8:
             reasons.append("source request outside supported 1–35.8 V envelope")
         if point.vin_target_V * 1.001 + .025 > d.ratings.input_voltage_max_V:
@@ -84,18 +98,29 @@ def prepare_real_plan(original: Plan) -> tuple[Plan, list[str], float]:
             reasons.append("input request leaves insufficient DC programming-accuracy margin above DUT minimum")
         if c.dut_input_overvoltage_V is not None and point.vin_target_V >= c.dut_input_overvoltage_V:
             reasons.append("input request must be below source OVP")
-        if not .05 <= point.iout_target_A <= 2.5:
-            reasons.append("only loaded 0.05–2.5 A observations are supported; no-load remains unqualified")
+        if no_load and phase_key in started_phases:
+            reasons.append("an enabled no-load observation must be the first request of its input-voltage phase "
+                           "(unloaded start with the load input OFF); it is not acquired after a loaded point")
+        elif not no_load and not .05 <= point.iout_target_A <= 2.5:
+            reasons.append("loaded observations are supported from 0.05 to 2.5 A")
         if point.iout_target_A * (c.dut_output_overvoltage_V or 13.2) > 34:
             reasons.append("output exceeds the supported 34 W envelope")
         point.status = "unsupported" if reasons else "executable"
-        point.reason = "; ".join(reasons) if reasons else "Eligible bounded DC point; fresh physical confirmation is required to arm"
+        point.reason = ("; ".join(reasons) if reasons else NO_LOAD_REASON if no_load
+                        else "Eligible bounded DC point; fresh physical confirmation is required to arm")
+        if point.status == "executable":
+            started_phases.add(phase_key)
     eligible = [p for p in plan.points if p.status == "executable"]
-    phases = sum(i == 0 or (p.test_id, p.vin_target_V) != (eligible[i-1].test_id, eligible[i-1].vin_target_V)
-                 for i, p in enumerate(eligible))
+    phase_groups = [list(group) for _, group in groupby(eligible, key=lambda p: (p.test_id, p.vin_target_V))]
+    phases = len(phase_groups)
+    # A phase opened by an enabled no-load observation enables the load only afterwards, so its
+    # five loaded startup cycles (enable_load) fall outside the 14 s per-phase startup budget.
+    deferred_load_enables = sum(group[0].iout_target_A == 0 and any(p.iout_target_A > 0 for p in group)
+                                for group in phase_groups)
     seconds = len(eligible) * (max(r.settling.minimum_dwell_s, r.settling.window_s,
         r.settling.minimum_fresh_samples * r.acquisition.target_poll_interval_s) +
-        max(r.acquisition.duration_s, r.acquisition.minimum_complete_cycles * r.acquisition.target_poll_interval_s) + 3) + phases * 14
+        max(r.acquisition.duration_s, r.acquisition.minimum_complete_cycles * r.acquisition.target_poll_interval_s) + 3
+        ) + phases * 14 + deferred_load_enables * 5
     if not eligible:
         errors.append("No requested point is eligible")
     if seconds > 540:
@@ -103,7 +128,9 @@ def prepare_real_plan(original: Plan) -> tuple[Plan, list[str], float]:
     plan.warnings += ["Real execution is bounded by a 660 s software deadline and a verified 720 s source timer per voltage phase.",
         "Every input-voltage phase starts with both outputs OFF and a fresh unloaded startup; warm-start descent is a separate procedure.",
         "Electrical guards are stop criteria, not DUT acceptance limits. OVP and polled readings do not certify fast transient protection.",
-        "No-load, temperature, remote sensing, arbitrary commands and automatic restart are not supported."]
+        "An enabled no-load request is acquired only as the first request of its input-voltage phase, with the load input "
+        "verified OFF in every cycle; it yields input consumption, never efficiency or module loss.",
+        "Temperature, remote sensing, arbitrary commands and automatic restart are not supported."]
     plan.plan_hash = _hash_payload(plan.model_dump(mode="json", exclude={"plan_hash"}))
     return plan, errors, seconds
 
@@ -114,21 +141,23 @@ class ConfiguredProcedure:
             raise ValueError("Plan hash mismatch")
         self.snapshot, self.confirmation, self.cancel = plan.model_copy(deep=True), confirmation, cancel
         self.notes, self.attachments = str(notes).strip(), list(attachments or [])
-        self.stage, self.source_only_cycles = "starting", 0
-        first = next(p for p in plan.points if p.status == "executable")
-        self.voltage = first.vin_target_V
+        self.stage, self.source_only_cycles, self.load_enabled = "starting", 0, False
+        executable = [p.model_dump() for p in plan.points if p.status == "executable"]
+        first = executable[0]
+        self.voltage = first["vin_target_V"]
+        initial = self.initial_load_current(executable, (first["test_id"], first["vin_target_V"]))
         controls = plan.bench.protective_controls
         self.lower_output = .9 * plan.dut.ratings.output_voltage_nominal_V
         procedure = self
 
         class ProfileRigol(SourceLimitRigol):
-            voltage = first.vin_target_V
+            voltage = first["vin_target_V"]
             current_limit = controls.source_current_limit_A
             source_ovp = controls.dut_input_overvoltage_V
             source_ocp = min(1.05, controls.source_current_limit_A * 1.1 + .005)
             output_voltage_limit = controls.dut_output_overvoltage_V
             output_current_limit = controls.output_overcurrent_A
-            initial_current = first.iout_target_A
+            initial_current = initial
 
             def start(self):
                 procedure.check_cancel()
@@ -162,6 +191,12 @@ class ConfiguredProcedure:
         return next(p for p in run["points"] if p["status"] == "executable")
 
     @staticmethod
+    def initial_load_current(points, phase):
+        """CC setpoint programmed while the load input is OFF: the phase's first loaded request, else the 0.05 A floor."""
+        return next((p["iout_target_A"] for p in points
+                     if (p["test_id"], p["vin_target_V"]) == phase and p["iout_target_A"] > 0), .05)
+
+    @staticmethod
     def record_attempt(run, point):
         if point["point_id"] not in run["executed_point_ids"]:
             run["executed_point_ids"].append(point["point_id"])
@@ -179,10 +214,16 @@ class ConfiguredProcedure:
             "method": {"policy_id": POLICY, "source_current_limit_A": c.source_current_limit_A,
                 "source_OVP_V": c.dut_input_overvoltage_V, "source_OCP_A": self.adapter.source_ocp,
                 "hardware_deadline_s": 720, "software_deadline_s": 660,
-                "configured_dc_sweep": True, "output_lower_stop_V": self.lower_output},
+                "configured_dc_sweep": True, "output_lower_stop_V": self.lower_output,
+                "startup_gate": {"source_only_cycles": 5, "output_in_band_required_from_cycle": 5,
+                                 "lower_output_V": self.lower_output, "load_enabled_only_after_gate": True},
+                "enabled_no_load": {"load_input_state": "OFF (input disabled; not CC 0 A)",
+                                    "iin_span_A": NO_LOAD_IIN_SPAN_A, "iin_span_origin": "software default; owner to confirm",
+                                    "load_current_readback": "recorded as a load-off offset, never as output current"}},
             "metrology_limitations": ["Source/load-terminal path includes wiring losses.",
                 "Calibration, ADC freshness and readback uncertainty are unquantified; no temperature was acquired.",
-                "No-load, thermal equilibrium, dynamic behavior and full ratings are not established."]}
+                "Enabled no-load points report path input consumption with the load input OFF; they are not module quiescent or switching loss.",
+                "Thermal equilibrium, dynamic behavior and full ratings are not established."]}
 
     def guard(self, values, requested, *, loaded=True, startup=False, mode_before="CV", mode_after="CV"):
         self.check_cancel()
@@ -206,63 +247,107 @@ class ConfiguredProcedure:
         if loaded and not startup and abs(values["Iout_A"]-requested) > .02:
             raise ExtendedAbort("Requested load current was not established")
 
+    def startup_gate(self, ctx, point):
+        """Source-only startup gate: five guarded unloaded cycles, no load command.
+
+        guard(startup=True, loaded=False) counts the cycles and aborts at the fifth
+        if Vout is still below lower_output, so a gate failure stops before the load
+        input is ever enabled.
+        """
+        self.source_only_cycles = 0
+        for _ in range(5):
+            ctx.clock.sleep(1)
+            ctx.cycle(point, "starting", loaded=False, startup=True)
+
+    def enable_load(self, ctx, point):
+        """Load-enable step of the startup gate; only reached after startup_gate returned."""
+        if point["iout_target_A"] == 0:
+            raise ExtendedAbort("The load input is never enabled for an enabled no-load observation")
+        ctx.load.input_on()
+        self.load_enabled = True
+        for _ in range(5):
+            ctx.clock.sleep(1)
+            ctx.cycle(point, "starting", startup=True)
+
+    def startup(self, ctx):
+        """First phase: the lifecycle enabled the source; gate first, enable the load only for a loaded request."""
+        point = self.initial_point(ctx.run)
+        self.load_enabled = False
+        self.startup_gate(ctx, point)
+        if point["iout_target_A"] > 0:
+            self.enable_load(ctx, point)
+
     def execute(self, ctx):
         r, run, clock = self.snapshot.recipe, ctx.run, ctx.clock
         points = [p for p in run["points"] if p["status"] == "executable"]
         previous_phase = None
-        previous_current = points[0]["iout_target_A"]
+        previous_current = ctx.pilot.initial_current
         for index, point in enumerate(points):
             self.check_cancel()
             if clock.monotonic() - ctx.began >= 600:
                 raise ExtendedAbort("Remaining time reserved for safe shutdown")
             phase = (point["test_id"], point["vin_target_V"])
-            if previous_phase is not None and phase != previous_phase:
+            new_phase = previous_phase is not None and phase != previous_phase
+            no_load = point["iout_target_A"] == 0
+            if new_phase:
                 VoltageSweepProcedure.stop_phase(ctx)
-                self.voltage, self.source_only_cycles = point["vin_target_V"], 0
-                ctx.pilot.voltage, ctx.pilot.initial_current = self.voltage, point["iout_target_A"]
+                self.voltage, self.load_enabled = point["vin_target_V"], False
+                ctx.pilot.voltage = self.voltage
+                ctx.pilot.initial_current = previous_current = self.initial_load_current(points, phase)
                 ctx.pilot.configure()
             self.record_attempt(run, point)
             ctx.set_active(point)
             self.stage = point["test_id"]
             atomic_json(ctx.directory / "run.json", run)
-            if previous_phase is not None and phase != previous_phase:
+            if new_phase:
                 ctx.pilot.start()
-                for _ in range(5):
-                    clock.sleep(1)
-                    ctx.cycle(point, "starting", loaded=False, startup=True)
-                ctx.load.input_on()
-                for _ in range(5):
-                    clock.sleep(1)
-                    ctx.cycle(point, "starting", startup=True)
-                previous_current = point["iout_target_A"]
-            if point["iout_target_A"] != previous_current:
+                self.startup_gate(ctx, point)
+            if no_load:
+                if self.load_enabled or ctx.load.get_input_enabled():
+                    raise ExtendedAbort("Enabled no-load observation requires the load input OFF; it is not acquired after a loaded point")
+            elif not self.load_enabled:
+                self.enable_load(ctx, point)
+            if not no_load and point["iout_target_A"] != previous_current:
                 ctx.load.set_current(point["iout_target_A"])
-            previous_current, previous_phase = point["iout_target_A"], phase
-            began, settled = clock.monotonic(), []
+                previous_current = point["iout_target_A"]
+            previous_phase = phase
+            began, settled, currents = clock.monotonic(), [], []
             while (clock.monotonic()-began < max(r.settling.minimum_dwell_s, r.settling.window_s)
                    or len(settled) < r.settling.minimum_fresh_samples):
                 clock.sleep(r.acquisition.target_poll_interval_s)
-                _, values, _ = ctx.cycle(point, "settling")
+                _, values, _ = ctx.cycle(point, "settling", loaded=not no_load)
                 settled.append(values["Vout_V"])
+                currents.append(values["Iin_A"])
                 if clock.monotonic()-began > r.settling.timeout_s:
                     raise ExtendedAbort("Settling timeout")
             if max(settled)-min(settled) > r.settling.maximum_vout_span_V:
                 raise ExtendedAbort("Output did not settle within the configured voltage span")
+            if no_load and max(currents)-min(currents) > NO_LOAD_IIN_SPAN_A:
+                raise ExtendedAbort("Input current did not settle within the declared no-load span")
             acquisition, accepted, readings, max_skew = clock.monotonic(), [], [], 0.
             while clock.monotonic()-acquisition < r.acquisition.duration_s or len(accepted) < r.acquisition.minimum_complete_cycles:
-                cid, values, skew = ctx.cycle(point, "acquiring")
+                cid, values, skew = ctx.cycle(point, "acquiring", loaded=not no_load)
                 accepted.append(cid)
                 readings.append(values)
                 max_skew = max(max_skew, skew)
                 clock.sleep(r.acquisition.target_poll_interval_s)
             if max(row["Vout_V"] for row in readings)-min(row["Vout_V"] for row in readings) > r.settling.maximum_vout_span_V:
                 raise ExtendedAbort("Output voltage span exceeded the configured bound during acquisition")
-            point.update(qualification="valid", reason="Qualified bounded CV/DC observation; uncertainty unquantified",
+            iin_span = max(row["Iin_A"] for row in readings)-min(row["Iin_A"] for row in readings)
+            if no_load and iin_span > NO_LOAD_IIN_SPAN_A:
+                raise ExtendedAbort("Input current span exceeded the declared no-load bound during acquisition")
+            point.update(qualification="valid",
+                reason=("Qualified enabled no-load observation: load input verified OFF in every cycle; input consumption only; "
+                        "uncertainty unquantified" if no_load else "Qualified bounded CV/DC observation; uncertainty unquantified"),
+                observation="enabled_no_load" if no_load else "loaded", load_input_state="OFF" if no_load else "ON",
                 acquisition_cycle_ids=accepted, settled=True, settling_elapsed_s=acquisition-began,
                 acquisition_elapsed_s=clock.monotonic()-acquisition,
                 maximum_interchannel_skew_s=max_skew,
                 acquisition_start_monotonic_s=acquisition-ctx.began,
                 acquisition_end_monotonic_s=clock.monotonic()-ctx.began)
+            if no_load:
+                point.update(load_readback_offset_A=mean(row["Iout_A"] for row in readings), iin_span_A=iin_span,
+                             startup_gate="passed: five source-only cycles with output in band before acquisition")
             run["latest"] = {key: mean(row[key] for row in readings) for key in readings[0]}
             ctx.store.append("points", point)
             atomic_json(ctx.directory / "run.json", run)

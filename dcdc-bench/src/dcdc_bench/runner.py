@@ -286,6 +286,7 @@ def _worker(snapshot: dict, directory: str, scenario: str, real_time: bool, seed
                 query_end_monotonic_s=clock.now(), device_timestamp=device_time,
                 measurement_range=binding.measurement_range, resolution=binding.resolution,
                 acquisition_settings={"source_mode": source_mode, "load_compliance": physical.load_compliance,
+                                      "load_enabled": bench.load_enabled,
                                       "sense_enabled": bench.sense_enabled, "mock_model": MODEL_VERSION},
                 raw_response=raw_response, status="ok" if not flags else "invalid",
                 quality_flags=flags, acquisition_cycle_id=cycle_id, phase=phase,

@@ -55,9 +55,12 @@ caption, location); these are metadata, not uploaded or embedded image files.
 | Independent cutoff | Verified 720 s one-shot source timer per input-voltage phase |
 
 The saved DUT and bench ratings can impose tighter limits. Unsupported and
-assumption-limited requests remain visible in the plan and report. No-load,
-temperature, arbitrary SCPI commands, remote sensing and dynamic tests are not
-implemented in this workflow. Unknown acceptance requirements stay unevaluated.
+assumption-limited requests remain visible in the plan and report. A 0 A
+request is an enabled no-load observation: it must be the first request of its
+input-voltage phase, the load input stays OFF, input consumption is reported and
+efficiency is not applicable; it is not yet qualified on the bench. Temperature,
+arbitrary SCPI commands, remote sensing and dynamic tests are not implemented in
+this workflow. Unknown acceptance requirements stay unevaluated.
 
 Each input-voltage phase starts from both outputs OFF, checks residual source
 voltage, configures protections and proves unloaded startup before enabling the

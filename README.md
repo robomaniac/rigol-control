@@ -13,7 +13,7 @@ setpoint is checked against explicit, hand-maintained limits before a VISA
 session opens; limits are never inferred from a model name; software limits
 complement, never replace, the instruments' own OVP/OCP/OPP; tests and CI use
 fake instruments only. **Start:** [Getting started](dcdc-bench/docs/getting-started.md)
-· [Contributing](CONTRIBUTING.md).
+· [Contributing](CONTRIBUTING.md) · [Handoff for the owner and future coding sessions](HANDOFF.md).
 
 **DC–DC converter work:** the separate [dcdc-bench project](dcdc-bench/README.md)
 provides saved converter profiles, a local test interface, bounded real DC sweeps,

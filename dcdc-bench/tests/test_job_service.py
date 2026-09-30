@@ -1,4 +1,5 @@
 """Durable local job orchestration; no hardware or document renderer is run."""
+from datetime import datetime
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -372,3 +373,52 @@ def test_failed_pdf_validation_still_fails_the_job_but_keeps_the_pdf_reachable(s
     rows = report_link_rows(snapshot)
     assert [relative for _, relative in rows] == ["report/report.html", "report/report.pdf"]
     assert "failed the layout check" in rows[1][0]
+
+
+def test_operator_stop_during_acquisition_survives_into_the_cancelled_record(service, monkeypatch):
+    """Job 20260929T213318Z_6290205b ended 'cancelled' with error None and nothing saying when or why:
+    run_mock swallows the SIGINT that cancel() sends, so the worker's 'Operator cancelled' message never
+    lands for a mock job, and dispatch_reports deletes cancel.request before the report worker runs.
+    The stop request time must reach job.json in the acquisition worker and survive both later workers."""
+    from dcdc_bench.resources import MemoryGate
+    p = mock_preview(service)
+    monkeypatch.setattr("dcdc_bench.job_service.subprocess.Popen", lambda *a, **k: SimpleNamespace(pid=None))
+    job_id = service.start(p["plan_hash"])["job_id"]
+    job = service._job(job_id)
+
+    def acquire_then_stop(plan, out, **kwargs):
+        # The worker has published its pid and 'acquiring' by now; the operator presses Stop.
+        assert service.status(job_id)["state"] == "acquiring"
+        assert service.cancel(job_id)["cancel_requested"] is True
+        return finalized_fixture(job, p["plan"])  # verified OFF, as an interrupted mock run still ends
+
+    monkeypatch.setattr("dcdc_bench.services.acquire_mock", acquire_then_stop)
+    worker(job)
+    queued = service.status(job_id)
+    assert queued["state"] == "report-queued" and queued["acquisition_cancelled"] is True and queued["error"] is None
+    stamp = queued["acquisition_cancelled_utc"]
+    assert stamp == (job / "cancel.request").read_text().strip()
+    assert datetime.fromisoformat(stamp) >= datetime.fromisoformat(queued["created_utc"])
+    service.gate = MemoryGate(0, 0)
+    assert service.dispatch_reports() == {"job_id": job_id, "state": "queued"}
+    assert not (job / "cancel.request").exists(), "the dispatcher clears the marker; the time must already be in job.json"
+    monkeypatch.setattr("dcdc_bench.job_service._render_process", fake_render("success", "success"))
+    worker(job, report_only=True)
+    final = service.status(job_id)
+    assert final["state"] == "cancelled" and final["error"] is None
+    assert final["acquisition_cancelled_utc"] == stamp
+
+
+def test_uncancelled_job_records_no_stop_time_and_an_empty_marker_is_tolerated(service, monkeypatch):
+    p = mock_preview(service)
+    monkeypatch.setattr("dcdc_bench.job_service.subprocess.Popen", lambda *a, **k: SimpleNamespace(pid=None))
+    job_id = service.start(p["plan_hash"])["job_id"]
+    job = service._job(job_id)
+    monkeypatch.setattr("dcdc_bench.services.acquire_mock", lambda plan, out, **kwargs: finalized_fixture(job, p["plan"]))
+    worker(job)
+    assert service.status(job_id)["acquisition_cancelled_utc"] is None
+    from dcdc_bench.job_service import _stop_requested_utc
+    (job / "empty").touch()
+    (job / "junk").write_text("not a time")
+    assert _stop_requested_utc(job / "empty") is None and _stop_requested_utc(job / "junk") is None
+    assert _stop_requested_utc(job / "missing") is None
