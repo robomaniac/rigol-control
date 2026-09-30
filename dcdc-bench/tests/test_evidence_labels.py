@@ -72,8 +72,17 @@ def test_legacy_mock_report_stays_synthetic_and_records_virtual_clock():
     assert "**Qualification:** synthetic observations" in _body(model.model_dump())
 
 
+def test_legacy_recipe_mode_does_not_reclassify_evidence():
+    """The bench decides real vs simulated; a recipe's legacy execution_mode is planning metadata only."""
+    plan, run, analysis = evidence_fixture(True)
+    plan.recipe.execution_mode = "mock"
+    assert build_report_model(plan, run, analysis, []).evidence_label == "MEASURED"
+    plan.recipe.execution_mode = None
+    assert build_report_model(plan, run, analysis, []).evidence_label == "MEASURED"
+
+
 @pytest.mark.parametrize("change", ["simulated-as-real", "measured-as-mock", "missing-real-label",
-                                   "recipe-mode", "hardware-opened", "virtual-measurement", "unknown-label"])
+                                   "hardware-opened", "virtual-measurement", "unknown-label"])
 def test_evidence_mode_disagreement_blocks_analysis_and_report(change):
     plan, run, analysis = evidence_fixture(True)
     if change == "simulated-as-real":
@@ -82,8 +91,6 @@ def test_evidence_mode_disagreement_blocks_analysis_and_report(change):
         plan.bench.mode = "mock"
     elif change == "missing-real-label":
         del run["data_source"]
-    elif change == "recipe-mode":
-        plan.recipe.execution_mode = "mock"
     elif change == "hardware-opened":
         run["real_hardware_opened"] = False
     elif change == "virtual-measurement":

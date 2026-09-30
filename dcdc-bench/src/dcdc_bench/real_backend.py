@@ -14,7 +14,7 @@ import math
 from pathlib import Path
 from statistics import mean
 
-from .domain import Plan
+from .domain import Plan, PlannedPoint, TestRecipe
 from .extended import ExtendedAbort, _run_fixed
 from .planning import _hash_payload, missing_approvals, verify_plan_hash
 from .source_limit import SourceLimitRigol
@@ -31,6 +31,23 @@ NO_LOAD_REASON = ("Eligible enabled no-load observation (load input OFF): acquir
                   "gate; input consumption only, efficiency not applicable; fresh physical confirmation is required to arm")
 
 
+def acquisition_seconds(recipe: TestRecipe, eligible: list[PlannedPoint]) -> float:
+    """Planned wall time of the eligible points on this backend: per-point settling + acquisition
+    + 3 s of instrument commands, 14 s of unloaded startup per input-voltage phase, and 5 s for each
+    phase whose enabled no-load observation defers the loaded startup cycles (see prepare_real_plan).
+    The bench page shows the same number on its test cards and plan panel."""
+    r = recipe
+    phase_groups = [list(group) for _, group in groupby(eligible, key=lambda p: (p.test_id, p.vin_target_V))]
+    # A phase opened by an enabled no-load observation enables the load only afterwards, so its
+    # five loaded startup cycles (enable_load) fall outside the 14 s per-phase startup budget.
+    deferred_load_enables = sum(group[0].iout_target_A == 0 and any(p.iout_target_A > 0 for p in group)
+                                for group in phase_groups)
+    return len(eligible) * (max(r.settling.minimum_dwell_s, r.settling.window_s,
+        r.settling.minimum_fresh_samples * r.acquisition.target_poll_interval_s) +
+        max(r.acquisition.duration_s, r.acquisition.minimum_complete_cycles * r.acquisition.target_poll_interval_s) + 3
+        ) + len(phase_groups) * 14 + deferred_load_enables * 5
+
+
 def prepare_real_plan(original: Plan) -> tuple[Plan, list[str], float]:
     """Return an immutable preview with every requested point retained."""
     if not verify_plan_hash(original):
@@ -40,8 +57,9 @@ def prepare_real_plan(original: Plan) -> tuple[Plan, list[str], float]:
     c, errors = b.protective_controls, []
     c.policy_id = d.execution_approval.protective_policy_id = r.authorization.protective_policy_id = POLICY
     errors += missing_approvals(d, b)
-    if b.mode != "real" or r.execution_mode != "real":
-        errors.append("This backend requires real bench and recipe profiles")
+    # Real vs simulated is the bench's decision; a legacy recipe mode is planning metadata only.
+    if b.mode != "real":
+        errors.append("This backend requires a real bench profile")
     if b.source.channel != 1 or b.source.remote_sense_required or b.load.remote_sense_required:
         errors.append("Supported wiring is DP821A CH1 and local load sensing")
     if b.source.adapter not in ("benchctl_dp800", "benchctl_rigol_dp800") or b.load.adapter not in ("benchctl_dl3000", "benchctl_rigol_dl3000"):
@@ -111,16 +129,7 @@ def prepare_real_plan(original: Plan) -> tuple[Plan, list[str], float]:
         if point.status == "executable":
             started_phases.add(phase_key)
     eligible = [p for p in plan.points if p.status == "executable"]
-    phase_groups = [list(group) for _, group in groupby(eligible, key=lambda p: (p.test_id, p.vin_target_V))]
-    phases = len(phase_groups)
-    # A phase opened by an enabled no-load observation enables the load only afterwards, so its
-    # five loaded startup cycles (enable_load) fall outside the 14 s per-phase startup budget.
-    deferred_load_enables = sum(group[0].iout_target_A == 0 and any(p.iout_target_A > 0 for p in group)
-                                for group in phase_groups)
-    seconds = len(eligible) * (max(r.settling.minimum_dwell_s, r.settling.window_s,
-        r.settling.minimum_fresh_samples * r.acquisition.target_poll_interval_s) +
-        max(r.acquisition.duration_s, r.acquisition.minimum_complete_cycles * r.acquisition.target_poll_interval_s) + 3
-        ) + phases * 14 + deferred_load_enables * 5
+    seconds = acquisition_seconds(r, eligible)
     if not eligible:
         errors.append("No requested point is eligible")
     if seconds > 540:

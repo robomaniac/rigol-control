@@ -419,8 +419,9 @@ def _evidence_label(plan: Plan, run: dict) -> str:
     expected_mode = {"simulated": "mock", "measured": "real"}.get(source)
     if expected_mode is None:
         raise ValueError(f"Unknown acquisition data_source: {source!r}")
-    if plan.bench.mode != expected_mode or plan.recipe.execution_mode != expected_mode:
-        raise ValueError("Acquisition data_source does not match bench and recipe execution modes")
+    # The bench decides real vs simulated; a legacy recipe execution_mode is planning metadata.
+    if plan.bench.mode != expected_mode:
+        raise ValueError("Acquisition data_source does not match the bench execution mode")
     if "real_hardware_opened" in run and run["real_hardware_opened"] is not (source == "measured"):
         raise ValueError("Acquisition data_source disagrees with real_hardware_opened")
     if source == "measured" and run.get("clock", {}).get("mode") == "virtual":

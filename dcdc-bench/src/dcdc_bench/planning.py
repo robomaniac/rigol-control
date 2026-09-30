@@ -202,9 +202,9 @@ def _point(dut: DutProfile, bench: BenchProfile, recipe: TestRecipe, test: TestD
                   f"{policy.source_current_budget_fraction:.0%}); request retained without clipping")
     elif test.type == UVLO_TEST_TYPE and (gaps := uvlo_approval_gaps(bench, recipe)):
         status = "approval_blocked"
-        missing = gaps + (missing_approvals(dut, bench) if recipe.execution_mode == "real" else [])
+        missing = gaps + (missing_approvals(dut, bench) if bench.mode == "real" else [])
         reason = "UVLO input ramp is blocked by approvals: " + "; ".join(missing)
-    elif recipe.execution_mode == "real":
+    elif bench.mode == "real":
         status = "approval_blocked"
         missing = missing_approvals(dut, bench)
         reason = ("Real execution is blocked by saved-profile approvals: " + "; ".join(missing) if missing else
@@ -226,8 +226,10 @@ def build_plan(dut: DutProfile, bench: BenchProfile, recipe: TestRecipe) -> Plan
     """Expand every requested point without opening connections or changing targets."""
     if recipe.dut_profile_id != dut.profile_id:
         raise ValueError("Recipe DUT identity does not match the selected DUT profile")
-    if recipe.execution_mode != bench.mode:
-        raise ValueError("Recipe and bench execution modes must match")
+    # Real vs simulated is the bench's decision. A recipe that still carries a
+    # (legacy) mode never changes it; a disagreement is recorded, not raised.
+    mode_warnings = ([f"Recipe mode {recipe.execution_mode!r} ignored; the bench decides ({bench.mode})"]
+                     if recipe.execution_mode not in (None, bench.mode) else [])
     points = []
     for test in recipe.tests:
         for vin in test.input_voltage_targets_V:
@@ -238,7 +240,8 @@ def build_plan(dut: DutProfile, bench: BenchProfile, recipe: TestRecipe) -> Plan
                 warnings=["Planning estimates are not measurements or validated safety limits.",
                           "Unknown acceptance requirements remain not evaluated.",
                           "No-load input consumption must be measured; it is not inferred from output current.",
-                          "Input voltage is measured at source terminals; input-lead losses are inside the reported path boundary."])
+                          "Input voltage is measured at source terminals; input-lead losses are inside the reported path boundary."]
+                         + mode_warnings)
     controls = bench.protective_controls
     if any(limit is not None for limit in (controls.dut_input_overvoltage_V,
             controls.dut_output_overvoltage_V, controls.output_overcurrent_A)):

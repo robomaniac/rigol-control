@@ -469,57 +469,66 @@ to this software.
    ssh -L 8082:127.0.0.1:8082 <user>@<pi-hostname>
    ```
 
-   *What you should see:* `http://localhost:8082/` shows **DC–DC Bench** with
-   four tabs: **Bench**, **DUT and recipe**, **Run**, **Reports**. A forward
-   only reaches a running server; it does not start one
+   *What you should see:* `http://localhost:8082/` shows **DC–DC Bench** as one
+   page: **1 Which converter?**, **2 Simulated or real bench?**, **3 Which
+   test?**, a **Run** section, **Reports**, and a bar fixed to the bottom with
+   **Preview** and **Start**. A forward only reaches a running server; it does
+   not start one
    ([Viewing-Local-Reports.md](../../Documentation/Viewing-Local-Reports.md)).
 
-3. **Select.** On **Bench**, choose `rigol-local-limited`. The banner reads
-   **REAL BENCH — Start can enable the connected instruments**. Open **Bench
-   limits**, check the four protective values, and tick the approval box. On
-   **DUT and recipe**, choose the converter, tick the label check and the two
-   approvals under **Real-hardware approval for this converter profile**, then
-   choose `real-24v-small-grid` (24 V; 0.1, 0.25, 0.5 A; 8 s per load) or type
-   your own comma-separated **Input voltages (V)** and **Output loads (A)**.
-   Every voltage is paired with every load. Write the setup in **Test notes**;
-   they appear in the report as operator observations.
+3. **Select.** Click the converter card; if it says *Not yet approved for the
+   real bench*, choose **Edit**, tick the label check and the two approvals
+   under **Real-bench approval for this converter**, and **Save converter**.
+   Click the **Real bench** tile, then the **24 V converter tests** preset pill
+   (`rigol-local-limited`); check the four protective limits in the small table
+   and tick **I reviewed these limits — required once**. Click the **24 V small
+   grid — 0.1 / 0.25 / 0.5 A** card (`real-24v-small-grid`: 24 V; 0.1, 0.25,
+   0.5 A; 8 s per load), or **+ New test** and type your own comma-separated
+   **Input voltages (V)** and **Output loads (A)**. Every voltage is paired
+   with every load. The summary line and the bottom bar show the three choices.
 
-4. **Preview.** Click **Preview test and limits**.
+4. **Preview.** Click **Preview** in the bottom bar.
 
-   *What you should see:* the **Run** tab opens with **Review this test**:
-   *Ready points* `n / total`, *Planned acquisition* in minutes, *Bench: Real
-   equipment*, a line with the supply current limit and output guards, red
-   error lines if the plan is unsupported, grey warnings, and a table of every
-   requested point with its **Plan** status and **Reason**. Excluded points
-   stay in the saved plan and are skipped. Preview saves your profiles and
-   never enables an output. Changing any field clears the preview.
+   *What you should see:* a **Plan** panel with *Points that will run*
+   `n / total`, *Skipped* with the grouped reasons, *Estimated time*, *Bench:
+   Real — DP821A CH1 + DL3031A*, the limits line, and in red a **Before Start**
+   list if anything blocks a real start (approvals, inventory, unsupported
+   settings). Every requested point is listed with its **Plan** status and
+   **Reason** under *All requested points and planning notes*. Excluded points
+   stay in the saved plan and are skipped. Preview never enables an output.
+   Changing any of the three selections marks the plan stale. Write the setup
+   in **Notes for the report**; they appear as operator observations.
 
-5. **Confirm.** Under **Confirm the physical setup**, tick the three boxes and
-   type both serial numbers exactly as configured (the page shows
-   `Power-supply serial number configured: <serial>` from your inventory).
+5. **Confirm.** Click **Start test on the real bench**. Under **Confirm the
+   physical setup**, tick the three boxes and type both serial numbers exactly
+   as configured (each field shows `configured: <serial>` from your inventory).
 
-   *What you should see:* **Start test** becomes enabled only when the preview
-   has no errors, all boxes are ticked, both serials match and no other job is
-   active.
+   *What you should see:* Start itself is enabled only when the preview has no
+   errors and no other job is active; **Switch on and start** becomes enabled
+   only when all boxes are ticked and both serials match.
 
-6. **Start.** Click **Start test** once. The service rebuilds the plan from
+6. **Start.** Click **Switch on and start** once. The service rebuilds the plan from
    the saved profiles, re-runs every real-plan check, verifies the inventory
    hash, takes the bench lease and launches a dedicated worker. The worker
    verifies both `*IDN?` serials against the inventory and the models against
    `DP821A`/`DL3031A`, switches both outputs OFF, programs the protections,
    proves an unloaded startup, then enables the load.
 
-   *What you should see:* the status card moves through **Waiting to start →
+   *What you should see:* the header pill shows **Acquiring… point n of m**
+   with the local start time and elapsed time, the three questions are locked,
+   and the **Run** section moves through **Waiting to start →
    Acquiring measurements**, with `n / m load points accepted`, the requested
    input and load, live **Measured input / Supply current / Measured output /
    Load current**, **Stage**, **Elapsed seconds**, **Last measurement age (s)**
    and **Supply mode**. Live values are unqualified readings; the report applies
    qualification.
 
-7. **Stop** (if needed). Click **Stop test safely**. The worker performs its
-   bounded cleanup and records the resulting states.
+7. **Stop** (if needed). Click **Stop…** at the far right of the header, then
+   **Confirm stop** (or **Keep running**). The worker performs its bounded
+   cleanup and records the resulting states.
 
-   *What you should see:* `Stop requested — waiting for shutdown`, then either
+   *What you should see:* `Stop requested — waiting for the worker` in the
+   header, *Stop requested: <local time>* in the Run section, then either
    **Supply output and electronic load are verified OFF.** or **Output shutdown
    is not fully verified. Check the instruments before touching the wiring.**
    Do not touch the wiring until you see the first message and have looked at
@@ -557,9 +566,9 @@ to this software.
    analysis and reports get their own identifiers and never rewrite it.
 
 10. **Retry a report** without powering the converter again. On a finished job
-    whose HTML or PDF failed, the Run tab shows **Report generation needs
-    attention: PDF. Saved measurements are preserved.** and a **Retry report
-    generation** button; it queues a report-only worker (`report-queued`) and
+    whose HTML or PDF failed, the Run section shows **Report generation needs
+    attention: PDF. Saved measurements are preserved.** and the job's row in
+    **Reports** offers **Regenerate report**; it queues a report-only worker (`report-queued`) and
     writes a new revision `rNNNN`. From a terminal, on this or another
     computer that has the run folder and the report tools:
 
@@ -626,11 +635,11 @@ to this software.
 | `Configure the private bench inventory before a real run` or `Private inventory needs psu_rigol_1, rigol_dp800 and its expected serial` | The UI was started without `--inventory`, or `lab.yaml` lacks the device names, drivers or serials. | `Software/config/lab.yaml`; restart the UI with `--inventory`. |
 | `Confirmed instrument serials do not match the preview` / `Instrument confirmation does not match the saved inventory` | The typed serial differs from `expected_serial`. | Copy the serial shown as `... serial number configured:` exactly. |
 | Job fails early with `serial mismatch for 'source': expected ..., got ...` or `This backend requires the verified DP821A model` | The instrument at the configured address is not the one in the inventory. | `dcdc-bench/workspace/jobs/<job_id>/worker.log` and `runs/<run_id>/raw/events.jsonl`; re-run `benchctl identify --setup main_bench`. |
-| `A job is already acquiring or reporting; no automatic hardware queue` or `Bench is busy acquiring or rendering; retry explicitly after it finishes` | Another job holds the exclusive activity lease (`dcdc-bench/runs/.bench-activity.lock` unless `DCDC_ACTIVITY_LOCK` is set). | **Reports** tab for an active job; `pgrep -af dcdc_bench`, `pgrep -af quarto`, `pgrep -af chromium`; `systemctl --user list-units 'dcdc-job-*' --all --no-pager`. |
-| Run tab stays at **Measurements saved — report queued** with `Waiting: MemAvailable below 150 MiB` (or the `+ SwapFree` variant, or `bench lease held`) | The dispatcher's memory gate or lease check refused; measurements are safe. | `free -m`, `.venv/bin/python -m dcdc_bench.resources`, `tail dcdc-bench/workspace/resource-log.jsonl`. Free memory (close VS Code/browsers), add temporary swap per [Pi-Reliability.md](../../Documentation/Pi-Reliability.md), or copy the run to a laptop and run `dcdc-bench report`. `DCDC_RENDER_MIN_AVAILABLE_MIB`/`DCDC_RENDER_MIN_AVAILABLE_PLUS_SWAP_FREE_MIB` change the thresholds (both `0` disables the gate; the kernel on the Pi boots with `cgroup_disable=memory`, so nothing else protects the host). |
+| `A job is already acquiring or reporting; no automatic hardware queue` or `Bench is busy acquiring or rendering; retry explicitly after it finishes` | Another job holds the exclusive activity lease (`dcdc-bench/runs/.bench-activity.lock` unless `DCDC_ACTIVITY_LOCK` is set). | **Reports** for an active job; `pgrep -af dcdc_bench`, `pgrep -af quarto`, `pgrep -af chromium`; `systemctl --user list-units 'dcdc-job-*' --all --no-pager`. |
+| The Run section stays at **Measurements saved — report queued** with `Waiting: MemAvailable below 150 MiB` (or the `+ SwapFree` variant, or `bench lease held`) | The dispatcher's memory gate or lease check refused; measurements are safe. | `free -m`, `.venv/bin/python -m dcdc_bench.resources`, `tail dcdc-bench/workspace/resource-log.jsonl`. Free memory (close VS Code/browsers), add temporary swap per [Pi-Reliability.md](../../Documentation/Pi-Reliability.md), or copy the run to a laptop and run `dcdc-bench report`. `DCDC_RENDER_MIN_AVAILABLE_MIB`/`DCDC_RENDER_MIN_AVAILABLE_PLUS_SWAP_FREE_MIB` change the thresholds (both `0` disables the gate; the kernel on the Pi boots with `cgroup_disable=memory`, so nothing else protects the host). |
 | `dcdc-bench report` exits 3 with `Not enough free memory to render safely (...)` | Same gate, from the CLI; nothing was written. | As above. |
-| Job ends **Needs attention** with `Acquisition preserved; report generation failed. See worker.log and build manifest.` | Rendering failed after a good acquisition. | `worker.log` and `runs/<run_id>/reports/<rev>/build_manifest.json` (`status`, `artifacts`, `resource_usage`); then **Retry report generation**. |
-| PDF artifact status `failed-validation` in `build_manifest.json` (Run tab: `Report generation needs attention: PDF`) | The PDF was produced but failed the pagination check (PDF-02). | `dcdc-bench pdf-check <report.pdf>` prints the findings; the HTML remains usable; retry after fixing. |
+| Job ends **Needs attention** with `Acquisition preserved; report generation failed. See worker.log and build manifest.` | Rendering failed after a good acquisition. | `worker.log` and `runs/<run_id>/reports/<rev>/build_manifest.json` (`status`, `artifacts`, `resource_usage`); then **Regenerate report** in **Reports**. |
+| PDF artifact status `failed-validation` in `build_manifest.json` (Run section: `Report generation needs attention: PDF`) | The PDF was produced but failed the pagination check (PDF-02). | `dcdc-bench pdf-check <report.pdf>` prints the findings; the HTML remains usable; retry after fixing. |
 | `Quarto is unavailable. Install the reporting tools or set QUARTO_PATH.` | No Quarto found. | `ls dcdc-bench/.tools/quarto-*/bin/quarto`; re-run `python3 dcdc-bench/tools/setup.py` or set `QUARTO_PATH`. |
 | Static figures fail or the browser is not found | No Chromium found. | `command -v chromium-headless-shell`; install it or set `BROWSER_PATH`. |
 | `dcdc-bench: missing optional dependency (...); install the report extra and renderer tools` (exit 3) | Extras were not installed in this environment. | Repeat step 3.4 with the same `.venv`. |

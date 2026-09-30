@@ -23,7 +23,7 @@ import uuid
 from filelock import FileLock
 
 from .domain import DutProfile, BenchProfile, TestRecipe, Plan
-from .planning import build_plan, _hash_payload, verify_plan_hash
+from .planning import build_plan, _hash_payload, missing_approvals, verify_plan_hash
 from .resources import MemoryGate, children_peak_rss_mib, session_survivors, terminate_group, try_log_event
 from .storage import atomic_json, verify_integrity
 
@@ -31,6 +31,21 @@ MODELS = {"dut": DutProfile, "bench": BenchProfile, "recipe": TestRecipe}
 IDENTIFIERS = {"dut": "profile_id", "bench": "bench_id", "recipe": "recipe_id"}
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,100}$")
 ACTIVE = {"queued", "acquiring", "reporting"}
+# Plain operator-facing names for the bench page, keyed by saved identifier. The
+# seeded profiles are written with them; profiles saved before titles existed
+# (the owner's four benches and five recipes) are filled in once by _seed.
+DEFAULT_CATEGORY = "Normal operating voltage"
+PLAIN_TITLES = {
+    "bench": {"mock-dp821-envelope": "Simulated DP821A envelope",
+              "rigol-local-limited": "24 V converter tests",
+              "rigol-local-wide-input": "Wide input up to 36 V",
+              "rigol-local-passthrough-12v": "Pass-through wire check (12 V)"},
+    "recipe": {"12t12-4a-quick": "Quick sweep — 12 / 24 / 30 V × 0–1 A",
+               "12t12-4a-multi-vin-efficiency": "Efficiency vs input — 15…35.8 V × 0.1–1 A",
+               "real-24v-small-grid": "24 V small grid — 0.1 / 0.25 / 0.5 A",
+               "real-24v-noload-then-0p1A": "24 V — no-load window, then 0.1 A",
+               "passthrough-12v-check": "Pass-through wire check — 12 V × 0 / 0.1 / 0.25 / 0.5 A"}}
+PLAIN_CATEGORIES = {"passthrough-12v-check": "Bench checks"}
 # Pending, not active: measurements are saved and verified OFF, the render is
 # not yet dispatched. Acquisition may start while such jobs wait.
 REPORT_QUEUED = "report-queued"
@@ -158,6 +173,9 @@ class JobService:
         from .services import default_plan
         with self.lock:
             base = default_plan()
+            base.bench.title = PLAIN_TITLES["bench"].get(base.bench.bench_id)
+            base.recipe.title = PLAIN_TITLES["recipe"].get(base.recipe.recipe_id)
+            base.recipe.category = DEFAULT_CATEGORY
             for kind, profile in (("dut", base.dut), ("bench", base.bench), ("recipe", base.recipe)):
                 path = self._profile(kind, getattr(profile, IDENTIFIERS[kind]))
                 if not path.exists():
@@ -178,16 +196,115 @@ class JobService:
             real.recipe.acquisition.target_poll_interval_s = 1.
             real.bench.notes = ["Purpose-limited DP821A CH1/local-load configuration; not certification of physical ratings.",
                                 "Fresh physical confirmation and the private instrument inventory are required for each run."]
+            real.bench.title = PLAIN_TITLES["bench"].get(real.bench.bench_id)
+            real.recipe.title = PLAIN_TITLES["recipe"].get(real.recipe.recipe_id)
+            real.recipe.category = DEFAULT_CATEGORY
             for kind, profile in (("bench", real.bench), ("recipe", real.recipe)):
                 path = self._profile(kind, getattr(profile, IDENTIFIERS[kind]))
                 if not path.exists():
                     atomic_json(path, profile.model_dump())
+            self._migrate_titles()
+
+    def _migrate_titles(self):
+        """One-off, idempotent: give saved benches/recipes that predate titles their plain name and category.
+
+        Only known identifiers receive a title (a bench name is not derivable; a recipe
+        without one is titled from its grid by the page at display time). Every recipe
+        gets a category. Nothing else in the file changes; unreadable files are left alone.
+        """
+        for kind in ("bench", "recipe"):
+            for path in (self.root / "profiles" / kind).glob("*.json"):
+                try:
+                    data = _read(path)
+                except (OSError, ValueError):
+                    continue
+                name, changed = data.get(IDENTIFIERS[kind]), False
+                if not data.get("title") and name in PLAIN_TITLES[kind]:
+                    data["title"], changed = PLAIN_TITLES[kind][name], True
+                if kind == "recipe" and not data.get("category"):
+                    data["category"], changed = PLAIN_CATEGORIES.get(name, DEFAULT_CATEGORY), True
+                if changed:
+                    try:
+                        atomic_json(path, MODELS[kind].model_validate(data).model_dump())
+                    except ValueError:  # pydantic ValidationError: leave a profile the schema rejects untouched
+                        continue
 
     def list_profiles(self):
         return {kind: sorted(p.stem for p in (self.root / "profiles" / kind).glob("*.json")) for kind in MODELS}
 
     def load_profile(self, kind, name):
         return MODELS[kind].model_validate(_read(self._profile(kind, name))).model_dump()
+
+    def catalog(self):
+        """Every saved profile, validated, as {kind: {name: data}}; a file the schema rejects is skipped, not raised."""
+        result = {}
+        for kind, names in self.list_profiles().items():
+            result[kind] = {}
+            for name in names:
+                try:
+                    result[kind][name] = self.load_profile(kind, name)
+                except (OSError, ValueError):
+                    continue
+        return result
+
+    def inventory_models(self):
+        """Instrument models and expected serials from the private inventory, for display; {} when unavailable."""
+        try:
+            return self._inventory()
+        except (ValueError, OSError, ImportError, KeyError, AttributeError, TypeError):
+            return {}
+
+    def feasibility(self, dut, bench, recipe):
+        """Planning-only view of one saved test on one saved bench, for the test cards.
+
+        No preview file, inventory or approval is involved: the recipe is planned
+        against the selected converter (its saved ``dut_profile_id`` is rebound in
+        memory, as Preview does on disk) and, on a real bench, through the backend's
+        own point rules and time arithmetic. See ``plan_feasibility``.
+        """
+        profiles = {kind: self.load_profile(kind, name) for kind, name in (("dut", dut), ("bench", bench), ("recipe", recipe))}
+        return plan_feasibility(DutProfile.model_validate(profiles["dut"]), BenchProfile.model_validate(profiles["bench"]),
+                                TestRecipe.model_validate({**profiles["recipe"], "dut_profile_id": profiles["dut"]["profile_id"]}))
+
+    def _refuse_if_active(self, kind, name):
+        for job in self.list_jobs():
+            if job["state"] in ACTIVE and (job.get("profiles") or {}).get(kind) == name:
+                raise ValueError(f"The {kind} profile {name!r} is used by the active job {job['job_id']}; wait for it to finish")
+
+    def delete_profile(self, kind, name):
+        """Remove one saved profile. Refused while an active job was started from it; every
+        job keeps its own plan snapshot, so finished runs and their reports are unaffected."""
+        path = self._profile(kind, name)
+        with self.lock:
+            if not path.is_file():
+                raise ValueError(f"No saved {kind} profile named {name!r}")
+            self._refuse_if_active(kind, name)
+            path.unlink()
+        return name
+
+    def rename_profile(self, kind, old, new):
+        """Rename a saved profile's identifier: the new file is written and validated before the
+        old one is removed, under the service lock. Refused while an active job uses it or when
+        the new name is taken. Renaming a converter re-points the saved recipes that reference it;
+        past jobs keep their plan snapshots."""
+        source, target = self._profile(kind, old), self._profile(kind, new)
+        with self.lock:
+            if not source.is_file():
+                raise ValueError(f"No saved {kind} profile named {old!r}")
+            if target.exists():
+                raise ValueError(f"A {kind} profile named {new!r} already exists")
+            self._refuse_if_active(kind, old)
+            data = self.load_profile(kind, old)
+            data[IDENTIFIERS[kind]] = new
+            atomic_json(target, MODELS[kind].model_validate(data).model_dump())
+            if kind == "dut":
+                for name in self.list_profiles()["recipe"]:
+                    recipe = self.load_profile("recipe", name)
+                    if recipe.get("dut_profile_id") == old:
+                        recipe["dut_profile_id"] = new
+                        atomic_json(self._profile("recipe", name), TestRecipe.model_validate(recipe).model_dump())
+            source.unlink()
+        return new
 
     def save_profile(self, kind, data):
         if kind not in MODELS:
@@ -312,7 +429,11 @@ class JobService:
             if not preview["supported"]:
                 raise ValueError("Unsupported plan: " + "; ".join(preview["errors"]))
             for kind, name in preview["profiles"].items():
-                if _hash_payload(self.load_profile(kind, name)) != preview["profile_hashes"][kind]:
+                try:
+                    current = self.load_profile(kind, name)
+                except FileNotFoundError:
+                    raise ValueError(f"The saved {kind} profile {name!r} was renamed or deleted; preview and confirm a new plan") from None
+                if _hash_payload(current) != preview["profile_hashes"][kind]:
                     raise ValueError("A saved profile changed; preview and confirm the new plan")
             plan = Plan.model_validate(preview["plan"])
             if not verify_plan_hash(plan) or plan.plan_hash != plan_hash:
@@ -344,12 +465,15 @@ class JobService:
             atomic_json(directory / "plan.json", plan.model_dump())
             atomic_json(directory / "request.json", {"confirmation": confirmation, "notes": str(notes)[:10000],
                 "attachments": attachments, "profile_hashes": preview["profile_hashes"],
-                "inventory_sha256": preview["inventory_sha256"]})
+                "inventory_sha256": preview["inventory_sha256"], "profiles": preview["profiles"]})
             if plan.bench.mode == "real":
                 (directory / "inventory.yaml").write_bytes(self.inventory_path.read_bytes())
                 (directory / "inventory.yaml").chmod(0o600)
+            # profiles/recipe names are display and bookkeeping only (Reports rows, delete
+            # refusal for active jobs); the plan snapshot is the job's authority.
             atomic_json(directory / "job.json", {"job_id": job_id, "state": "queued", "mode": plan.bench.mode,
-                "dut_model": plan.dut.identity.model,
+                "dut_model": plan.dut.identity.model, "recipe_id": plan.recipe.recipe_id,
+                "recipe_title": plan.recipe.title, "profiles": preview["profiles"],
                 "pid": None, "created_utc": datetime.now(timezone.utc).isoformat(), "error": None,
                 "run_dir": None, "report_dir": None})
             self._launch(directory)
@@ -604,6 +728,31 @@ class JobService:
         if not path.is_file():
             raise FileNotFoundError(path.name)
         return path
+
+
+def plan_feasibility(dut, bench, recipe):
+    """Can this test run on this bench, ignoring approvals and the inventory? Pure planning.
+
+    Returns points, executable count, ``runnable``, the planner's first reason when
+    not, the backend's time estimate on a real bench (``None`` on the simulated
+    bench, whose virtual clock finishes in seconds) and the bench mode. Saved
+    approvals and the inventory are Preview/Start concerns and never grey a card.
+    """
+    plan = build_plan(dut, bench, recipe)
+    seconds, errors = None, []
+    if bench.mode == "real":
+        from .real_backend import prepare_real_plan
+        plan, errors, seconds = prepare_real_plan(plan)
+        approvals = set(missing_approvals(dut, bench))
+        errors = [e for e in errors if e not in approvals and e != "No requested point is eligible"]
+    executable = sum(p.status == "executable" for p in plan.points)
+    runnable = executable > 0 and not errors
+    reason = None
+    if not runnable:
+        reason = next(iter(errors), None) or next((p.reason for p in plan.points if p.status != "executable"), None)
+        reason = (reason or "No requested point can run on this bench").split("; ")[0]
+    return {"points": len(plan.points), "executable": executable, "runnable": runnable, "reason": reason,
+            "estimated_seconds": seconds if runnable else None, "mode": bench.mode}
 
 
 def _verified_off(path):

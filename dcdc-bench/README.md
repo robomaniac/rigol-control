@@ -92,8 +92,8 @@ below. On this development bench, the persistent service uses the already
 forwarded **[port 8081](http://localhost:8081/)** *(local bench only; reachable through an SSH port forward)* and preserves existing
 `/Runs/` report links. Real jobs run in separate services with automatic
 restart disabled; browser or UI-server reconnection does not restart
-acquisition, and **Stop test safely** asks the worker to switch both outputs
-off and record the resulting states. The current real procedure starts
+acquisition, and **Stop…** → **Confirm stop** asks the worker to switch both
+outputs off and record the resulting states. The current real procedure starts
 separately at each input voltage; it does not apply the continuously powered
 startup sequence of the
 [15 V start and input descent](docs/measured-results.md#start-at-15-v-then-reduce-the-input).

@@ -409,6 +409,130 @@ def test_operator_stop_during_acquisition_survives_into_the_cancelled_record(ser
     assert final["acquisition_cancelled_utc"] == stamp
 
 
+# --- One-page bench: plain names, card planning, delete/rename ------------------------------------------
+
+def test_seeded_profiles_carry_plain_names_and_saved_ones_are_migrated_once(tmp_path, monkeypatch):
+    """The owner's benches and recipes predate titles; _seed fills the known ones in, idempotently, and
+    never invents a bench name (the page falls back to the identifier) or overwrites a saved title."""
+    from dcdc_bench.job_service import DEFAULT_CATEGORY, PLAIN_TITLES
+    monkeypatch.setenv("DCDC_ACTIVITY_LOCK", str(tmp_path / "activity.lock"))
+    root = tmp_path / "workspace"
+    first = JobService(root)
+    quick, bench = first.load_profile("recipe", "12t12-4a-quick"), first.load_profile("bench", "rigol-local-limited")
+    assert quick["title"] == "Quick sweep — 12 / 24 / 30 V × 0–1 A" and quick["category"] == DEFAULT_CATEGORY
+    assert bench["title"] == "24 V converter tests" and first.load_profile("bench", "mock-dp821-envelope")["title"] == "Simulated DP821A envelope"
+    assert first.load_profile("recipe", "real-24v-small-grid")["title"] == PLAIN_TITLES["recipe"]["real-24v-small-grid"]
+    # Profiles written before titles existed: the owner's no-load recipe, pass-through check and wide-input bench.
+    legacy_recipe = {k: v for k, v in first.load_profile("recipe", "real-24v-small-grid").items() if k not in ("title", "category", "description", "standard_clause")}
+    legacy_recipe.update(recipe_id="real-24v-noload-then-0p1A", execution_mode="real")
+    legacy_recipe["tests"][0]["output_current_targets_A"] = [0., .1]
+    passthrough = {**legacy_recipe, "recipe_id": "passthrough-12v-check"}
+    unknown = {**legacy_recipe, "recipe_id": "my-own-grid"}
+    legacy_bench = {k: v for k, v in bench.items() if k != "title"}
+    legacy_bench["bench_id"] = "rigol-local-wide-input"
+    unknown_bench = {**legacy_bench, "bench_id": "somebody-elses-bench"}
+    for kind, data in (("recipe", legacy_recipe), ("recipe", passthrough), ("recipe", unknown), ("bench", legacy_bench), ("bench", unknown_bench)):
+        atomic_json(root / "profiles" / kind / (data[{"recipe": "recipe_id", "bench": "bench_id"}[kind]] + ".json"), data)
+    titled = first.load_profile("recipe", "12t12-4a-quick")
+    titled["title"] = "My renamed sweep"
+    first.save_profile("recipe", titled)
+    second = JobService(root)
+    assert second.load_profile("recipe", "real-24v-noload-then-0p1A")["title"] == "24 V — no-load window, then 0.1 A"
+    assert second.load_profile("recipe", "real-24v-noload-then-0p1A")["execution_mode"] == "real", "the migration touches names only"
+    wire = second.load_profile("recipe", "passthrough-12v-check")
+    assert wire["title"] == "Pass-through wire check — 12 V × 0 / 0.1 / 0.25 / 0.5 A" and wire["category"] == "Bench checks"
+    own = second.load_profile("recipe", "my-own-grid")
+    assert own["title"] is None and own["category"] == DEFAULT_CATEGORY, "unknown recipes get a category; the page titles them from the grid"
+    assert second.load_profile("bench", "rigol-local-wide-input")["title"] == "Wide input up to 36 V"
+    assert second.load_profile("bench", "somebody-elses-bench")["title"] is None, "a bench name is not derivable"
+    assert second.load_profile("recipe", "12t12-4a-quick")["title"] == "My renamed sweep", "a saved title is never overwritten"
+    before = {kind: {name: (root / "profiles" / kind / (name + ".json")).read_bytes() for name in names}
+              for kind, names in second.list_profiles().items()}
+    JobService(root)
+    after = {kind: {name: (root / "profiles" / kind / (name + ".json")).read_bytes() for name in names}
+             for kind, names in second.list_profiles().items()}
+    assert after == before, "idempotent: a second start rewrites nothing"
+    catalog = second.catalog()
+    assert set(catalog) == {"dut", "bench", "recipe"} and "my-own-grid" in catalog["recipe"] and catalog["dut"]["12t12-4a"]["identity"]["model"] == "12T12-4A"
+
+
+def test_feasibility_plans_a_card_on_each_bench_without_approvals_or_the_inventory(service):
+    from dcdc_bench.real_backend import acquisition_seconds
+    from dcdc_bench.domain import PlannedPoint, TestRecipe
+    dut = service.list_profiles()["dut"][0]
+    simulated = service.feasibility(dut, "mock-dp821-envelope", "12t12-4a-quick")
+    assert simulated == {"points": 21, "executable": 19, "runnable": True, "reason": None, "estimated_seconds": None, "mode": "mock"}
+    real = service.feasibility(dut, "rigol-local-limited", "real-24v-small-grid")
+    assert real["runnable"] and real["executable"] == 3 and real["mode"] == "real", "saved approvals gate Start, not the card"
+    recipe = TestRecipe.model_validate(service.load_profile("recipe", "real-24v-small-grid"))
+    eligible = [PlannedPoint(point_id=f"p{i}", test_id="increasing-load", vin_target_V=24., iout_target_A=a, status="executable", reason="")
+                for i, a in enumerate((.1, .25, .5))]
+    assert real["estimated_seconds"] == acquisition_seconds(recipe, eligible) == 62., "3 x (5 s dwell + 8 s acquisition + 3 s) + 14 s startup"
+    # The card recipe is planned against the selected converter even when its saved dut_profile_id differs.
+    other = service.load_profile("dut", dut)
+    other.update(profile_id="other-board")
+    other["identity"]["model"] = "Other"
+    service.save_profile("dut", other)
+    assert service.feasibility("other-board", "mock-dp821-envelope", "12t12-4a-quick")["runnable"]
+    # Not runnable: the planner's first reason, one clause, no clipping.
+    hundred = service.load_profile("recipe", "12t12-4a-quick")
+    hundred.update(recipe_id="hundred", execution_mode=None)
+    hundred["tests"][0]["input_voltage_targets_V"] = [100.]
+    service.save_profile("recipe", hundred)
+    greyed = service.feasibility(dut, "mock-dp821-envelope", "hundred")
+    assert not greyed["runnable"] and greyed["executable"] == 0 and greyed["estimated_seconds"] is None
+    assert greyed["reason"] == "Requested input voltage is outside the DUT operating rating"
+    slow = service.load_profile("recipe", "real-24v-small-grid")
+    slow.update(recipe_id="slow-poll")
+    slow["acquisition"]["target_poll_interval_s"] = .5
+    service.save_profile("recipe", slow)
+    on_real = service.feasibility(dut, "rigol-local-limited", "slow-poll")
+    assert not on_real["runnable"] and on_real["reason"].startswith("Acquisition requires 5–15 s, 1–2 s polling")
+    assert service.feasibility(dut, "mock-dp821-envelope", "slow-poll")["runnable"], "the same test is fine on the simulated bench"
+
+
+def test_delete_and_rename_profiles_are_atomic_and_refuse_active_jobs(service, monkeypatch):
+    dut = service.list_profiles()["dut"][0]
+    with pytest.raises(ValueError, match="No saved recipe"):
+        service.delete_profile("recipe", "missing")
+    with pytest.raises(ValueError, match="Invalid local identifier"):
+        service.rename_profile("recipe", "12t12-4a-quick", "no spaces allowed")
+    with pytest.raises(ValueError, match="already exists"):
+        service.rename_profile("recipe", "12t12-4a-quick", "real-24v-small-grid")
+    p = service.preview(dut, "mock-dp821-envelope", "12t12-4a-quick")
+    monkeypatch.setattr("dcdc_bench.job_service.subprocess.Popen", lambda *a, **k: SimpleNamespace(pid=None))
+    job_id = service.start(p["plan_hash"])["job_id"]
+    record = json.loads((service._job(job_id) / "job.json").read_text())
+    assert record["recipe_id"] == "12t12-4a-quick" and record["recipe_title"] == "Quick sweep — 12 / 24 / 30 V × 0–1 A"
+    assert record["profiles"] == {"dut": dut, "bench": "mock-dp821-envelope", "recipe": "12t12-4a-quick"}
+    assert service.status(job_id)["state"] == "queued"
+    for kind, name in record["profiles"].items():
+        with pytest.raises(ValueError, match="active job"):
+            service.delete_profile(kind, name)
+        with pytest.raises(ValueError, match="active job"):
+            service.rename_profile(kind, name, "renamed-" + kind)
+    assert service.load_profile("recipe", "12t12-4a-quick")["recipe_id"] == "12t12-4a-quick", "nothing moved"
+    service.cancel(job_id)
+    worker(service._job(job_id))
+    assert service.status(job_id)["state"] == "cancelled"
+    assert service.rename_profile("recipe", "12t12-4a-quick", "quick-sweep") == "quick-sweep"
+    names = service.list_profiles()["recipe"]
+    assert "quick-sweep" in names and "12t12-4a-quick" not in names
+    renamed = service.load_profile("recipe", "quick-sweep")
+    assert renamed["recipe_id"] == "quick-sweep" and renamed["title"] == "Quick sweep — 12 / 24 / 30 V × 0–1 A"
+    # Renaming a converter re-points the saved recipes that reference it.
+    assert service.rename_profile("dut", dut, "board-a") == "board-a"
+    assert service.list_profiles()["dut"] == ["board-a"]
+    assert all(service.load_profile("recipe", name)["dut_profile_id"] == "board-a" for name in service.list_profiles()["recipe"])
+    assert service.delete_profile("recipe", "quick-sweep") == "quick-sweep"
+    assert "quick-sweep" not in service.list_profiles()["recipe"]
+    assert not (service.root / "profiles" / "recipe" / "quick-sweep.json").exists()
+    # The finished job keeps its own plan snapshot and stays listed.
+    assert service.status(job_id)["recipe_id"] == "12t12-4a-quick" and (service._job(job_id) / "plan.json").is_file()
+    with pytest.raises(ValueError, match="renamed or deleted"):
+        service.start(p["plan_hash"]), "a cached preview of a renamed profile is a clear refusal, not a missing-file error"
+
+
 def test_uncancelled_job_records_no_stop_time_and_an_empty_marker_is_tolerated(service, monkeypatch):
     p = mock_preview(service)
     monkeypatch.setattr("dcdc_bench.job_service.subprocess.Popen", lambda *a, **k: SimpleNamespace(pid=None))
