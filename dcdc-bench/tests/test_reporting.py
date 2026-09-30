@@ -881,3 +881,14 @@ def test_paper_selection_reaches_the_typst_template_partial_and_manifest(model, 
     with pytest.raises(ValueError, match="letter or a4"):
         render_report(model, tmp_path / "legal", formats=("html",), paper="legal")
     assert not (tmp_path / "legal").exists()
+
+
+def test_figure_footer_wraps_a_long_measurement_boundary_onto_its_own_line():
+    """PDF-02 on CI: a long boundary description made the exported figure's footer run past the page edge."""
+    figure = {"id": "fig-efficiency"}
+    base = {"evidence_label": "SYNTHETIC", "run_id": "run-1", "analysis_id": "a-1", "dut": {"model": "X"}}
+    short = renderer._footer({**base, "boundary": "source-to-DUT-output path"}, figure)
+    long = renderer._footer({**base, "boundary": "source-to-load-terminal path (input and output wiring included; load in local sense)"}, figure)
+    assert short.count("<br>") == 2 and "path | Aggregated settled DC points" in short
+    assert long.count("<br>") == 3 and "load in local sense)<br>Aggregated settled DC points" in long
+    assert all(len(line) <= renderer.FOOTER_LINE_CHARS for line in long.split("<br>")[2:])

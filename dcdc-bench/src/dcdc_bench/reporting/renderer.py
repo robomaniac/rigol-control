@@ -397,12 +397,19 @@ def _typst_string(value: Any) -> str:
     return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+FOOTER_LINE_CHARS = 96  # longer single lines overran the US Letter page box by a few points on CI's fonts
+
+
 def _footer(model: dict, figure: dict, conditions: str = "canonical conditions") -> str:
+    path = f"Measured path: {model.get('boundary', 'not supplied')}"
+    aggregation = "Aggregated settled DC points; uncertainty unquantified unless explicitly supplied"
+    # A long measurement-boundary description gets its own line so the exported
+    # figure never draws text past the page edge (PDF-02 clipped-text).
+    joiner = "<br>" if len(path) + 3 + len(aggregation) > FOOTER_LINE_CHARS else " | "
     return (f"{model.get('evidence_label', 'Evidence status not supplied')} | {_identity(model)} | "
             f"Run {model['run_id']} | Analysis {model['analysis_id']}<br>"
             f"{figure['id']} | {conditions}<br>"
-            f"Measured path: {model.get('boundary', 'not supplied')} | "
-            "Aggregated settled DC points; uncertainty unquantified unless explicitly supplied")
+            f"{path}{joiner}{aggregation}")
 
 
 def _stage_transition_pairs(model: dict, spec: dict) -> list[tuple[dict, dict]]:
