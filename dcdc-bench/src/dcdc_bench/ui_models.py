@@ -479,8 +479,10 @@ SIMULATION_TIME_ESTIMATE = 'Measurements: seconds (virtual clock) · Report: typ
 def simulation_time_text(seconds) -> str:
     """Plan-panel estimate for a simulated run: the planner's wall-time estimate when it exists, else the generic text."""
     shown = duration_text(seconds)
-    return (f'Measurements: about {shown} (simulated) · Report: typically 1–4 min on a Raspberry Pi'
-            if shown else SIMULATION_TIME_ESTIMATE)
+    if not shown:
+        return SIMULATION_TIME_ESTIMATE
+    approx = shown if shown.startswith('~') else f'about {shown}'   # never "about ~42 s"
+    return f'Measurements: {approx} (simulated) · Report: typically 1–4 min on a Raspberry Pi'
 
 
 def sequence_step(snapshot: dict | None) -> int | None:

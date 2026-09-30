@@ -920,7 +920,7 @@ def test_card_selection_updates_the_summary_and_any_change_makes_the_plan_stale(
                 assert 'Points that will run' in shown and '3 / 3' in shown and 'Skipped' in shown and '0' in shown
                 assert 'Simulation — nothing switched on' in shown, 'the bench line names the simulation'
                 estimate = next(text for text in shown if 'Report: typically' in text)
-                assert estimate.startswith('Measurements: about ') and '(simulated)' in estimate, 'a real estimate, not the placeholder'
+                assert estimate.startswith('Measurements: ') and '(simulated)' in estimate and 'about ~' not in estimate, 'a real estimate, not the placeholder'
                 assert 'Ready. After Start you will see:' in shown, 'C26/C36: what follows Start is spelled out'
                 for index, (label, timing) in enumerate(SIMULATION_SEQUENCE):
                     assert f'{label} — {timing}' in shown and str(index + 1) in shown
