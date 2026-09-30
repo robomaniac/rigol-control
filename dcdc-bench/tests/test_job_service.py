@@ -533,6 +533,103 @@ def test_delete_and_rename_profiles_are_atomic_and_refuse_active_jobs(service, m
         service.start(p["plan_hash"]), "a cached preview of a renamed profile is a clear refusal, not a missing-file error"
 
 
+def test_cancel_is_idempotent_and_never_sends_a_second_interrupt(service, monkeypatch):
+    """QA M3: a second cancel() keeps the first stop time and re-signals nothing; only a first call that could not
+    signal (the worker had not published its pid yet) lets a later call signal, once."""
+    import os
+    import signal
+    p = mock_preview(service)
+    monkeypatch.setattr("dcdc_bench.job_service.subprocess.Popen", lambda *a, **k: SimpleNamespace(pid=None))
+    job_id = service.start(p["plan_hash"])["job_id"]
+    job = service._job(job_id)
+    signals = []
+    monkeypatch.setattr("dcdc_bench.job_service._pid_matches", lambda pid, job_dir: pid == 4242)
+    monkeypatch.setattr(os, "pidfd_open", lambda pid: os.open("/dev/null", os.O_RDONLY))
+    monkeypatch.setattr(signal, "pidfd_send_signal", lambda fd, sig: signals.append(sig))
+    # Queued, no pid yet: the marker is written, nothing can be signalled.
+    first = service.cancel(job_id)
+    assert first["cancel_requested"] is True and signals == [] and not (job / "cancel.signalled").exists()
+    stamp = (job / "cancel.request").read_text()
+    assert datetime.fromisoformat(stamp)
+    # The worker publishes its pid; the next cancel signals once and records it.
+    record = json.loads((job / "job.json").read_text())
+    record.update(state="acquiring", pid=4242)
+    atomic_json(job / "job.json", record)
+    second = service.cancel(job_id)
+    assert second["cancel_requested"] is True and signals == [signal.SIGINT]
+    assert (job / "cancel.request").read_text() == stamp, "the first stop time is kept"
+    assert (job / "cancel.signalled").read_text() == "4242"
+    # A double click, or a second tab: nothing more is sent, nothing is rewritten.
+    third = service.cancel(job_id)
+    assert third["cancel_requested"] is True and signals == [signal.SIGINT]
+    assert (job / "cancel.request").read_text() == stamp
+
+
+def test_save_profile_refuses_to_overwrite_unless_asked_and_replaces_a_renamed_file(service, monkeypatch):
+    """QA M4: '+ Add' never writes over a saved profile; Edit with a new file name moves it (recipes follow a converter)."""
+    dut_name = service.list_profiles()["dut"][0]
+    path = service.root / "profiles" / "dut" / f"{dut_name}.json"
+    before = path.read_bytes()
+    impostor = service.load_profile("dut", dut_name)
+    impostor["ratings"]["input_voltage_min_V"] = 20.
+    with pytest.raises(ValueError, match=f"A converter with the file name '{dut_name}' already exists; choose another file name"):
+        service.save_profile("dut", impostor, overwrite=False)
+    assert path.read_bytes() == before, "nothing was overwritten"
+    assert service.save_profile("dut", impostor) == dut_name, "an explicit Edit still saves"
+    with pytest.raises(ValueError, match="A test with the file name"):
+        service.save_profile("recipe", service.load_profile("recipe", "12t12-4a-quick"), overwrite=False)
+    # replaces: the new file is written, the old one removed, and the recipes that referenced the converter follow it.
+    moved = {**service.load_profile("dut", dut_name), "profile_id": "board-a"}
+    assert service.save_profile("dut", moved, replaces=dut_name) == "board-a"
+    assert service.list_profiles()["dut"] == ["board-a"] and not path.exists()
+    assert all(service.load_profile("recipe", name)["dut_profile_id"] == "board-a" for name in service.list_profiles()["recipe"])
+    service.save_profile("dut", {**moved, "profile_id": "board-b"})
+    with pytest.raises(ValueError, match="already exists"):
+        service.save_profile("dut", {**moved, "profile_id": "board-b"}, replaces="board-a")
+    with pytest.raises(ValueError, match="No saved dut profile named 'ghost'"):
+        service.save_profile("dut", {**moved, "profile_id": "board-c"}, replaces="ghost")
+    assert service.save_profile("dut", {**moved, "profile_id": "board-b"}, replaces="board-b") == "board-b", "same name: an ordinary save"
+    assert sorted(service.list_profiles()["dut"]) == ["board-a", "board-b"]
+    # Refused while an active job was started from the old name.
+    p = service.preview("board-a", "mock-dp821-envelope", "12t12-4a-quick")
+    monkeypatch.setattr("dcdc_bench.job_service.subprocess.Popen", lambda *a, **k: SimpleNamespace(pid=None))
+    service.start(p["plan_hash"])
+    with pytest.raises(ValueError, match="active job"):
+        service.save_profile("dut", {**moved, "profile_id": "board-z"}, replaces="board-a")
+    assert sorted(service.list_profiles()["dut"]) == ["board-a", "board-b"]
+
+
+def test_active_job_follows_the_bench_and_a_deferral_records_the_memory_numbers(service, monkeypatch):
+    """QA M1 / C37: the page's 2 s probe names the working or queued job; a memory-gate deferral stores the numbers
+    the gate saw so the page can say '96 MiB available, 150 MiB needed'; dequeuing marks the job as such."""
+    from dcdc_bench.resources import MemoryGate
+    from dcdc_bench.ui_models import deferred_text, state_label
+    assert service.active_job() is None
+    p = mock_preview(service)
+    monkeypatch.setattr("dcdc_bench.job_service.subprocess.Popen", lambda *a, **k: SimpleNamespace(pid=None))
+    job_id = service.start(p["plan_hash"])["job_id"]
+    assert service.active_job() == {"job_id": job_id, "state": "queued", "mode": "mock"}
+    job = service._job(job_id)
+    path = finalized_fixture(job, p["plan"])
+    record = json.loads((job / "job.json").read_text())
+    record.update(state="report-queued", pid=None, run_dir=str(path), queued_utc="2026-09-30T10:00:00+00:00")
+    atomic_json(job / "job.json", record)
+    assert service.active_job() == {"job_id": job_id, "state": "report-queued", "mode": "mock"}
+    meminfo = "MemTotal:        1899548 kB\nMemFree:          20000 kB\nMemAvailable:      98304 kB\nSwapTotal:        900000 kB\nSwapFree:         409600 kB\n"
+    service.gate = MemoryGate(150, 600, reader=lambda _path: meminfo)
+    assert service.dispatch_reports() == {"job_id": job_id, "state": "report-queued",
+                                          "deferred_reason": "MemAvailable below 150 MiB; MemAvailable+SwapFree below 600 MiB"}
+    deferred = service.status(job_id)
+    assert deferred["deferred_memory"] == {"available_mib": 96.0, "available_plus_swap_free_mib": 496.0}
+    assert deferred_text(deferred) == ("Waiting for free memory: 96 MiB available, 150 MiB needed; "
+                                       "Waiting for free memory and swap: 496 MiB free memory and swap together, 600 MiB needed")
+    removed = service.cancel(job_id)
+    assert removed["state"] == "cancelled" and removed["dequeued"] is True and removed["deferred_memory"] is None
+    assert state_label(removed) == "Removed from the report queue"
+    assert service.active_job() is None
+    assert not (job / "cancel.request").exists(), "dequeuing signals no process and leaves no marker"
+
+
 def test_uncancelled_job_records_no_stop_time_and_an_empty_marker_is_tolerated(service, monkeypatch):
     p = mock_preview(service)
     monkeypatch.setattr("dcdc_bench.job_service.subprocess.Popen", lambda *a, **k: SimpleNamespace(pid=None))

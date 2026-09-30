@@ -13,12 +13,14 @@ import sys
 from pathlib import Path
 
 from .standard_recipes import STANDARDS_GROUP, build_recipe, clause_rows, default_system, standard_cards
-from .ui_models import (BENCH_NAMES, DEFAULT_CATEGORY, DELETE_PROMPTS, START_LABELS, activity_text, artifact_url,
-                        bench_equipment, bench_title, card_meta, dut_approved, dut_subtitle, duration_text, edited_dut,
-                        edited_recipe, elapsed_text, event_text, grouped_recipes, job_actions, limits_rows, limits_summary,
-                        local_time_text, plan_rows, quantity, recipe_grid, recipe_title, report_became_ready,
-                        report_link_rows, report_rows, saved_runs_key, shutdown_label, skip_reasons, state_label,
-                        summary_text, time_legend)
+from .ui_models import (BENCH_NAMES, DEFAULT_CATEGORY, DELETE_PROMPTS, PLAN_STATUS_LEGEND, REAL_CAN, REAL_CANNOT,
+                        SIMULATION_CAN, SIMULATION_CANNOT, SIMULATION_SEQUENCE, SIMULATION_TIME_ESTIMATE, START_LABELS,
+                        SYNTHETIC_UNCERTAINTY_NOTE, WORKING_STATES, activity_text, artifact_url, bench_equipment, bench_job,
+                        bench_title, card_meta, deferred_text, dequeued, dut_approved, dut_subtitle, duration_text,
+                        edited_dut, edited_recipe, elapsed_text, envelope_rows, event_text, friendly_error, grouped_recipes,
+                        job_actions, limits_rows, limits_summary, local_time_text, plan_rows, quantity, recipe_grid,
+                        recipe_title, report_became_ready, report_link_rows, report_rows, saved_runs_key, sequence_step,
+                        shutdown_label, skip_reasons, state_label, summary_text, time_legend)
 
 
 STYLE = '''
@@ -39,38 +41,50 @@ body{background:#fff;color:#183047;font-family:system-ui,-apple-system,"Segoe UI
 .bench-num{display:inline-flex;width:26px;height:26px;border-radius:50%;background:#15608f;color:#fff;font-size:14px;align-items:center;justify-content:center;font-weight:700;flex-shrink:0}
 .bench-group{font-size:13px;color:#516677;text-transform:uppercase;letter-spacing:.04em;font-weight:600;margin:10px 0 4px;width:100%}
 .bench-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:11px;width:100%}
-.bench-card-item{position:relative;border:2px solid #dce4e9;border-radius:8px;padding:13px 14px 14px;background:#fff;cursor:pointer;min-height:104px;display:flex;flex-direction:column;gap:3px}
-.bench-card-item:hover{border-color:#abc0cf}.bench-card-item:focus-visible{outline:3px solid #88b9d5;outline-offset:2px}
+.bench-card-item{position:relative;border:2px solid #dce4e9;border-radius:8px;background:#fff;min-height:104px;display:flex;flex-direction:column}
+.bench-card-item:hover{border-color:#abc0cf}
 .bench-card-item.selected{border-color:#168477;background:#edf7f4;box-shadow:0 0 0 1px #168477 inset}
-.bench-card-item.greyed{opacity:.62;background:#f6f8fa}
-.bench-card-title{font-weight:650;font-size:16px;line-height:1.3;padding-right:26px}
+.bench-card-item.greyed{background:#f6f8fa;border-color:#e6edf1}
+/* The whole card is one real <button>: Enter and Space select it, nothing interactive is nested inside it. */
+.bench-card-select{all:unset;box-sizing:border-box;display:flex;flex-direction:column;gap:3px;width:100%;flex:1;padding:13px 40px 14px 14px;cursor:pointer;text-align:left;color:inherit;font:inherit;border-radius:6px}
+.bench-card-select:focus-visible{outline:3px solid #15608f;outline-offset:-3px}
+.bench-card-title{font-weight:650;font-size:16px;line-height:1.3;display:flex;align-items:center;gap:7px}
 .bench-card-grid{font-size:14px}.bench-card-meta{color:#516677;font-size:13px}
-.bench-card-reason{color:#8a2727;font-size:13px}
-.bench-card-check{position:absolute;top:9px;right:10px;width:22px;height:22px;border-radius:50%;background:#168477;color:#fff;display:flex;align-items:center;justify-content:center}
-.bench-links{display:flex;gap:2px;flex-wrap:wrap;margin:6px 0 -8px -8px}
+.bench-card-reason{color:#8a2727;font-size:13px}.bench-card-note{color:#5a6f7e;font-size:13px}
+.bench-card-check{display:inline-flex;width:20px;height:20px;border-radius:50%;background:#168477;color:#fff;align-items:center;justify-content:center;flex-shrink:0}
+/* One "⋯" menu per card replaces four nested 10 px buttons: 32 px target, outside the select button. */
+.bench-card-menu{position:absolute;top:6px;right:6px;min-width:32px;min-height:32px;color:#15608f}
 .bench-link{font-size:12.5px;color:#15608f}.bench-link-danger{color:#8a2727}
+.bench-menu-danger{color:#8a2727}
 .bench-badge{display:inline-block;border-radius:4px;padding:1px 7px;font-size:12.5px;font-weight:600;white-space:nowrap;background:#eef2f5;color:#516677}
 .bench-badge-standard{background:#e6f1fb;color:#174c6e}.bench-badge-ok{background:#edf7f4;color:#174b42}
 .bench-badge-partial{background:#fff7e9;color:#785018}.bench-badge-real{background:#fff1dc;color:#785018}
 .bench-badge-grey{background:#eef2f5;color:#516677}
 .bench-checklist{border:1px solid #dce4e9;border-radius:8px;padding:12px 14px;background:#f8fafb;width:100%}
-.bench-clause-row{display:grid;grid-template-columns:minmax(220px,1.4fr) auto minmax(160px,1fr);gap:4px 12px;align-items:center;padding:6px 0;border-bottom:1px solid #e6edf1;width:100%}
-.bench-clause-row.untickable{opacity:.72}
+.bench-clause-row{display:grid;grid-template-columns:minmax(0,1.4fr) auto minmax(0,1fr);gap:4px 12px;align-items:center;padding:6px 0;border-bottom:1px solid #e6edf1;width:100%}
+.bench-clause-row.untickable .q-checkbox__inner{opacity:.45}
 .bench-clause-note{color:#5a6f7e;font-size:12.5px;grid-column:1 / -1;margin-top:-2px}
 .bench-checklist-footer{font-weight:600;color:#183047}
-.bench-add{border:2px dashed #dce4e9;border-radius:8px;display:flex;align-items:center;justify-content:center;color:#15608f;font-weight:600;padding:13px;text-align:center;cursor:pointer;min-height:104px}
-.bench-add:hover{background:#f3f7fa}
-.bench-tiles{display:grid;grid-template-columns:1fr 1fr;gap:13px;align-items:start;width:100%}
+.bench-add{all:unset;box-sizing:border-box;border:2px dashed #dce4e9;border-radius:8px;display:flex;align-items:center;justify-content:center;color:#15608f;font-weight:600;font:inherit;font-weight:600;padding:13px;text-align:center;cursor:pointer;min-height:104px;width:100%}
+.bench-add:hover{background:#f3f7fa}.bench-add:focus-visible{outline:3px solid #15608f;outline-offset:2px}
+.bench-tiles{display:grid;grid-template-columns:1fr 1fr;gap:13px;align-items:stretch;width:100%}
 .bench-tile{border:2px solid #dce4e9;border-radius:8px;background:#fff;cursor:pointer;padding:14px;display:flex;flex-direction:column;gap:6px}
 .bench-tile:hover{border-color:#abc0cf}.bench-tile.selected{border-color:#168477;background:#edf7f4}
+.bench-tile:focus-visible{outline:3px solid #15608f;outline-offset:2px}
 .bench-tile.real.selected{border-color:#ac7427;background:#fff7e9}
 .bench-tile-title{font-weight:650;font-size:16.5px;line-height:1.3}.bench-tile-sub{color:#516677;font-size:13.5px}
-.bench-real-details{border-top:1px dashed #d9c39a;padding-top:11px;margin-top:6px;font-size:13.5px;opacity:.6;width:100%}
-.bench-tile.selected .bench-real-details{opacity:1}
+.bench-real-details{border-top:1px dashed #d9c39a;padding-top:11px;margin-top:6px;font-size:13.5px;width:100%}
+.bench-sim-details{border-top:1px dashed #b7d3ea;padding-top:11px;margin-top:6px;font-size:13.5px;width:100%}
+/* "What this bench can and cannot do": always visible, plain text at AA contrast, no dimming. */
+.bench-cando{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px 14px;width:100%;font-size:13px;line-height:1.35}
+.bench-cando-col{display:flex;flex-direction:column;gap:4px;min-width:0}
+.bench-cando-head{font-weight:650;color:#183047;font-size:12.5px;text-transform:uppercase;letter-spacing:.04em}
+.bench-cando-can{color:#174b42}.bench-cando-cannot{color:#5a2e2e}
 .bench-lbl{color:#516677;font-size:12px;text-transform:uppercase;letter-spacing:.04em}
 .bench-pills{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
 .bench-pill{border:1px solid #abc0cf;background:#fff;border-radius:999px;padding:3px 11px;font-size:13px;color:#174c6e;cursor:pointer}
-.bench-pill:hover{background:#e8f0f6}.bench-pill.on{background:#15608f;border-color:#15608f;color:#fff;font-weight:600}
+.bench-pill:hover{background:#e8f0f6}.bench-pill.on{background:#15608f;border-color:#15608f;font-weight:600}
+.bench-pill.on,.bench-pill.on .q-btn__content{color:#fff}
 .bench-limits{display:grid;grid-template-columns:56% 44%;border:1px solid #dce4e9;background:#fff;font-size:13.5px;width:100%}
 .bench-limits>*{padding:5px 10px;border-bottom:1px solid #dce4e9}.bench-limits>*:nth-last-child(-n+2){border-bottom:0}
 .bench-limit-key{color:#516677}.bench-limit-value{font-weight:600;font-variant-numeric:tabular-nums}
@@ -82,8 +96,17 @@ body{background:#fff;color:#183047;font-family:system-ui,-apple-system,"Segoe UI
 .bench-warning{background:#fff3df;color:#77511d}.bench-muted{color:#5a6f7e;font-size:13px}
 .bench-danger{color:#8a2727}
 .bench-panel{border:1px solid #dce4e9;border-radius:8px;padding:16px;background:#fff;width:100%}
-.bench-panel.stale .bench-stat,.bench-panel.stale .bench-reasons{opacity:.4}
+.bench-panel.stale .bench-stat,.bench-panel.stale .bench-reasons{color:#5a6f7e}
+.bench-plan,.bench-confirm,.bench-run-section{scroll-margin-top:84px}
 .bench-stale{background:#fff7e9;color:#785018;border:1px solid #e3cfa9;border-radius:6px;padding:7px 11px;font-weight:600;font-size:14px;width:100%}
+.bench-sequence{display:flex;flex-direction:column;gap:3px;width:100%;font-size:13.5px}
+.bench-sequence-step{display:flex;gap:8px;align-items:baseline;color:#5a6f7e}
+.bench-sequence-step.current{color:#183047;font-weight:650}.bench-sequence-step.done{color:#174b42}
+.bench-sequence-num{display:inline-flex;width:20px;height:20px;border-radius:50%;border:1px solid #abc0cf;font-size:12px;align-items:center;justify-content:center;flex-shrink:0}
+.bench-sequence-step.current .bench-sequence-num{background:#15608f;border-color:#15608f;color:#fff}
+.bench-legend{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:2px 10px;font-size:13px;color:#5a6f7e;width:100%}
+.bench-legend code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;color:#183047}
+.bench-bar-hint{font-size:12.5px;color:#5a6f7e;flex-basis:100%}
 .bench-stats{display:flex;flex-wrap:wrap;gap:12px 28px;width:100%}
 .bench-stat{display:flex;flex-direction:column;gap:2px;min-width:120px}
 .bench-stat-key{color:#516677;font-size:12px;text-transform:uppercase;letter-spacing:.04em}
@@ -95,9 +118,11 @@ body{background:#fff;color:#183047;font-family:system-ui,-apple-system,"Segoe UI
 .bench-run{border:1px solid #dce4e9;border-radius:8px;padding:16px;width:100%}
 .bench-stat-tile{background:#f3f7f9;border-radius:8px;padding:12px;min-width:140px;flex:1}
 .bench-reports{width:100%}
-.bench-report-row{display:grid;grid-template-columns:150px 1fr 100px 150px minmax(220px,1fr);gap:8px;align-items:start;padding:8px 6px;border-bottom:1px solid #dce4e9;font-size:13.5px;width:100%}
+/* The time column sizes to its content so a local time with its zone never overprints the run name. */
+.bench-report-row{display:grid;grid-template-columns:max-content minmax(0,1.4fr) max-content max-content minmax(220px,1fr);gap:8px 12px;align-items:start;padding:8px 6px;border-bottom:1px solid #dce4e9;font-size:13.5px;width:100%}
 .bench-report-head{color:#29495d;font-weight:600;background:#f3f7fa}
 .bench-report-when{white-space:nowrap;font-variant-numeric:tabular-nums}
+.bench-report-row .bench-badge{justify-self:start}
 .bench-actions{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
 .bench-artifact{font-weight:600;color:#15608f}
 .bench-bar{position:fixed;left:0;right:0;bottom:0;z-index:30;background:#fff;border-top:1px solid #dce4e9;box-shadow:0 -4px 16px rgba(24,48,71,.08);padding:10px 16px}
@@ -108,18 +133,27 @@ body{background:#fff;color:#183047;font-family:system-ui,-apple-system,"Segoe UI
 .bench-dialog{min-width:min(92vw,420px)}
 .bench-shell .q-field{width:100%}.bench-shell .q-checkbox__label{overflow-wrap:anywhere}
 .bench-shell .q-table td{white-space:normal;overflow-wrap:anywhere}
+.bench-shell .q-table td.nowrap,.bench-shell .q-table th.nowrap{white-space:nowrap}
 /* Shared with the /annotations editor page (annotation_editor.py builds its own layout on this sheet). */
-.bench-card{background:#fff;border:1px solid #dce5eb;border-radius:12px;box-shadow:none;padding:22px;width:100%}
+.bench-card{background:#fff;border:1px solid #dce5eb;border-radius:8px;box-shadow:none;padding:22px;width:100%}
 .bench-section-title{font-size:20px;font-weight:650;margin-bottom:6px}
+.bench-glossary{max-width:1000px;margin:0 auto;padding:16px}
+.bench-glossary table{border-collapse:collapse;width:100%;font-size:14px}.bench-glossary th,.bench-glossary td{border-bottom:1px solid #dce4e9;padding:6px 8px;text-align:left;vertical-align:top}
 @media(max-width:650px){.bench-shell{padding:0 12px 170px}.bench-tiles{grid-template-columns:1fr}.bench-cards{grid-template-columns:1fr}
-.bench-fields{grid-template-columns:1fr}.bench-status-area{width:100%;justify-content:space-between;margin-left:0}
-.bench-report-row{grid-template-columns:1fr;gap:4px}.bench-report-head{display:none}.bench-bar-actions{width:100%}
-.bench-bar-actions .q-btn{flex:1}.bench-stat-value{font-size:17px}.bench-title{font-size:20px}}
+.bench-fields{grid-template-columns:1fr}.bench-cando{grid-template-columns:1fr}
+.bench-header-inner{flex-wrap:nowrap;gap:8px}.bench-subtitle{display:none}.bench-status-area{width:auto;margin-left:auto;justify-content:flex-end}
+.bench-summary-key{white-space:nowrap}
+.bench-clause-row{grid-template-columns:minmax(0,1fr)}.bench-clause-row>*{min-width:0}
+.bench-plan,.bench-confirm,.bench-run-section{scroll-margin-top:72px}
+.bench-report-row{grid-template-columns:minmax(0,1fr);gap:4px}.bench-report-head{display:none}.bench-bar-actions{width:100%}
+.bench-bar-actions .q-btn{flex:1}.bench-stat-value{font-size:17px}.bench-title{font-size:18px}}
 '''
 
 
 RASTER_SUFFIXES = {'.png', '.jpg', '.jpeg', '.gif', '.webp'}
 _TOO_LARGE = b'Request body exceeds the upload limit\n'
+# The glossary the page footer links: one document, kept with the source (an editable install has it).
+GLOSSARY_PATH = Path(__file__).resolve().parents[2] / 'docs' / 'glossary.md'
 
 
 def file_headers(path: Path, relative: str | None = None) -> dict[str, str]:
@@ -281,6 +315,20 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
     from .annotation_editor import register_annotation_editor
     register_annotation_editor(ui, run, service, STYLE)
 
+    @ui.page('/glossary', response_timeout=30.0)
+    async def glossary_page():
+        """docs/glossary.md rendered from the checkout; the page footer links it, so the page and the document share one source.
+        Registered before the published-file routes for the same reason as /annotations."""
+        ui.add_css(STYLE)
+        with ui.column().classes('bench-glossary gap-3'):
+            ui.link('← Back to the bench', '/').classes('bench-artifact')
+            if GLOSSARY_PATH.is_file():
+                ui.markdown(GLOSSARY_PATH.read_text(encoding='utf-8'))
+            else:
+                ui.label('Glossary').classes('bench-title')
+                ui.label('The glossary file dcdc-bench/docs/glossary.md is not part of this installation. '
+                         'It is kept with the source at docs/glossary.md.').classes('bench-message bench-warning')
+
     if report_root is not None:
         published_directory = Path(report_root).resolve()
         published_runs = (published_directory / 'Runs').resolve()
@@ -326,6 +374,9 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                  'dut': None, 'mode': 'mock', 'bench': {'mock': None, 'real': None}, 'recipe': None,
                  'feasibility': {}, 'preview': None, 'stale_note': None, 'preview_busy': False, 'generation': 0,
                  'job_id': None, 'polling': False, 'active': False, 'active_job_id': None, 'jobs': [],
+                 # Single-shot actions: Start while the service answers, the jobs whose stop this tab
+                 # already confirmed, and the jobs whose report rebuild this tab already asked for.
+                 'start_busy': False, 'stop_requested': set(), 'regenerate_busy': set(),
                  # job_id -> saved_runs_key of the last snapshot this page showed; drives the
                  # Reports auto-refresh and the "Report ready" notice from the same poll.
                  'seen': {},
@@ -359,11 +410,7 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
         # --- selection helpers ------------------------------------------------------------------
 
         def notify_error(exc):
-            if hasattr(exc, 'errors'):
-                text = '; '.join('.'.join(map(str, item['loc'])) + ': ' + item['msg'] for item in exc.errors()[:4])
-            else:
-                text = str(exc)
-            ui.notify(text, type='negative', timeout=12000, multi_line=True)
+            ui.notify(friendly_error(exc), type='negative', timeout=12000, multi_line=True)
 
         def benches_of(mode):
             return {name: bench for name, bench in state['catalog']['bench'].items() if bench.get('mode') == mode}
@@ -514,9 +561,14 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
 
         # --- profile actions ----------------------------------------------------------------------
 
-        async def save_and_select(kind, data, *, note=None):
-            """Validate + save a profile, re-read the catalog and select the saved name."""
-            name = await run.io_bound(service.save_profile, kind, data)
+        async def save_and_select(kind, data, *, note=None, overwrite=True, replaces=None):
+            """Validate + save a profile, re-read the catalog and select the saved name.
+
+            ``overwrite=False`` for a new profile: the service refuses an existing file
+            name instead of replacing it. ``replaces`` for Edit with a changed file
+            name: the old file goes away with the save (no second card).
+            """
+            name = await run.io_bound(lambda: service.save_profile(kind, data, overwrite=overwrite, replaces=replaces))
             if client.is_deleted or name is None:
                 return None
             await reload(recompute=False)
@@ -543,6 +595,8 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                 except (ValueError, OSError) as exc:
                     notify_error(exc)
                     return
+                if state['editor'] and state['editor'][0] in (kind, 'limits' if kind == 'bench' else kind) and state['editor'][1] == name:
+                    close_editor()  # Save in a still-open editor would recreate the deleted file
                 await reload()
                 render_converters()
                 render_bench()
@@ -601,6 +655,24 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                     panels[key].clear()
                     panels[key].set_visibility(False)
 
+        def offer_free_name(container, kind, field, taken, open_existing):
+            """Inside an editor, after the service refused to overwrite ``taken``: the two ways out.
+
+            Rename (a free file name is filled in for the operator to accept or change)
+            or open the existing profile with Edit. Nothing is written until Save.
+            """
+            word = {'dut': 'converter', 'recipe': 'test'}[kind]
+            container.clear()
+            container.set_visibility(True)
+            with container:
+                ui.label(f'A {word} file named “{taken}” already exists. Nothing was overwritten.').classes('bench-message bench-warning')
+                with ui.row().classes('gap-2 items-center'):
+                    def suggest():
+                        field.set_value(unique_name(taken, state['catalog'][kind]))
+                        container.set_visibility(False)
+                    ui.button('Use a free file name', on_click=suggest, icon='drive_file_rename_outline').props('outline no-caps')
+                    ui.button(f'Open the existing {word}', on_click=lambda: open_existing(taken), icon='edit').props('outline no-caps')
+
         def open_dut_editor(name=None):
             """Add (name None) or edit a converter with the existing DUT form; saved approvals live here too."""
             close_editor()
@@ -640,15 +712,23 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                     fields['wiring_and_polarity_confirmed'] = ui.checkbox('The wiring plan and polarity for this converter were reviewed',
                         value=bool(approval.get('wiring_and_polarity_confirmed', False)))
                     ui.label('Saved approvals are required before a real preview is supported. Each Start still needs a fresh wiring, CH1, limits and serial confirmation.').classes('bench-muted')
+                conflict = ui.column().classes('w-full gap-2')
+                conflict.set_visibility(False)
                 with ui.row().classes('w-full justify-end gap-2'):
                     ui.button('Cancel', on_click=close_editor).props('outline no-caps')
 
                     async def save():
                         try:
                             edited = edited_dut(data, values(fields))
-                            await save_and_select('dut', edited, note='Converter saved.')
+                            # A new converter never overwrites a saved one; an edited converter whose
+                            # file name changed replaces its old file instead of leaving two cards.
+                            await save_and_select('dut', edited, note='Converter saved.', overwrite=name is not None,
+                                                  replaces=name if name and edited['profile_id'] != name else None)
                             close_editor()
                         except (ValueError, TypeError, OSError) as exc:
+                            if 'already exists' in str(exc):
+                                offer_free_name(conflict, 'dut', fields['profile_id'], str(fields['profile_id'].value or '').strip(),
+                                                open_dut_editor)
                             notify_error(exc)
                     ui.button('Save converter', on_click=save, icon='save').props('unelevated no-caps')
 
@@ -717,6 +797,8 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                         input_field('efficiency_estimate_pct', 'Planning efficiency estimate (%)', data['planning']['efficiency_estimate_fraction'] * 100, fields, number=True)
                         input_field('current_budget_pct', 'Use this share of source current (%)', data['planning']['source_current_budget_fraction'] * 100, fields, number=True)
                     ui.label('Planning assumptions, not measured efficiency or an authorization to exceed instrument limits.').classes('bench-muted')
+                conflict = ui.column().classes('w-full gap-2')
+                conflict.set_visibility(False)
                 with ui.row().classes('w-full justify-end gap-2'):
                     ui.button('Cancel', on_click=close_editor).props('outline no-caps')
 
@@ -724,9 +806,13 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                         try:
                             dut_id = state['dut'] or data['dut_profile_id']
                             edited = edited_recipe(data, values(fields), dut_id=dut_id, test_id=chosen['test_id'])
-                            await save_and_select('recipe', edited, note='Test saved.')
+                            await save_and_select('recipe', edited, note='Test saved.', overwrite=name is not None,
+                                                  replaces=name if name and edited['recipe_id'] != name else None)
                             close_editor()
                         except (ValueError, TypeError, OSError) as exc:
+                            if 'already exists' in str(exc):
+                                offer_free_name(conflict, 'recipe', fields['recipe_id'], str(fields['recipe_id'].value or '').strip(),
+                                                open_recipe_editor)
                             notify_error(exc)
                     ui.button('Save test', on_click=save, icon='save').props('unelevated no-caps')
 
@@ -777,34 +863,42 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
             button.on('click.stop', handler)
             return button
 
-        def card(*, selected, title, on_select, subtitle=None, meta=None, reason=None, badge=None, links=()):
+        def card(*, selected, title, on_select, subtitle=None, meta=None, reason=None, badge=None, links=(), reason_style='danger'):
+            """A selectable card: one real <button> for the whole face (Enter and Space work, nothing interactive
+            nested inside it) plus one "⋯" actions menu beside it. ``reason`` greys the card; ``reason_style``
+            'danger' is for a test the operator chose that cannot run now, 'muted' for a plain fact."""
             item = ui.element('div').classes('bench-card-item' + (' selected' if selected else '') + (' greyed' if reason else ''))
-            item.props(f'tabindex=0 role=button aria-pressed={"true" if selected else "false"}')
-            item.on('click', on_select)
-            item.on('keydown.enter', on_select)
             with item:
-                if selected:
-                    with ui.element('div').classes('bench-card-check'):
-                        ui.icon('check', size='16px')
-                ui.label(title).classes('bench-card-title')
-                if subtitle:
-                    ui.label(subtitle).classes('bench-card-grid')
-                if badge:
-                    ui.label(badge).classes('bench-badge bench-badge-standard')
-                if meta:
-                    ui.label(meta).classes('bench-card-meta')
-                if reason:
-                    ui.label('Cannot run on this bench: ' + reason).classes('bench-card-reason')
+                face = ui.element('button').classes('bench-card-select')
+                face.props(f'type=button aria-pressed={"true" if selected else "false"}')
+                face.on('click.stop', on_select)
+                with face:
+                    with ui.element('div').classes('bench-card-title'):
+                        if selected:
+                            with ui.element('span').classes('bench-card-check'):
+                                ui.icon('check', size='15px')
+                        ui.label(title)
+                    if subtitle:
+                        ui.label(subtitle).classes('bench-card-grid')
+                    if badge:
+                        ui.label(badge).classes('bench-badge bench-badge-standard')
+                    if meta:
+                        ui.label(meta).classes('bench-card-meta')
+                    if reason:
+                        ui.label(('Cannot run on this bench: ' if reason_style == 'danger' else 'Not on this bench: ') + reason).classes(
+                            'bench-card-reason' if reason_style == 'danger' else 'bench-card-note')
                 if links:
-                    with ui.element('div').classes('bench-links'):
+                    more = ui.button(icon='more_horiz').props(f'flat dense round aria-label={json.dumps("Actions for " + title)} aria-haspopup=menu')
+                    more.classes('bench-card-menu')
+                    more.on('click.stop', lambda: None)  # opening the menu never selects the card
+                    with more, ui.menu().props('auto-close'):
                         for text, handler in links:
-                            link_button(text, handler, danger=(text == 'Delete'))
+                            ui.menu_item(text, on_click=handler).classes('bench-menu-danger' if text == 'Delete' else '')
             return item
 
         def add_card(text, handler):
-            item = ui.element('div').classes('bench-add').props('tabindex=0 role=button')
+            item = ui.element('button').classes('bench-add').props('type=button')
             item.on('click', handler)
-            item.on('keydown.enter', handler)
             with item:
                 ui.label(text)
             return item
@@ -833,25 +927,68 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
             panels.pop('editor_limits', None)  # lived inside the real tile; re-created below when a preset exists
             real_benches, mock_benches = benches_of('real'), benches_of('mock')
             real = state['catalog']['bench'].get(state['bench']['real']) if state['bench']['real'] else None
+            def preset_pill(mode, name, bench):
+                on = state['bench'][mode] == name
+                # A selected pill is a filled primary button: Quasar's flat text colour would otherwise
+                # paint the label in the same blue as the fill.
+                pill = ui.button(bench_title(bench)).props('dense no-caps size=sm ' + ('unelevated color=primary text-color=white' if on else 'flat'))
+                pill.classes('bench-pill' + (' on' if on else ''))
+                pill.props(f'aria-pressed={"true" if on else "false"}')
+                pill.on('click.stop', lambda _=None, name=name: select_bench(mode, name))
+                return pill
+
+            def can_cannot(title, can, cannot, can_head, cannot_head):
+                ui.label(title).classes('bench-lbl')
+                with ui.element('div').classes('bench-cando'):
+                    with ui.element('div').classes('bench-cando-col'):
+                        ui.label(can_head).classes('bench-cando-head')
+                        for line in can:
+                            ui.label('✓ ' + line).classes('bench-cando-can')
+                    with ui.element('div').classes('bench-cando-col'):
+                        ui.label(cannot_head).classes('bench-cando-head')
+                        for line in cannot:
+                            ui.label('✗ ' + line).classes('bench-cando-cannot')
+
+            def tile_keys(tile):
+                # The two tiles form one radio group: arrow keys move between them, Enter and Space choose.
+                tile.on('keydown.enter.prevent', lambda _=None, mode=tile_mode[tile.id]: select_mode(mode))
+                tile.on('keydown.space.prevent', lambda _=None, mode=tile_mode[tile.id]: select_mode(mode))
+                tile.on('keydown.right.prevent', lambda _=None: select_mode('real'))
+                tile.on('keydown.down.prevent', lambda _=None: select_mode('real'))
+                tile.on('keydown.left.prevent', lambda _=None: select_mode('mock'))
+                tile.on('keydown.up.prevent', lambda _=None: select_mode('mock'))
+            tile_mode = {}
             with panels['bench']:
-                with ui.element('div').classes('bench-tiles'):
+                with ui.element('div').classes('bench-tiles').props('role=radiogroup aria-label="Simulation or real bench"'):
                     tile = ui.element('div').classes('bench-tile sim' + (' selected' if state['mode'] == 'mock' else ''))
                     tile.props(f'role=radio tabindex=0 aria-checked={"true" if state["mode"] == "mock" else "false"}')
                     tile.on('click', lambda _=None: select_mode('mock'))
-                    tile.on('keydown.enter', lambda _=None: select_mode('mock'))
+                    tile_mode[tile.id] = 'mock'
+                    tile_keys(tile)
+                    mock = state['catalog']['bench'].get(state['bench']['mock']) if state['bench']['mock'] else None
                     with tile:
                         ui.label(BENCH_NAMES['mock']).classes('bench-tile-title')
-                        ui.label('Nothing is switched on. Synthetic readings, real report layout.').classes('bench-tile-sub')
-                        if len(mock_benches) > 1:
-                            with ui.element('div').classes('bench-pills'):
-                                for name, bench in mock_benches.items():
-                                    pill = ui.button(bench_title(bench)).props('flat dense no-caps size=sm').classes(
-                                        'bench-pill' + (' on' if state['bench']['mock'] == name else ''))
-                                    pill.on('click.stop', lambda _=None, name=name: select_bench('mock', name))
+                        ui.label('Nothing is switched on. Synthetic readings, real report layout; every output is labelled SYNTHETIC.').classes('bench-tile-sub')
+                        with ui.column().classes('bench-sim-details gap-2'):
+                            if len(mock_benches) > 1:
+                                with ui.row().classes('items-center gap-2 flex-wrap'):
+                                    ui.label('Synthetic bench').classes('bench-lbl')
+                                    with ui.element('div').classes('bench-pills'):
+                                        for name, bench in mock_benches.items():
+                                            preset_pill('mock', name, bench)
+                            if mock is not None:
+                                # The same anatomy as the real tile: the envelope that decides which points the plan skips.
+                                with ui.element('div').classes('bench-limits').props('role=table aria-label="Synthetic envelope"'):
+                                    for label, value in envelope_rows(mock):
+                                        ui.label(label).classes('bench-limit-key')
+                                        ui.label(value).classes('bench-limit-value')
+                            can_cannot('What the simulation can and cannot do', SIMULATION_CAN, SIMULATION_CANNOT,
+                                       'The simulation can', 'It cannot')
                     tile = ui.element('div').classes('bench-tile real' + (' selected' if state['mode'] == 'real' else ''))
                     tile.props(f'role=radio tabindex=0 aria-checked={"true" if state["mode"] == "real" else "false"}')
                     tile.on('click', lambda _=None: select_mode('real'))
-                    tile.on('keydown.enter', lambda _=None: select_mode('real'))
+                    tile_mode[tile.id] = 'real'
+                    tile_keys(tile)
                     with tile:
                         ui.label(BENCH_NAMES['real']).classes('bench-tile-title')
                         if real is None:
@@ -863,10 +1000,7 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                                     ui.label('Limit preset').classes('bench-lbl')
                                     with ui.element('div').classes('bench-pills'):
                                         for name, bench in real_benches.items():
-                                            pill = ui.button(bench_title(bench)).props('flat dense no-caps size=sm').classes(
-                                                'bench-pill' + (' on' if state['bench']['real'] == name else ''))
-                                            pill.props(f'aria-pressed={"true" if state["bench"]["real"] == name else "false"}')
-                                            pill.on('click.stop', lambda _=None, name=name: select_bench('real', name))
+                                            preset_pill('real', name, bench)
                                 with ui.element('div').classes('bench-limits').props('role=table aria-label="Protective limits"'):
                                     for label, value in limits_rows(real):
                                         ui.label(label).classes('bench-limit-key')
@@ -881,7 +1015,10 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                                                   value=approved, on_change=lambda e, name=state['bench']['real']: approve_changed(e, name))
                                 box.classes('bench-approve-ok' if approved else 'bench-approve-missing' if state['mode'] == 'real' else '')
                                 box.props('aria-label="I reviewed these limits"')
+                                box.on('click.stop', lambda: None)  # ticking the approval never also switches the bench
                                 widgets['approve'] = box
+                                can_cannot('What the real bench can and cannot do', REAL_CAN, REAL_CANNOT,
+                                           'The real bench can', 'It cannot')
             if state.get('editor') and state['editor'][0] == 'limits':
                 state['editor'] = None
 
@@ -908,10 +1045,10 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                                         ('Delete', lambda _=None, name=name: delete_profile('recipe', name))])
                 if not state['catalog']['recipe']:
                     ui.label('No saved tests yet.').classes('bench-muted')
-                render_standards()
                 with ui.element('div').classes('bench-cards'):
                     add_card('+ New test', lambda _=None: open_recipe_editor(None))
-                ui.label('Simulated vs real is not part of a test any more — it comes from question 2. Each input voltage is tested at each requested load.').classes('bench-muted')
+                ui.label('Whether a test runs in the simulation or on the real bench is decided by question 2. Each input voltage is tested at each requested load.').classes('bench-muted')
+                render_standards()
 
         # --- automotive standards: one card per standard, the ISO 16750-2 card expands into a clause checklist ---
 
@@ -936,29 +1073,39 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                 for info in infos:
                     if info['expandable']:
                         item = card(selected=state['standards']['open'], title=info['title'], subtitle=info['subtitle'],
-                                    meta=f"{info['runnable_count']} of {info['clause_count']} clauses runnable on this bench",
+                                    meta=(f"{info['clause_count']} clauses: " + info['summary']) if info.get('summary')
+                                    else f"{info['runnable_count']} of {info['clause_count']} clauses runnable now on this bench",
                                     reason=None if info['runnable'] else info['reason'], badge=f'{system[:-1]} V system',
                                     on_select=lambda _=None: toggle_standard())
                         item.classes(add='bench-standard-card')
                         item.props(f'aria-expanded={"true" if state["standards"]["open"] else "false"}')
                     else:
-                        card(selected=False, title=info['title'], subtitle=info['subtitle'], reason=info['reason'],
+                        # A laboratory this bench will never be is a plain fact, not an operator error: grey, not red.
+                        card(selected=False, title=info['title'], subtitle=info['subtitle'], reason=info['reason'], reason_style='muted',
                              on_select=lambda _=None: None).classes(add='bench-standard-card')
             if state['standards']['open']:
                 render_checklist(rows, system)
 
+        def ticked_by_default(row):
+            """The catalog's own default (``ticked_by_default``); older catalogs without it tick what runs here now."""
+            return bool(row.get('ticked_by_default', row['badge'] == 'runs_here')) and row['tickable']
+
+        def preticked(rows):
+            """Only clauses that run here now are ticked by default; a clause that needs an approval first is left for the operator."""
+            return {row['number'] for row in rows if ticked_by_default(row)}
+
         def toggle_standard():
-            """Selecting the standard opens its checklist with every runnable clause ticked; selecting again folds it."""
+            """Selecting the standard opens its checklist with every clause that runs now ticked; selecting again folds it."""
             standards = state['standards']
             standards['open'] = not standards['open']
             if standards['open']:
-                rows = clause_rows(current('bench'), current('dut'), standards_system())
-                standards['ticked'] = {row['number'] for row in rows if row['tickable']}
+                standards['ticked'] = preticked(clause_rows(current('bench'), current('dut'), standards_system()))
             render_tests()
 
         def render_checklist(rows, system):
             ticked = state['standards']['ticked']
-            runnable = sum(1 for row in rows if row['tickable'])
+            runnable = sum(1 for row in rows if row['tickable'] and row['badge'] == 'runs_here')
+            later = sum(1 for row in rows if row['tickable'] and row['badge'] != 'runs_here')
             with ui.column().classes('bench-checklist gap-1'):
                 with ui.row().classes('items-center gap-3 flex-wrap w-full'):
                     ui.label('System voltage class').classes('bench-lbl')
@@ -973,20 +1120,28 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                         box.props(f'aria-label="clause {row["number"]}"')
                         if not row['tickable']:
                             box.disable()
-                        style = {'runs_here': 'bench-badge-ok', 'procedure_pending': 'bench-badge-partial'}.get(row['badge'], 'bench-badge-grey')
+                        # The catalog's status word is shown as it comes; "runs here" is the only green badge.
+                        # An approval-first or mock-only clause is amber, never green.
+                        style = ('bench-badge-ok' if row['badge'] == 'runs_here' else
+                                 'bench-badge-partial' if row['badge'] in ('procedure_pending', 'runs_after_approval', 'mock_only', 'needs_split')
+                                 or row['tickable'] else 'bench-badge-grey')
                         badge = ui.label(row['badge_label']).classes('bench-badge ' + style)
-                        badge.tooltip(row['text'] or row['reason'])
                         ui.label(row['levels']).classes('bench-muted')
                         note = row['text'] if not row['tickable'] else '; '.join(row['conditions'])
+                        if row.get('needs_approval') and row.get('approval') and row['approval'] not in (note or ''):
+                            note = (note + ' ' if note else '') + str(row['approval'])
                         if note:
                             ui.label(note).classes('bench-clause-note')
+                        else:
+                            badge.tooltip(row['text'] or row['reason'])
                 with ui.row().classes('items-center justify-between w-full flex-wrap gap-2'):
-                    ui.label(f'{runnable} of {len(rows)} clauses runnable on this bench').classes('bench-card-meta bench-checklist-footer')
+                    ui.label(f'{runnable} of {len(rows)} clauses runnable now on this bench' + (f' · {later} after approval' if later else '')).classes(
+                        'bench-card-meta bench-checklist-footer')
                     widgets['add_tests'] = ui.button('Add as tests', on_click=add_as_tests, icon='playlist_add').props('unelevated no-caps')
                     widgets['add_tests'].set_enabled(bool(ticked))
-                ui.label('Each ticked clause becomes a saved test under “ISO 16750-2 supply profiles”. §4.5 and §4.6.2 run on the '
-                         'simulated bench only and, because they step below the converter’s stated minimum, plan as executable '
-                         'only after the recipe is approved under the bench’s protective policy (brief §7.5).').classes('bench-muted')
+                ui.label('Each ticked clause becomes a saved test under “ISO 16750-2 supply profiles”. A clause marked “runs here after '
+                         'approval” is saved unapproved and its card stays greyed until the saved recipe is approved under the bench’s '
+                         'protective policy (brief §7.5); the row says where that approval is recorded.').classes('bench-muted')
 
         def tick_clause(number, value):
             ticked = state['standards']['ticked']
@@ -1010,8 +1165,7 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                 return
             state['catalog']['dut'][name] = data
             state['standards']['system'] = value
-            rows = clause_rows(current('bench'), data, value)
-            state['standards']['ticked'] = {row['number'] for row in rows if row['tickable']}
+            state['standards']['ticked'] = preticked(clause_rows(current('bench'), data, value))
             render_tests()
             changed()
 
@@ -1051,7 +1205,22 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
         def can_start():
             preview = state['preview']
             return bool(preview and preview.get('supported') and not preview.get('errors')
-                        and not state['active'] and not state['preview_busy'])
+                        and not state['active'] and not state['preview_busy'] and not state['start_busy'])
+
+        def start_hint():
+            """Why Start is disabled, spelled out under the bar; '' when it is enabled."""
+            if can_start():
+                return ''
+            if state['active']:
+                return 'Locked while a test runs on the bench. Start returns when it has finished.'
+            if state['start_busy']:
+                return 'Starting…'
+            preview = state['preview']
+            if preview is None:
+                return 'Preview first — Start unlocks after a fresh plan.'
+            if preview.get('errors') or not preview.get('supported'):
+                return 'The plan cannot start: see the Before Start list in the Plan panel.'
+            return ''
 
         def render_bar():
             widgets['bar_summary'].set_text(summary_text(current('dut'), state['mode'], current('bench'), current('recipe')))
@@ -1060,6 +1229,9 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
             start.props('aria-label=' + json.dumps(START_LABELS[state['mode']]))
             start.classes(remove='bench-start-real bench-start-mock', add='bench-start-real' if state['mode'] == 'real' else 'bench-start-mock')
             start.set_enabled(can_start())
+            hint = start_hint()
+            widgets['start_hint'].set_text(hint)
+            widgets['start_hint'].set_visibility(bool(hint))
             widgets['preview'].set_enabled(not state['preview_busy'] and not state['active'] and bool(state['dut'] and bench_name() and state['recipe']))
             for key in ('converters_section', 'bench_section', 'tests_section'):
                 panels[key].classes(add='bench-locked' if state['active'] else '', remove='' if state['active'] else 'bench-locked')
@@ -1084,9 +1256,10 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                 mode = preview.get('mode')
                 with ui.element('div').classes('bench-stats'):
                     for key, value, small in (('Points that will run', f'{ready} / {total}', False), ('Skipped', str(total - ready), False),
-                                              ('Estimated time', duration_text(preview.get('estimated_seconds')) or ('simulated · seconds' if mode == 'mock' else '—'), False),
-                                              ('Bench', ('Real — ' + bench_equipment(preview.get('plan', {}).get('bench', {}), state['inventory']))
-                                               if mode == 'real' else 'Simulated — nothing switched on', True)):
+                                              ('Estimated time', duration_text(preview.get('estimated_seconds')) or (SIMULATION_TIME_ESTIMATE if mode == 'mock' else '—'),
+                                               mode == 'mock'),
+                                              ('Bench', ('Real bench — ' + bench_equipment(preview.get('plan', {}).get('bench', {}), state['inventory']))
+                                               if mode == 'real' else 'Simulation — nothing switched on', True)):
                         with ui.element('div').classes('bench-stat'):
                             ui.label(key).classes('bench-stat-key')
                             ui.label(value).classes('bench-stat-value' + (' small' if small else ''))
@@ -1096,25 +1269,44 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                 if reasons:
                     ui.label('Why points are skipped').classes('bench-k-label')
                     with ui.column().classes('bench-reasons gap-1'):
-                        for count, reason in reasons:
-                            ui.label(f'{count} point{"s" if count > 1 else ""} skipped: {reason}')
-                    ui.label('Skipped points stay in the saved plan and are listed in the report as not run.').classes('bench-muted')
+                        for count, status, reason in reasons:
+                            ui.label(f'{count} point{"s" if count > 1 else ""} {status}: {reason}')
+                    ui.label('Skipped points stay in the saved plan and are listed in the report with the same reason; a request is never reduced to fit.').classes('bench-muted')
                 errors = preview.get('errors', [])
                 if errors:
                     ui.label('Before Start').classes('bench-k-label bench-danger')
                     with ui.column().classes('bench-reasons gap-1'):
                         for error in errors:
                             ui.label(str(error)).classes('bench-danger')
+                elif mode == 'mock':
+                    ui.label('Ready. After Start you will see:').classes('bench-muted')
+                    render_sequence(None)
                 else:
-                    ui.label('Ready. HTML and PDF reports are generated automatically after acquisition.').classes('bench-muted')
+                    ui.label('Ready. HTML and PDF reports are queued after acquisition (minutes on a Raspberry Pi) and appear as links under Run and in Reports.').classes('bench-muted')
                 widgets['notes'] = ui.textarea('Notes for the report (optional)', placeholder='Sample revision, wiring, mounting or observations').props('outlined autogrow dense')
                 with ui.expansion('All requested points and planning notes', icon='list').classes('w-full'):
                     for warning in preview.get('warnings', []):
                         ui.label(str(warning)).classes('bench-muted')
-                    ui.table(columns=[{'name': key, 'label': label, 'field': key, 'align': 'left'} for key, label in
+                    ui.table(columns=[{'name': key, 'label': label, 'field': key, 'align': 'left', 'classes': '' if key == 'reason' else 'nowrap',
+                                       'headerClasses': '' if key == 'reason' else 'nowrap'} for key, label in
                         [('input_display', 'Input'), ('load_display', 'Requested output load'), ('estimated_display', 'Estimated supply current'),
                          ('status_display', 'Plan'), ('reason', 'Reason')]], rows=plan_rows(preview), row_key='point_id',
                          pagination=15).props('flat dense').classes('w-full')
+                    ui.label('Plan words, the same as the CLI and the saved plan').classes('bench-lbl')
+                    with ui.element('div').classes('bench-legend'):
+                        for status, meaning in PLAN_STATUS_LEGEND:
+                            ui.html(f'<code>{status}</code>')
+                            ui.label(meaning)
+
+        def render_sequence(snapshot):
+            """The four steps a simulation goes through, with the current one marked and its time."""
+            step = sequence_step(snapshot)
+            with ui.element('div').classes('bench-sequence').props('role=list aria-label="What happens next"'):
+                for index, (label, timing) in enumerate(SIMULATION_SEQUENCE):
+                    status = 'current' if step == index else 'done' if step is not None and index < step else ''
+                    with ui.element('div').classes('bench-sequence-step ' + status).props('role=listitem'):
+                        ui.label(str(index + 1)).classes('bench-sequence-num')
+                        ui.label(label + ' — ' + timing)
 
         async def preview_test():
             if state['preview_busy']:
@@ -1211,6 +1403,8 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
             preview = state['preview']
             if not can_start() or (confirmed and not can_arm()):
                 return
+            # Single-shot: a second click before the service answers finds can_start() false and does nothing.
+            state['start_busy'] = True
             widgets['start'].disable()
             if 'confirm_start' in widgets:
                 widgets['confirm_start'].disable()
@@ -1238,19 +1432,31 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                 scroll_to('.bench-run')
             except (ValueError, OSError, RuntimeError) as exc:
                 notify_error(exc)
+                # A refused Start (a profile changed, another job holds the bench) never leaves a
+                # stale plan armed: Start stays disabled until the operator previews again.
+                changed('Start was refused — Preview again before starting.')
             finally:
+                state['start_busy'] = False
                 render_bar()
                 arm_changed()
 
         # --- running: header pill, two-step Stop, run panel ---------------------------------------
 
         async def stop_confirmed(job_id):
+            """Single-shot: the first click asks the service once; later clicks for the same job do nothing
+            (the service's cancel() is idempotent as well, for a second tab)."""
+            if job_id in state['stop_requested']:
+                return
+            state['stop_requested'].add(job_id)
             state['stop_armed'] = False
+            if 'confirm_stop' in widgets:
+                widgets['confirm_stop'].disable()
             try:
                 await run.io_bound(service.cancel, job_id)
                 ui.notify('Stop requested. Wait for the worker to verify both outputs OFF.', type='warning')
                 await poll()
             except (ValueError, OSError, RuntimeError) as exc:
+                state['stop_requested'].discard(job_id)
                 notify_error(exc)
 
         def render_stop(snapshot):
@@ -1279,19 +1485,26 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                     def keep():
                         state['stop_armed'] = False
                         render_stop(snapshot)
-                    ui.button('Confirm stop', on_click=lambda: stop_confirmed(job_id), color='negative').props('unelevated no-caps aria-label="Confirm stop"')
+                    widgets['confirm_stop'] = ui.button('Confirm stop', on_click=lambda: stop_confirmed(job_id), color='negative').props(
+                        'unelevated no-caps aria-label="Confirm stop"')
                     ui.button('Keep running', on_click=keep).props('outline no-caps aria-label="Keep running"')
 
         async def dequeue_report(job_id):
             try:
                 await run.io_bound(service.cancel, job_id)
-                ui.notify('Report generation was removed from the queue. Saved measurements are preserved.', type='info')
+                ui.notify('Removed from the report queue. The saved measurements are preserved; Regenerate report can build one later.', type='info')
                 await poll()
                 await refresh_reports()
             except (ValueError, OSError, RuntimeError) as exc:
                 notify_error(exc)
 
         async def regenerate_report(job_id):
+            """Single-shot: a second click while the first is in flight, or once the job is already queued, does nothing."""
+            known = next((job for job in state['jobs'] if job.get('job_id') == job_id), None)
+            if job_id in state['regenerate_busy'] or (known and known.get('state') in WORKING_STATES + ('report-queued',)):
+                return
+            state['regenerate_busy'].add(job_id)
+            render_reports(state['jobs'])
             try:
                 await run.io_bound(service.retry_report, job_id)
                 state['job_id'] = job_id
@@ -1300,6 +1513,8 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                 await refresh_reports()
             except (ValueError, OSError, RuntimeError) as exc:
                 notify_error(exc)
+            finally:
+                state['regenerate_busy'].discard(job_id)
 
         def report_links(snapshot):
             # Kept artifacts only: a PDF that is unverified (checker tool missing) or
@@ -1319,13 +1534,19 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                 ui.label('Run').classes('bench-h2')
                 with ui.column().classes('bench-run gap-3'):
                     ui.label(state_label(snapshot)).classes('bench-k-label').style('font-size:17px')
-                    ui.label('Simulated test · no real instruments' if snapshot.get('mode') == 'mock'
-                             else 'Real bench test').classes('bench-message')
+                    ui.label('Simulation · synthetic data · no instrument is touched' if snapshot.get('mode') == 'mock'
+                             else 'Real bench · measured data').classes('bench-message')
+                    if sequence_step(snapshot) is not None:
+                        render_sequence(snapshot)
                     if snapshot.get('state') == 'reporting':
                         ui.label('The measurements are saved. Preparing the interactive plots and PDF can take several minutes on a Raspberry Pi. You can reconnect later; this job continues independently.').classes('bench-message')
                     if snapshot.get('state') == 'report-queued':
-                        ui.label('The measurements are saved and both outputs are verified OFF. Report generation is queued and starts automatically when no test is running and enough memory is free.'
-                                 + (' Waiting: ' + str(snapshot['deferred_reason']) + '.' if snapshot.get('deferred_reason') else '')).classes('bench-message')
+                        waiting = deferred_text(snapshot)
+                        note = ui.label('The measurements are saved and both outputs are verified OFF. Report generation is queued and starts automatically when no test is running and enough memory is free.'
+                                        + (' ' + waiting + '.' if waiting else '')).classes('bench-message')
+                        if snapshot.get('deferred_reason'):
+                            note.tooltip('Dispatcher reason: ' + str(snapshot['deferred_reason'])
+                                         + (' · checked ' + local_time_text(snapshot['deferred_utc']) if snapshot.get('deferred_utc') else ''))
                     ui.label('Run ' + str(snapshot.get('run_id') or snapshot['job_id'])).classes('bench-muted')
                     # Local wall-clock display only; job.json and the run evidence keep UTC.
                     for key, label in [('created_utc', 'Started'), ('acquisition_cancelled_utc', 'Stop requested'),
@@ -1368,12 +1589,18 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                         ui.button('Remove from report queue', on_click=lambda: dequeue_report(snapshot['job_id']),
                                   icon='playlist_remove').props('outline no-caps aria-label="Remove from report queue"')
                     report_links(snapshot)
+                    if snapshot.get('mode') == 'mock' and report_link_rows(snapshot):
+                        ui.label(SYNTHETIC_UNCERTAINTY_NOTE).classes('bench-muted')
                     artifacts = snapshot.get('report_artifacts') or {}
                     terminal = snapshot.get('state') in ('completed', 'aborted', 'failed', 'cancelled')
+                    removed = dequeued(snapshot)
                     failed_formats = [name.upper() for name in ('html', 'pdf')
-                                      if terminal and snapshot.get('run_dir') and artifacts.get(name, {}).get('status') not in ('success', 'unverified')]
+                                      if terminal and not removed and snapshot.get('run_dir') and artifacts.get(name, {}).get('status') not in ('success', 'unverified')]
                     if terminal and not snapshot.get('run_dir'):
                         ui.label('No measurements were acquired for this job.').classes('bench-muted')
+                    if removed:
+                        ui.label('Removed from the report queue: no report was generated and none failed. The saved measurements are preserved; '
+                                 '"Regenerate report" in Reports builds one from them.').classes('bench-message')
                     if failed_formats:
                         ui.label('Report generation needs attention: ' + ', '.join(failed_formats) + '. Saved measurements are preserved. Use "Regenerate report" in Reports.').classes('bench-message bench-warning')
                     events = snapshot.get('events') or []
@@ -1389,7 +1616,7 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
 
         def remember_jobs(jobs):
             state['jobs'] = jobs
-            active = next((job for job in jobs if job.get('state') in ('queued', 'acquiring', 'reporting')), None)
+            active = next((job for job in jobs if job.get('state') in WORKING_STATES), None)
             state['active'] = bool(active)
             state['active_job_id'] = active['job_id'] if active else None
 
@@ -1402,25 +1629,33 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                 with ui.element('div').classes('bench-report-row bench-report-head'):
                     for head in ('When', 'Run', 'Bench', 'Status', 'Report'):
                         ui.label(head)
-                for row in report_rows(jobs[:30], recipes=state['catalog']['recipe']):
+                rows = report_rows(jobs[:30], recipes=state['catalog']['recipe'])
+                for row in rows:
                     with ui.element('div').classes('bench-report-row'):
                         ui.label(row['when']).classes('bench-report-when')
                         ui.label(row['run'])
-                        ui.label(row['bench']).classes('bench-badge' + (' bench-badge-real' if row['bench'] == 'Real' else ''))
+                        ui.label(row['bench']).classes('bench-badge' + (' bench-badge-real' if row['real'] else ''))
                         with ui.column().classes('gap-0'):
                             ui.label(row['status']).classes('bench-badge' + (' bench-badge-ok' if row['status'] == 'Complete' else ' bench-badge-partial'))
                             if row['points']:
                                 ui.label(row['points']).classes('bench-muted')
+                            if row['waiting']:
+                                ui.label(row['waiting']).classes('bench-muted')
                         with ui.element('div').classes('bench-actions'):
                             for label, relative in row['links']:
                                 ui.link(label, artifact_url(row['job_id'], relative), new_tab=True).classes('bench-artifact')
                             ui.button('View run', on_click=lambda _=None, job_id=row['job_id']: select_job(job_id)).props('flat dense no-caps size=sm')
                             if row['regenerate']:
-                                ui.button('Regenerate report', on_click=lambda _=None, job_id=row['job_id']: regenerate_report(job_id),
-                                          icon='refresh').props('flat dense no-caps size=sm aria-label="Regenerate report"')
+                                again = ui.button('Regenerate report', on_click=lambda _=None, job_id=row['job_id']: regenerate_report(job_id),
+                                                  icon='refresh').props('flat dense no-caps size=sm aria-label="Regenerate report"')
+                                again.tooltip('Makes a new report revision from the saved measurements; nothing is re-measured.')
+                                if row['job_id'] in state['regenerate_busy']:
+                                    again.disable()
                             if row['dequeue']:
                                 ui.button('Remove from report queue', on_click=lambda _=None, job_id=row['job_id']: dequeue_report(job_id),
                                           icon='playlist_remove').props('flat dense no-caps size=sm')
+                if len(jobs) > 30:
+                    ui.label(f'Newest 30 of {len(jobs)} saved runs shown.').classes('bench-muted')
 
         async def refresh_reports():
             jobs = await run.io_bound(service.list_jobs)
@@ -1463,35 +1698,51 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                 await refresh_reports()
 
         async def poll():
-            if state['polling'] or not state['job_id']:
+            """Every tick follows the bench, not a job id this tab happens to hold.
+
+            A cheap service.active_job() (job.json records only) says which job is
+            working or waiting for its report; a tab with no job attaches to it (F5,
+            a second tab, a job started from the CLI), the header, the lock and
+            Start follow it even while an older run is displayed, and the lock
+            releases when it ends.
+            """
+            if state['polling']:
                 return
             state['polling'] = True
-            job_id = state['job_id']
             try:
+                bench = await run.io_bound(service.active_job)
+                if client.is_deleted:
+                    return
+                if state['job_id'] is None and bench:
+                    state['job_id'] = bench['job_id']
+                job_id = state['job_id']
+                if job_id is None:
+                    if state['active']:
+                        state['active'], state['active_job_id'] = False, None
+                        render_bar()
+                    show_activity(None)
+                    render_stop(None)
+                    return
                 snapshot = await run.io_bound(service.status, job_id)
                 if client.is_deleted or snapshot is None or state['job_id'] != job_id:
                     return
                 busy = None
-                if snapshot.get('state') in ('queued', 'acquiring', 'reporting'):
-                    state['active'], state['active_job_id'] = True, job_id
-                elif state['active_job_id'] and state['active_job_id'] != job_id:
-                    busy = await run.io_bound(service.status, state['active_job_id'])
+                if bench and bench['job_id'] != job_id and bench['state'] in ('queued', 'acquiring', 'reporting'):
+                    busy = await run.io_bound(service.status, bench['job_id'])
                     if client.is_deleted or busy is None or state['job_id'] != job_id:
                         return
-                    state['active'] = busy.get('state') in ('queued', 'acquiring', 'reporting')
-                    if not state['active']:
-                        state['active_job_id'] = None
-                else:
-                    state['active'], state['active_job_id'] = False, None
+                working = busy if busy and busy.get('state') in WORKING_STATES else snapshot
+                state['active'] = working.get('state') in WORKING_STATES
+                state['active_job_id'] = working['job_id'] if state['active'] else None
                 render_bar()
                 show_status(snapshot)
-                # The indicator and Stop follow whichever job is still working, even while an older run is displayed.
-                working = snapshot if activity_text(snapshot) else busy
-                show_activity(working)
-                render_stop(working)
+                # The indicator and Stop follow whichever job is working (or waiting for its report), even
+                # while an older run is displayed.
+                show_activity(working if activity_text(working) else snapshot)
+                render_stop(working if 'stop' in job_actions(working) else snapshot)
                 await note_transitions([snapshot] + ([busy] if busy else []))
             except (ValueError, OSError, RuntimeError) as exc:
-                if state['job_id'] != job_id:
+                if state['job_id'] is None:
                     return
                 panels['run'].clear()
                 panels['run'].set_visibility(True)
@@ -1563,7 +1814,9 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                 panels['reports'] = ui.column().classes('bench-reports gap-0')
             ui.label('Local bench control · Data stays in your workspace · Closing this tab does not restart or cancel acquisition.').classes('bench-muted mt-6')
             ui.label(time_legend()).classes('bench-muted')
-            ui.link('Sensor placement editor — add photographs and sensor markers to a finished run', '/annotations').classes('bench-artifact')
+            with ui.row().classes('gap-5 flex-wrap'):
+                ui.link('Sensor placement editor — add photographs and sensor markers to a finished run', '/annotations').classes('bench-artifact')
+                ui.link('Glossary — path efficiency, qualified, revision, lease, SYNTHETIC and the other words on this page', '/glossary').classes('bench-artifact')
         panels['dialogs'] = ui.element('div')
         with ui.element('div').classes('bench-bar'):
             with ui.element('div').classes('bench-bar-inner'):
@@ -1572,6 +1825,7 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                     widgets['preview'] = ui.button('Preview', on_click=preview_test, icon='fact_check').props('outline no-caps aria-label="Preview"')
                     widgets['start'] = ui.button(START_LABELS['mock'], on_click=start_pressed, icon='play_arrow').props('unelevated no-caps')
                     widgets['start'].disable()
+                widgets['start_hint'] = ui.label('').classes('bench-bar-hint').props('role=status')
         render_summary()
         render_converters()
         render_bench()
@@ -1581,8 +1835,8 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
         state['seen'].update({job['job_id']: saved_runs_key(job) for job in jobs})
         render_reports(jobs)
         render_bar()
-        active = next((job for job in jobs if job.get('state') in
-                       ('queued', 'starting', 'running', 'acquiring', 'stopping', 'cancel_requested', 'analyzing', 'rendering', 'reporting')), None)
+        # Attach to whatever the bench is doing, including a job whose report is still queued.
+        active = bench_job(jobs)
         if active:
             state['job_id'] = active['job_id']
             await poll()

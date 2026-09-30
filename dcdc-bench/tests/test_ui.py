@@ -12,15 +12,21 @@ import pytest
 
 from dcdc_bench.cli import main
 from dcdc_bench.job_service import JobService
-from dcdc_bench.ui import RequestBodyLimit, file_headers, published_file, require_loopback, run_ui, unique_name
-from dcdc_bench.ui_models import (activity_text, artifact_url, bench_equipment, bench_title, card_meta, dut_approved,
-                                  dut_subtitle, duration_text, edited_dut, edited_recipe, elapsed_text, event_text,
-                                  grouped_recipes, job_actions, job_title, limits_rows, limits_summary, local_time_text,
-                                  plan_rows, point_count, quantity, recipe_category, recipe_grid, recipe_title,
-                                  report_became_ready, report_link_rows, report_rows, saved_runs_key, shutdown_label,
-                                  skip_reasons, state_label, summary_text, target_values, time_legend)
+from dcdc_bench.standard_recipes import clause_rows
+from dcdc_bench.ui import GLOSSARY_PATH, RequestBodyLimit, file_headers, published_file, require_loopback, run_ui, unique_name
+from dcdc_bench.ui_models import (PLAN_STATUS_LEGEND, REAL_CAN, REAL_CANNOT, SIMULATION_CAN, SIMULATION_CANNOT,
+                                  SIMULATION_SEQUENCE, SIMULATION_TIME_ESTIMATE, SYNTHETIC_UNCERTAINTY_NOTE, activity_text,
+                                  artifact_url, bench_equipment, bench_job, bench_title, card_meta, deferred_text, dequeued,
+                                  dut_approved, dut_subtitle, duration_text, edited_dut, edited_recipe, elapsed_text,
+                                  envelope_rows, event_text, friendly_error, grouped_recipes, job_actions, job_title,
+                                  limits_rows, limits_summary, local_time_text, number, plan_rows, point_count, quantity,
+                                  recipe_category, recipe_grid, recipe_title, report_became_ready, report_link_rows,
+                                  report_rows, run_option_text, saved_runs_key, sequence_step, shutdown_label, skip_reasons,
+                                  state_label, summary_text, target_values, time_legend)
 
 LOS_ANGELES = ZoneInfo('America/Los_Angeles')
+DOCS = Path(__file__).resolve().parents[1] / 'docs'
+SRC = Path(__file__).resolve().parents[1] / 'src' / 'dcdc_bench'
 
 
 @pytest.mark.parametrize('text', ['nan', 'inf', '-1', '0', '1,1', '1:5', '1+2', ''])
@@ -138,12 +144,17 @@ def test_status_does_not_claim_outputs_off_without_both_verified():
     assert state_label({'state': 'reporting'}) == 'Preparing HTML and PDF'
     assert state_label({'state': 'cancelled'}) == 'Stopped'
     assert state_label({'state': 'acquiring', 'cancel_requested': True}) == 'Stop requested — waiting for the worker'
+    # m7: a job the operator dequeued did not fail; it says so (new records carry the flag, old ones only the error text).
+    assert state_label({'state': 'cancelled', 'dequeued': True}) == 'Removed from the report queue'
+    assert state_label({'state': 'cancelled', 'error': 'Report generation was removed from the queue; saved measurements are preserved'}) == 'Removed from the report queue'
+    assert dequeued({'state': 'cancelled', 'dequeued': True}) and not dequeued({'state': 'cancelled', 'error': 'Operator cancelled the simulation'})
 
 
 def test_plan_presentation_retains_exclusions_and_missing_measurements():
     row = plan_rows({'points': [{'point_id': 'p1', 'vin_target_V': 24., 'iout_target_A': .5,
         'estimated_input_current_A': None, 'status': 'assumption_limited', 'reason': 'Above input budget'}]})[0]
-    assert row['status_display'] == 'Outside planning budget'
+    assert row['status_display'] == 'assumption_limited', "the planner's own word, as the CLI and the saved plan print it"
+    assert [status for status, _ in PLAN_STATUS_LEGEND] == ['executable', 'assumption_limited', 'approval_blocked', 'unsupported']
     assert row['estimated_display'] == '—'
     assert row['reason'] == 'Above input budget'
     assert quantity(float('nan'), 'A') == '—'
@@ -264,6 +275,7 @@ def test_annotation_editor_is_not_shadowed_by_the_published_file_catch_all(tmp_p
         scope = {'type': 'http', 'method': 'GET', 'path': path, 'root_path': '', 'headers': []}
         return next((route for route in app.routes if route.matches(scope)[0] == Match.FULL), None)
     assert first_match('/annotations').path == '/annotations'
+    assert first_match('/glossary').path == '/glossary', 'the footer link is not swallowed by the published-file catch-all'
     assert first_match('/').path == '/'
     assert first_match('/legacy-report.html').path == '/{filename}'
     assert first_match('/Runs/converter/report.html').path == '/Runs/{relative:path}'
@@ -310,10 +322,68 @@ def test_activity_phrase_covers_every_background_state_and_is_empty_when_idle():
     assert activity_text({'state': 'acquiring', 'cancel_requested': True}).startswith('Stopping…')
     assert activity_text({'state': 'reporting'}) == 'Generating report…'
     assert activity_text({'state': 'rendering'}) == 'Generating report…'
-    assert activity_text({'state': 'report-queued', 'deferred_reason': 'MemAvailable below 150 MiB'}) == 'Report queued — waiting: MemAvailable below 150 MiB'
+    assert activity_text({'state': 'report-queued', 'deferred_reason': 'MemAvailable below 150 MiB',
+                          'deferred_memory': {'available_mib': 96.4}}) == 'Report queued — waiting for free memory: 96 MiB available, 150 MiB needed'
     assert activity_text({'state': 'report-queued'}) == 'Report queued — starts when the bench is idle'
+    # C34: the mode word leads every phrase, so a passer-by can tell from the header alone.
+    assert activity_text({'state': 'acquiring', 'mode': 'mock', 'progress': {'completed': 1, 'total': 21}}) == 'Simulation: Acquiring… point 2 of 21'
+    assert activity_text({'state': 'reporting', 'mode': 'real'}) == 'Real bench: Generating report…'
     for idle in ({'state': 'completed'}, {'state': 'failed'}, {'state': 'cancelled'}, {'state': 'aborted'}, {}, None):
         assert activity_text(idle) == ''
+
+
+def test_deferred_reason_is_rendered_in_operator_language():
+    """C37 / QA m4: the dispatcher's /proc field names become sentences; the numbers come from the recorded snapshot."""
+    assert deferred_text({'deferred_reason': 'MemAvailable below 150 MiB', 'deferred_memory': {'available_mib': 96.2}}) == \
+        'Waiting for free memory: 96 MiB available, 150 MiB needed'
+    assert deferred_text({'deferred_reason': 'MemAvailable below 150 MiB'}) == 'Waiting for free memory: less than that available, 150 MiB needed'
+    assert deferred_text({'deferred_reason': 'MemAvailable below 150 MiB; MemAvailable+SwapFree below 600 MiB',
+                          'deferred_memory': {'available_mib': 96., 'available_plus_swap_free_mib': 410.}}) == \
+        'Waiting for free memory: 96 MiB available, 150 MiB needed; Waiting for free memory and swap: 410 MiB free memory and swap together, 600 MiB needed'
+    assert deferred_text({'deferred_reason': 'bench lease held: Bench is busy acquiring or rendering; retry explicitly after it finishes'}) == \
+        'Waiting for the bench: another acquisition or report is still running'
+    assert deferred_text({'deferred_reason': 'memory gate misconfigured: DCDC_RENDER_MIN_AVAILABLE_MIB must be a number'}).startswith(
+        'Waiting: the memory gate is misconfigured — DCDC_RENDER')
+    assert deferred_text({'deferred_reason': None}) == '' and deferred_text(None) == ''
+    assert 'MemAvailable' not in deferred_text({'deferred_reason': 'MemAvailable below 150 MiB'})
+
+
+def test_editor_numbers_and_validation_errors_use_operator_language():
+    """QA m6: a cleared number says 'Enter a number', a limit names the field the operator sees, never a Python TypeError."""
+    with pytest.raises(ValueError, match='Enter a number for “Minimum settling time \\(s\\)”'):
+        number({'minimum_dwell_s': None}, 'minimum_dwell_s', 'Minimum settling time (s)')
+    with pytest.raises(ValueError, match='“Planning efficiency estimate \\(%\\)” must be greater than 0'):
+        number({'e': 0}, 'e', 'Planning efficiency estimate (%)', minimum=0, maximum=100, exclusive_minimum=True)
+    with pytest.raises(ValueError, match='must be at most 100'):
+        number({'e': 120}, 'e', 'Planning efficiency estimate (%)', minimum=0, maximum=100, exclusive_minimum=True)
+    assert number({'e': '12.5'}, 'e', 'x') == 12.5
+    recipe = {'recipe_id': 'r', 'dut_profile_id': 'd', 'tests': [{'id': 't', 'input_voltage_targets_V': [24], 'output_current_targets_A': [.1]}],
+              'settling': {'minimum_dwell_s': 5, 'timeout_s': 30}, 'acquisition': {'duration_s': 5}, 'planning': {}}
+    form = {'recipe_id': 'r', 'voltages': '24', 'currents': '0.1', 'minimum_dwell_s': 40, 'duration_s': 5,
+            'efficiency_estimate_pct': 80, 'current_budget_pct': 90}
+    with pytest.raises(ValueError, match='“Minimum settling time \\(s\\)” must be at most 30 s, this test’s settling timeout'):
+        edited_recipe(recipe, form, dut_id='d', test_id='t')
+    with pytest.raises(ValueError, match='Enter a number for “Measure each load for \\(s\\)”'):
+        edited_recipe(recipe, {**form, 'minimum_dwell_s': 5, 'duration_s': None}, dut_id='d', test_id='t')
+    with pytest.raises(ValueError, match='Enter a file name under “Save test as”'):
+        edited_recipe(recipe, {**form, 'recipe_id': '  ', 'minimum_dwell_s': 5}, dut_id='d', test_id='t')
+    dut = {'profile_id': 'x', 'identity': {'model': 'M'}, 'ratings': {'origin': 'user_supplied'}}
+    values = {'profile_id': 'x', 'model': 'M', 'input_voltage_min_V': 9, 'input_voltage_max_V': 36, 'output_voltage_nominal_V': 12,
+              'output_current_rated_A': 4, 'output_power_rated_W': 48}
+    with pytest.raises(ValueError, match='Enter a number for “Maximum input \\(V\\)”'):
+        edited_dut(dut, {**values, 'input_voltage_max_V': None})
+    with pytest.raises(ValueError, match='“Minimum input \\(V\\)” must not exceed “Maximum input \\(V\\)”'):
+        edited_dut(dut, {**values, 'input_voltage_min_V': 40})
+    with pytest.raises(ValueError, match='“Rated output power \\(W\\)” must be greater than 0'):
+        edited_dut(dut, {**values, 'output_power_rated_W': 0})
+    # pydantic errors are translated to the visible label; unknown paths keep their path.
+    from dcdc_bench.domain import DutProfile
+    try:
+        DutProfile.model_validate({**edited_dut(dut, values), 'ratings': {**edited_dut(dut, values)['ratings'], 'input_voltage_min_V': -1}})
+    except ValueError as exc:
+        text = friendly_error(exc)
+        assert text.startswith('“Minimum input (V)”: ') and 'Value error, ' not in text
+    assert friendly_error(ValueError('plain text')) == 'plain text'
 
 
 def test_saved_runs_key_changes_only_when_the_list_would_and_report_ready_fires_once():
@@ -374,28 +444,58 @@ def test_converter_and_bench_text_never_invent_limits_or_names():
     assert bench_equipment({**bench, 'source': {'channel': 1, 'physical_model': 'DP821A'}}, {'load': {'model': 'DL3031A'}}) == 'DP821A CH1 + DL3031A'
     assert summary_text(dut, 'real', {**bench, 'title': '24 V converter tests'}, {'title': '24 V small grid'}) == \
         '12T12-4A · Real bench (24 V converter tests) · 24 V small grid'
-    assert summary_text(None, 'mock', None, None) == '— no converter — · Simulated bench · — no test —'
+    assert summary_text(None, 'mock', None, None) == '— no converter — · Simulation · — no test —'
+    mock = {'source': {'min_voltage_V': 0., 'max_voltage_V': 60., 'max_current_A': 1., 'max_power_W': 60.}, 'load': {'max_current_A': 40.}}
+    assert envelope_rows(mock) == [('Synthetic source', '0–60 V · 1 A · 60 W'), ('Synthetic load', 'constant current, up to 40 A'),
+                                   ('Protective limits', 'none — only the planning budget bounds the plan'),
+                                   ('Readback uncertainty', 'synthetic example specification, not an instrument')]
+    assert envelope_rows({**mock, 'protective_controls': {'source_current_limit_A': .5}})[2] == ('Protective limits', 'Supply current limit 0.5 A')
+    assert envelope_rows({})[0] == ('Synthetic source', '— · — · —'), 'never an invented envelope'
 
 
 def test_plan_panel_groups_skip_reasons_and_report_rows_use_local_time():
     preview = {'points': [{'status': 'executable', 'reason': 'ok'}, {'status': 'unsupported', 'reason': 'Above guard'},
                           {'status': 'unsupported', 'reason': 'Above guard'}, {'status': 'assumption_limited', 'reason': 'Budget'}]}
-    assert skip_reasons(preview) == [(2, 'Above guard'), (1, 'Budget')]
+    assert skip_reasons(preview) == [(2, 'unsupported', 'Above guard'), (1, 'assumption_limited', 'Budget')], 'the planner word travels with the reason'
     job = {'job_id': 'j1', 'state': 'completed', 'mode': 'real', 'dut_model': '12T12-4A', 'recipe_id': 'real-24v-small-grid',
            'recipe_title': 'old name', 'created_utc': '2026-09-29T20:37:14+00:00', 'run_dir': '/w/r',
            'progress': {'completed': 3, 'total': 3}, 'report_dir': '/w/r/reports/r0001',
            'report_artifacts': {'html': {'status': 'success'}, 'pdf': {'status': 'success'}, 'model': {'status': 'success'}}}
     [row] = report_rows([job], zone=LOS_ANGELES, recipes={'real-24v-small-grid': {'title': '24 V small grid', 'tests': []}})
-    assert row['when'] == '13:37:14 PDT (2026-09-29)' and row['run'] == '12T12-4A · 24 V small grid' and row['bench'] == 'Real'
+    assert row['when'] == '13:37:14 PDT (2026-09-29)' and row['run'] == '12T12-4A · 24 V small grid'
+    assert row['bench'] == 'Real bench · measured' and row['real'] and row['waiting'] == ''
     assert row['status'] == 'Complete' and row['points'] == '3 / 3 points' and row['regenerate'] and not row['dequeue']
     assert row['links'] == [('Open HTML', 'report/report.html'), ('Open PDF', 'report/report.pdf')], 'the JSON model stays on the run panel'
     [fallback] = report_rows([{**job, 'recipe_id': 'deleted'}], zone=LOS_ANGELES)
     assert fallback['run'] == '12T12-4A · old name', 'a deleted test keeps the name recorded at Start'
     [legacy] = report_rows([{'job_id': 'j0', 'state': 'acquiring', 'mode': 'mock', 'dut_model': '12T12-4A'}], zone=LOS_ANGELES)
-    assert legacy['run'] == '12T12-4A' and legacy['when'] == 'unknown' and legacy['bench'] == 'Simulated'
+    assert legacy['run'] == '12T12-4A' and legacy['when'] == 'unknown' and legacy['bench'] == 'Simulation · synthetic data' and not legacy['real']
     assert not legacy['regenerate'] and legacy['status'] == 'Acquiring measurements'
-    [queued] = report_rows([{'job_id': 'j2', 'state': 'report-queued', 'mode': 'mock', 'dut_model': 'X', 'run_dir': '/w/r'}], zone=LOS_ANGELES)
+    [queued] = report_rows([{'job_id': 'j2', 'state': 'report-queued', 'mode': 'mock', 'dut_model': 'X', 'run_dir': '/w/r',
+                             'deferred_reason': 'MemAvailable below 150 MiB', 'deferred_memory': {'available_mib': 96.}}], zone=LOS_ANGELES)
     assert queued['dequeue'] and not queued['regenerate']
+    assert queued['waiting'] == 'Waiting for free memory: 96 MiB available, 150 MiB needed', 'QA m4: the row shows the deferral'
+    assert run_option_text({**job, 'created_utc': None}) == '12T12-4A · Real bench · measured · Complete'
+    assert run_option_text(legacy | {'created_utc': None, 'dut_model': '12T12-4A', 'state': 'completed', 'mode': 'mock'}) == \
+        '12T12-4A · Simulation · synthetic data · Complete'
+
+
+def test_bench_job_prefers_a_working_job_then_the_oldest_queued_report():
+    """QA M1: what a tab attaches to when it has no job of its own."""
+    working = {'job_id': 'j3', 'state': 'acquiring'}
+    older = {'job_id': 'j1', 'state': 'report-queued', 'queued_utc': '2026-09-30T10:00:00+00:00'}
+    newer = {'job_id': 'j2', 'state': 'report-queued', 'queued_utc': '2026-09-30T11:00:00+00:00'}
+    done = {'job_id': 'j0', 'state': 'completed'}
+    assert bench_job([working, newer, older, done]) is working
+    assert bench_job([newer, older, done]) is older, 'the dispatcher renders the oldest queued report first'
+    assert bench_job([done]) is None and bench_job([]) is None
+    assert sequence_step({'mode': 'mock', 'state': 'acquiring'}) == 0
+    assert sequence_step({'mode': 'mock', 'state': 'report-queued'}) == 1
+    assert sequence_step({'mode': 'mock', 'state': 'queued', 'action': 'report-only'}) == 2
+    assert sequence_step({'mode': 'mock', 'state': 'reporting'}) == 2 and sequence_step({'mode': 'mock', 'state': 'completed'}) == 3
+    assert sequence_step({'mode': 'real', 'state': 'acquiring'}) is None and sequence_step({'mode': 'mock', 'state': 'failed'}) is None
+    assert [label for label, _ in SIMULATION_SEQUENCE] == ['Acquiring measurements', 'Measurements saved — report queued',
+                                                            'Preparing HTML and PDF', 'Complete']
 
 
 # --- The rendered page, driven through its own handlers and poll --------------
@@ -406,7 +506,8 @@ def snapshot(job_id, state, **extra):
             'created_utc': '2026-09-29T20:40:12+00:00', 'error': None, 'run_dir': None, 'report_dir': None,
             'progress': {'completed': 1, 'total': 4, 'current': 'p2'}, 'latest': {}, 'shutdown': {},
             'report_artifacts': {}, 'elapsed_s': 12., 'latest_age_s': 1., 'latest_kind': 'unqualified live readings',
-            'deferred_reason': None, 'report_pending': False, 'cancel_requested': False, 'events': []}
+            'deferred_reason': None, 'deferred_memory': None, 'dequeued': False, 'report_pending': False,
+            'cancel_requested': False, 'events': []}
     return {**base, **extra}
 
 
@@ -433,20 +534,31 @@ async def open_bench_page(monkeypatch, tmp_path, snapshots):
     created, timers, notices, errors = [], [], [], []
 
     class FakeService(JobService):
-        """Real seeded mock profiles; job status comes from the test's dictionaries."""
+        """Real seeded mock profiles; job status comes from the test's dictionaries (plus any job a test really starts)."""
 
         def __init__(self, root, inventory_path=None, gate=None):
             super().__init__(root, inventory_path=inventory_path)
             self.list_jobs_calls = 0
             self.cancelled = []
+            self.retried = []
             created.append(self)
 
         def status(self, job_id):
-            return copy.deepcopy(snapshots[job_id])
+            if job_id in snapshots:
+                return copy.deepcopy(snapshots[job_id])
+            return super().status(job_id)
+
+        def _all_jobs(self):
+            return [self.status(job_id) for job_id in sorted(snapshots, reverse=True)] + super().list_jobs()
 
         def list_jobs(self):
             self.list_jobs_calls += 1
-            return [self.status(job_id) for job_id in sorted(snapshots, reverse=True)]
+            return self._all_jobs()
+
+        def active_job(self):
+            # The cheap per-tick probe, from the same dictionaries; never counted as a list_jobs call.
+            job = bench_job(self._all_jobs())
+            return {'job_id': job['job_id'], 'state': job['state'], 'mode': job.get('mode')} if job else None
 
         def dispatch_reports(self):
             return None
@@ -456,13 +568,19 @@ async def open_bench_page(monkeypatch, tmp_path, snapshots):
             snapshots[job_id]['cancel_requested'] = True
             return self.status(job_id)
 
+        def retry_report(self, job_id, annotations=None):
+            self.retried.append(job_id)
+            snapshots[job_id].update(state='report-queued', report_dir=None, report_artifacts={})
+            return {'job_id': job_id, 'state': 'report-queued'}
+
     async def inline(callback, *args, **kwargs):
         return callback(*args, **kwargs)
+    kinds = []
     monkeypatch.setattr(ui, 'run', lambda *args, **kwargs: None)
     monkeypatch.setattr(app, 'timer', lambda *args, **kwargs: None)
     monkeypatch.setattr(app, 'handle_exception', lambda exc: errors.append(exc))
     monkeypatch.setattr(ui, 'timer', lambda interval, callback, **kwargs: timers.append(callback))
-    monkeypatch.setattr(ui, 'notify', lambda message, **kwargs: notices.append(str(message)))
+    monkeypatch.setattr(ui, 'notify', lambda message, **kwargs: (notices.append(str(message)), kinds.append(kwargs.get('type'))))
     monkeypatch.setattr(run, 'io_bound', inline)
     # Async click/change handlers become background tasks on the NiceGUI loop; point it at ours.
     monkeypatch.setattr(core, 'loop', asyncio.get_running_loop())
@@ -479,7 +597,31 @@ async def open_bench_page(monkeypatch, tmp_path, snapshots):
     # run-time settings that only ``ui.run`` (stubbed above) configures. The element tree
     # is what the tests read, so the delivery loop is stopped.
     client.outbox.stop()
-    return SimpleNamespace(client=client, poll=timers[-1], notices=notices, service=created[-1], errors=errors)
+    return SimpleNamespace(client=client, poll=timers[-1], notices=notices, notice_kinds=kinds, service=created[-1], errors=errors)
+
+
+async def open_page(monkeypatch, tmp_path, path):
+    """Render another registered page ('/glossary') the same way; run_ui must already have been called."""
+    from nicegui.client import Client
+    from nicegui.page import page
+    func = [func for func, route in Client.page_routes.items() if route == path][-1]
+    client = Client(page(path))
+    client.tab_id = 'test-tab'
+    with client:
+        await func()
+    client.outbox.stop()
+    return client
+
+
+async def click_twice(element):
+    """Two clicks that both reach the handler before either finishes: a double click."""
+    from nicegui.events import GenericEventArguments, handle_event
+    listeners = [listener for listener in element._event_listeners.values() if listener.type.startswith('click')]
+    assert listeners, f'{element} has no click handler'
+    for _ in range(2):
+        for listener in listeners:
+            handle_event(listener.handler, GenericEventArguments(sender=element, client=element.client, args={}))
+    await settle()
 
 
 async def settle():
@@ -496,9 +638,19 @@ async def settle():
     raise AssertionError('background handlers did not settle')
 
 
+def click_target(element):
+    """The element whose click listener a browser click on ``element`` reaches: itself, or (for a card) its face button,
+    the first descendant that listens (the "⋯" menu comes after it in document order)."""
+    if any(listener.type.startswith('click') for listener in element._event_listeners.values()):
+        return element
+    return next((child for child in descendants(element)
+                 if any(listener.type.startswith('click') for listener in child._event_listeners.values())), element)
+
+
 async def click(element):
     """Fire the element's click listener the way the browser would, then let async handlers finish."""
     from nicegui.events import GenericEventArguments, handle_event
+    element = click_target(element)
     listeners = [listener for listener in element._event_listeners.values() if listener.type.startswith('click')]
     assert listeners, f'{element} has no click handler'
     for listener in listeners:
@@ -571,7 +723,23 @@ def card_named(client, title):
 
 
 def link_in(card, label):
-    return next(child for child in descendants(card) if child.tag == 'q-btn' and child._props.get('label') == label)
+    """A card action: an item of the card's "⋯" menu (Rename, Duplicate, Edit, Delete); the item carries the click listener."""
+    return next(child for child in descendants(card) if child.tag == 'q-item'
+                and any(grandchild.tag == 'q-item-section' and grandchild.text == label for grandchild in descendants(child)))
+
+
+def menu_items(card):
+    return [child.text for child in descendants(card) if child.tag == 'q-item-section']
+
+
+def iso_rows(service, system='12V'):
+    """The catalog's own rows for the seeded converter on the simulated bench: the tests derive their expectations
+    from them so they hold for the catalog version in this checkout and for the mock-only / after-approval one."""
+    return clause_rows(service.load_profile('bench', 'mock-dp821-envelope'), service.load_profile('dut', '12t12-4a'), system)
+
+
+def default_ticked(row):
+    return bool(row.get('ticked_by_default', row['badge'] == 'runs_here')) and row['tickable']
 
 
 def ancestors(element):
@@ -596,16 +764,19 @@ def test_header_shows_background_activity_until_the_job_settles(tmp_path, monkey
                 assert pill.visible, 'the page attached to the active job on load and polled it'
                 assert not find(client, css='bench-idle').visible
                 phrase, detail = texts(pill)
-                assert phrase == 'Acquiring… point 2 of 4'
+                assert phrase == 'Simulation: Acquiring… point 2 of 4', 'the mode word leads (C34)'
                 assert detail.startswith('12T12-4A · started ' + local_time_text('2026-09-29T20:40:12+00:00') + ' · elapsed ')
                 questions = find_all(client, css='bench-question')
                 assert len(questions) == 3 and all('bench-locked' in q.classes for q in questions), 'the three questions are locked while a job runs'
-                for state_name, expected in (('queued', 'Queued — waiting for the worker to start'),
-                                             ('reporting', 'Generating report…'),
-                                             ('report-queued', 'Report queued — starts when the bench is idle')):
+                assert find(client, css='bench-bar-hint').text == 'Locked while a test runs on the bench. Start returns when it has finished.'
+                for state_name, expected in (('queued', 'Simulation: Queued — waiting for the worker to start'),
+                                             ('reporting', 'Simulation: Generating report…'),
+                                             ('report-queued', 'Simulation: Report queued — starts when the bench is idle')):
                     snapshots['job-1']['state'] = state_name
                     await poll()
                     assert pill.visible and texts(pill)[0] == expected, state_name
+                assert not any('bench-locked' in q.classes for q in find_all(client, css='bench-question')), \
+                    'a queued report does not hold the bench: a new test may start meanwhile'
                 snapshots['job-1'].update(REPORT_DONE)
                 await poll()
                 assert not pill.visible, 'nothing runs in the background any more'
@@ -630,7 +801,7 @@ def test_reports_follow_the_job_without_pressing_refresh(tmp_path, monkeypatch):
                 reports = find(client, css='bench-reports')
                 assert 'Acquiring measurements' in texts(reports)
                 assert local_time_text('2026-09-29T20:40:12+00:00') in texts(reports), 'rows show the local start time'
-                assert '12T12-4A' in texts(reports) and 'Simulated' in texts(reports)
+                assert '12T12-4A' in texts(reports) and 'Simulation · synthetic data' in texts(reports)
                 listed = service.list_jobs_calls
                 snapshots['job-1']['progress'] = {'completed': 3, 'total': 4, 'current': 'p4'}
                 await poll()
@@ -682,7 +853,7 @@ def test_page_asks_three_questions_then_preview_and_start(tmp_path, monkeypatch)
                 for heading in ('Which converter?', 'Simulated or real bench?', 'Which test?', 'Reports'):
                     assert heading in shown
                 assert not find_all(client, tag='q-tab'), 'no tabs any more'
-                assert find(client, css='bench-summary-text').text == f'12T12-4A · Simulated bench · {QUICK_TITLE}'
+                assert find(client, css='bench-summary-text').text == f'12T12-4A · Simulation · {QUICK_TITLE}'
                 titles = [name for name, _ in cards(client)]
                 assert titles[:3] == ['12T12-4A', SMALL_GRID_TITLE, QUICK_TITLE], 'converter first, then tests by title'
                 assert titles[3:] == ['ISO 16750-2:2023 — electrical loads', 'ISO 7637-2:2011 — conducted transients', 'CISPR 25:2021 — emissions',
@@ -695,24 +866,38 @@ def test_page_asks_three_questions_then_preview_and_start(tmp_path, monkeypatch)
                 assert 'selected' in quick.classes and '12 / 24 / 30 V × 0–1 A' in texts(quick) and '21 points · simulated' in texts(quick)
                 small = card_named(client, SMALL_GRID_TITLE)
                 assert 'selected' not in small.classes and '24 V × 0.1 / 0.25 / 0.5 A' in texts(small) and '3 points · simulated' in texts(small)
-                assert [link._props['label'] for link in descendants(quick) if link.tag == 'q-btn'] == ['Rename', 'Duplicate', 'Edit', 'Delete']
-                assert [link._props['label'] for link in descendants(converter) if link.tag == 'q-btn'] == ['Rename', 'Edit', 'Delete']
+                assert menu_items(quick) == ['Rename', 'Duplicate', 'Edit', 'Delete'], 'one ⋯ menu per card, not nested buttons'
+                assert menu_items(converter) == ['Rename', 'Edit', 'Delete']
+                face = next(child for child in descendants(quick) if 'bench-card-select' in child.classes)
+                assert face.tag == 'button' and face._props.get('aria-pressed') == 'true', 'the card face is a real button (Enter and Space work)'
+                assert not any(child.tag == 'q-btn' for child in descendants(face)), 'nothing interactive inside the button'
                 assert 'Normal operating voltage' in shown, 'tests are grouped by category'
                 assert [texts(add)[0] for add in find_all(client, css='bench-add')] == ['+ Add a converter', '+ New test']
+                assert all(add.tag == 'button' for add in find_all(client, css='bench-add'))
+                assert titles.index(ISO_TITLE) > titles.index(QUICK_TITLE) and \
+                    texts(client.layout).index('+ New test') < texts(client.layout).index('Automotive supply standards'), '+ New test sits with the saved tests'
                 sim, real = find_all(client, css='bench-tile')
                 assert 'selected' in sim.classes and 'selected' not in real.classes
-                assert texts(real)[0] == 'Real bench' and texts(real)[1].startswith('supply CH1 + load.')
+                group = sim.parent_slot.parent
+                assert group._props.get('role') == 'radiogroup' and sim._props.get('role') == 'radio' and real._props.get('role') == 'radio'
+                assert texts(sim)[0] == 'Simulation' and texts(real)[0] == 'Real bench' and texts(real)[1].startswith('supply CH1 + load.')
                 pill = find(client, css='bench-pill')
                 assert pill._props['label'] == '24 V converter tests' and 'on' in pill.classes, 'the seeded preset by its plain name'
+                assert pill._props.get('text-color') == 'white' and 'flat' not in pill._props, 'B1: the selected pill label is readable'
                 limits = texts(find(client, css='bench-limits'))
                 assert limits == ['Supply current limit', '1 A', 'Input over-voltage', '26 V', 'Output voltage guard', '13.2 V',
                                   'Output current guard', '2.55 A'], 'protective limits are always visible'
                 approve = checkbox(client, 'I reviewed these limits — required once')
                 assert approve.value is False
-                start, preview = button(client, 'Start simulated test'), button(client, 'Preview')
+                assert any(listener.type == 'click.stop' for listener in approve._event_listeners.values()), \
+                    'M7: ticking the approval never also switches the bench tile'
+                start, preview = button(client, 'Start simulation'), button(client, 'Preview')
                 assert not start.enabled and preview.enabled
-                assert find(client, css='bench-bar-summary').text == f'12T12-4A · Simulated bench · {QUICK_TITLE}'
+                assert find(client, css='bench-bar-hint').text == 'Preview first — Start unlocks after a fresh plan.', 'M8: a disabled Start says why'
+                assert find(client, css='bench-bar-summary').text == f'12T12-4A · Simulation · {QUICK_TITLE}'
                 assert not find(client, css='bench-plan').visible
+                footer_links = [child for child in descendants(client.layout) if child.tag == 'nicegui-link']
+                assert any(link._props.get('href') == '/glossary' for link in footer_links), 'the footer links the glossary'
             assert page.errors == []
         finally:
             client.delete()
@@ -726,26 +911,35 @@ def test_card_selection_updates_the_summary_and_any_change_makes_the_plan_stale(
         try:
             with client:
                 await click(card_named(client, SMALL_GRID_TITLE))
-                assert find(client, css='bench-summary-text').text == f'12T12-4A · Simulated bench · {SMALL_GRID_TITLE}'
+                assert find(client, css='bench-summary-text').text == f'12T12-4A · Simulation · {SMALL_GRID_TITLE}'
                 assert 'selected' in card_named(client, SMALL_GRID_TITLE).classes and 'selected' not in card_named(client, QUICK_TITLE).classes
                 await click(button(client, 'Preview'))
                 plan = find(client, css='bench-plan')
                 assert plan.visible and 'stale' not in plan.classes
                 shown = texts(plan)
                 assert 'Points that will run' in shown and '3 / 3' in shown and 'Skipped' in shown and '0' in shown
-                assert 'Simulated — nothing switched on' in shown and 'simulated · seconds' in shown
-                assert 'Ready. HTML and PDF reports are generated automatically after acquisition.' in shown
+                assert 'Simulation — nothing switched on' in shown and SIMULATION_TIME_ESTIMATE in shown, 'an estimate, not a placeholder'
+                assert 'Ready. After Start you will see:' in shown, 'C26/C36: what follows Start is spelled out'
+                for index, (label, timing) in enumerate(SIMULATION_SEQUENCE):
+                    assert f'{label} — {timing}' in shown and str(index + 1) in shown
                 assert 'Before Start' not in shown
-                assert button(client, 'Start simulated test').enabled
+                assert button(client, 'Start simulation').enabled and not find(client, css='bench-bar-hint').visible
                 assert (tmp_path / 'workspace' / 'previews').is_dir() and list((tmp_path / 'workspace' / 'previews').iterdir())
                 await click(card_named(client, QUICK_TITLE))
                 assert 'Settings changed — Preview again before starting.' in texts(plan) and 'stale' in plan.classes
-                assert not button(client, 'Start simulated test').enabled
+                assert not button(client, 'Start simulation').enabled
                 await click(button(client, 'Preview'))
                 shown = texts(plan)
                 assert '19 / 21' in shown and '2' in shown and 'Why points are skipped' in shown
-                assert any(text.startswith('2 points skipped: Requested load exceeds the planning budget') for text in shown)
-            assert page.errors == [] and not any('negative' in n for n in page.notices)
+                assert any(text.startswith('2 points assumption_limited: Requested load exceeds the planning budget') for text in shown), \
+                    "C24: the planner's word, the same as the CLI"
+                legend = [child.content for child in descendants(plan) if child.tag == 'div' and 'bench-legend' in child.classes for child in descendants(child) if hasattr(child, 'content')]
+                assert legend == [f'<code>{status}</code>' for status, _ in PLAN_STATUS_LEGEND], 'the legend explains every planner word once'
+                assert all(meaning in shown for _, meaning in PLAN_STATUS_LEGEND)
+                from nicegui import ui
+                table = next(child for child in descendants(plan) if isinstance(child, ui.table))
+                assert [column['classes'] for column in table._props['columns']] == ['nowrap', 'nowrap', 'nowrap', 'nowrap', ''], 'only Reason wraps'
+            assert page.errors == [] and 'negative' not in page.notice_kinds
         finally:
             client.delete()
     asyncio.run(scenario())
@@ -763,7 +957,7 @@ def test_real_bench_changes_the_start_label_and_lists_what_blocks_a_real_start(t
                 sim, real = find_all(client, css='bench-tile')
                 assert 'selected' in real.classes and 'selected' not in sim.classes
                 start = button(client, 'Start test on the real bench')
-                assert not start.enabled and not find_all(client, tag='q-btn', label='Start simulated test')
+                assert not start.enabled and not find_all(client, tag='q-btn', label='Start simulation')
                 assert find(client, css='bench-summary-text').text == f'12T12-4A · Real bench (24 V converter tests) · {QUICK_TITLE}'
                 approve = checkbox(client, 'I reviewed these limits — required once')
                 assert 'bench-approve-missing' in approve.classes
@@ -776,8 +970,9 @@ def test_real_bench_changes_the_start_label_and_lists_what_blocks_a_real_start(t
                 assert any('real_hardware_enabled is false' in text for text in shown)
                 assert any('protective_controls.approved is false' in text for text in shown)
                 assert any('Configure the private bench inventory before a real run' in text for text in shown)
-                assert any(text.startswith('Real — ') for text in shown) and 'Limits: 1 A supply · 26 V input · 13.2 V / 2.55 A output' in shown
+                assert any(text.startswith('Real bench — ') for text in shown) and 'Limits: 1 A supply · 26 V input · 13.2 V / 2.55 A output' in shown
                 assert not button(client, 'Start test on the real bench').enabled
+                assert find(client, css='bench-bar-hint').text == 'The plan cannot start: see the Before Start list in the Plan panel.'
                 approve.set_value(True)
                 await settle()
                 assert service.load_profile('bench', 'rigol-local-limited')['protective_controls']['approved'] is True
@@ -810,7 +1005,7 @@ def test_stop_is_a_two_step_control_at_the_far_right_of_the_header(tmp_path, mon
                 assert stop_area.visible and any('bench-header' in a.classes for a in ancestors(stop_area))
                 assert not find_all(client, tag='q-btn', label='Stop test safely')
                 bar = find(client, css='bench-bar')
-                assert not button(client, 'Start simulated test').enabled
+                assert not button(client, 'Start simulation').enabled
                 assert not any(b._props.get('label', '').startswith('Stop') for b in descendants(bar)), 'Stop never sits where Start was'
                 await click(button(client, 'Stop…'))
                 assert service.cancelled == [], 'the first step only arms'
@@ -818,10 +1013,10 @@ def test_stop_is_a_two_step_control_at_the_far_right_of_the_header(tmp_path, mon
                 await click(button(client, 'Keep running'))
                 assert service.cancelled == [] and button(client, 'Stop…') and not find_all(client, tag='q-btn', label='Confirm stop')
                 await click(button(client, 'Stop…'))
-                await click(button(client, 'Confirm stop'))
-                assert service.cancelled == ['job-1']
+                await click_twice(button(client, 'Confirm stop'))
+                assert service.cancelled == ['job-1'], 'QA M3: Confirm stop is single-shot; a double click asks the service once'
                 assert 'Stop requested — waiting for the worker' in texts(stop_area)
-                assert texts(find(client, css='bench-activity'))[0].startswith('Stopping…')
+                assert texts(find(client, css='bench-activity'))[0] == 'Simulation: Stopping… waiting for both outputs to be verified OFF'
                 snapshots['job-1'].update(state='cancelled', cancel_requested=False, run_dir='/w/jobs/job-1/runs/r-0001',
                                           acquisition_cancelled=True, acquisition_cancelled_utc='2026-09-29T20:40:15+00:00')
                 await poll()
@@ -901,7 +1096,7 @@ def test_a_test_the_planner_cannot_run_on_the_selected_bench_is_greyed_with_the_
                 await click(button(client, 'Preview'))
                 shown = texts(find(client, css='bench-plan'))
                 assert '0 / 7' in shown and 'No feasible point is available' in shown
-                assert not button(client, 'Start simulated test').enabled
+                assert not button(client, 'Start simulation').enabled
             assert page.errors == []
         finally:
             client.delete()
@@ -964,11 +1159,16 @@ def test_standards_group_lists_every_standard_and_greys_those_not_on_this_bench(
                               'ISO 10605:2023 — electrostatic discharge', 'ISO 16750-3:2023 — mechanical loads', 'ISO 16750-4:2023 — climatic loads'):
                     other = card_named(client, title)
                     assert 'greyed' in other.classes and 'selected' not in other.classes
-                    assert any(text.startswith('Cannot run on this bench: ') for text in texts(other))
+                    assert any(text.startswith('Not on this bench: ') for text in texts(other))
                 transients = card_named(client, 'ISO 7637-2:2011 — conducted transients')
-                assert any('transient pulse generator' in text and 'different laboratory' in text for text in texts(transients))
+                assert any(text.startswith('Not on this bench: ') and 'transient' in text for text in texts(transients)), \
+                    'UX M6: another laboratory is a grey fact, not a red operator error'
+                assert not any('bench-card-reason' in child.classes for child in descendants(transients))
                 iso = card_named(client, ISO_TITLE)
-                assert 'greyed' not in iso.classes and '3 of 19 clauses runnable on this bench' in texts(iso) and '12 V system' in texts(iso)
+                rows = iso_rows(page.service)
+                now = sum(1 for row in rows if row['badge'] == 'runs_here')
+                assert 'greyed' not in iso.classes and '12 V system' in texts(iso)
+                assert any(str(now) in text and 'runnable now' in text for text in texts(iso)), texts(iso)
                 assert not find_all(client, tag='q-checkbox', text='§4.2 Direct current (DC) supply voltage'), 'folded until selected'
             assert page.errors == []
         finally:
@@ -985,27 +1185,32 @@ def test_iso_card_expands_into_a_clause_checklist_with_one_badge_per_status(tmp_
                 await click(card_named(client, ISO_TITLE))
                 assert 'selected' in card_named(client, ISO_TITLE).classes
                 shown = texts(client.layout)
-                assert '3 of 19 clauses runnable on this bench' in shown
-                for number in ('4.2', '4.5', '4.6.2'):
-                    box = clause_box(client, number)
-                    assert box.value is True and box.enabled, f'§{number} is ticked by selecting the standard'
-                    assert badge_of(client, number).text == 'runs here' and 'bench-badge-ok' in badge_of(client, number).classes
-                for number, label, note in (('4.3.1.1', 'procedure not yet implemented', '60-min hold exceeds the 540 s run budget; needs a long-hold procedure'),
-                                            ('4.6.1.2', 'procedure not yet implemented', '>=1 s interruptions only (source output switched off at the command cadence); needs an interruption procedure')):
+                rows = {row['number']: row for row in iso_rows(page.service)}
+                now = sum(1 for row in rows.values() if row['badge'] == 'runs_here')
+                later = sum(1 for row in rows.values() if row['tickable'] and row['badge'] != 'runs_here')
+                assert f'{now} of 19 clauses runnable now on this bench' + (f' · {later} after approval' if later else '') in shown
+                assert rows['4.2']['badge'] == 'runs_here' and clause_box(client, '4.2').value is True
+                for number, row in rows.items():
                     box, badge = clause_box(client, number), badge_of(client, number)
-                    assert box.value is False and not box.enabled and box._props.get('disable') is True
-                    assert badge.text == label and 'bench-badge-partial' in badge.classes
-                    assert note in texts(clause_row(client, number))
-                for number, label in (('4.3.2', 'needs ms pulse generator'), ('4.6.4', 'excluded by policy'), ('4.7', 'excluded by policy'),
-                                      ('4.11', 'not on this bench'), ('4.6.1.1', 'needs 10 ms edges, ms pulse generator')):
-                    box, badge = clause_box(client, number), badge_of(client, number)
-                    assert not box.enabled and box.value is False, f'§{number} cannot be ticked'
-                    assert badge.text == label and 'bench-badge-grey' in badge.classes
-                    assert any(text.endswith('.') and len(text) > 40 for text in texts(clause_row(client, number))), 'the reason sentence is shown'
-                assert 'Load dump is a fault-injection overvoltage transient that this release does not perform (implementation brief §2 and §7.5).' in texts(clause_row(client, '4.6.4'))
+                    assert badge.text == row['badge_label'], f'§{number} shows the catalog status word as it comes'
+                    assert box.enabled is row['tickable']
+                    # B3: only a clause that runs here now is ticked by selecting the standard and badged green;
+                    # a clause that needs an approval first is amber and left unticked for the operator.
+                    assert box.value is default_ticked(row), f'§{number} default tick'
+                    if row['badge'] == 'runs_here':
+                        assert 'bench-badge-ok' in badge.classes
+                    elif row['tickable'] or row['badge'] == 'procedure_pending':
+                        assert 'bench-badge-partial' in badge.classes, f'§{number} is never green'
+                    else:
+                        assert 'bench-badge-grey' in badge.classes and box._props.get('disable') is True
+                        assert any(text.endswith('.') and len(text) > 40 for text in texts(clause_row(client, number))), 'the reason sentence is shown'
+                    if row.get('needs_approval') and row.get('approval'):
+                        assert any(row['approval'] in text for text in texts(clause_row(client, number))), 'where approval is recorded is said on the row'
+                assert badge_of(client, '4.3.1.1').text == 'procedure not yet implemented' and not clause_box(client, '4.3.1.1').enabled
+                assert rows['4.3.1.1']['text'] in texts(clause_row(client, '4.3.1.1'))
+                assert badge_of(client, '4.6.4').text == 'excluded by policy' and rows['4.6.4']['text'] in texts(clause_row(client, '4.6.4'))
                 assert any('code C: UA 14 V, Usmin 9 V, Usmax 16 V' in text for text in texts(clause_row(client, '4.2')))
-                assert any(text.startswith('14 V → 1 V → 14 V at 0.5 V/min (20 mV every 2.4 s)') for text in texts(clause_row(client, '4.5')))
-                assert any("Levels below the DUT's stated 9 V minimum need the approved UVLO-style recipe" in text for text in texts(clause_row(client, '4.6.2')))
+                assert rows['4.5']['levels'] in texts(clause_row(client, '4.5'))
                 assert len(find_all(client, css='bench-clause-row')) == 19
                 assert button(client, 'Add as tests').enabled
                 await click(card_named(client, ISO_TITLE))
@@ -1029,13 +1234,15 @@ def test_system_toggle_switches_to_24_v_levels_and_is_remembered_on_the_converte
                 await settle()
                 assert service.load_profile('dut', '12t12-4a')['system_voltage_class'] == '24V', 'remembered on the converter profile'
                 assert '24 V system' in texts(card_named(client, ISO_TITLE))
+                rows = {row['number']: row for row in iso_rows(service, '24V')}
                 assert any('code E: UA 28 V, Usmin 10 V, Usmax 32 V' in text for text in texts(clause_row(client, '4.2')))
-                assert any(text.startswith('28 V → 1 V → 28 V at 0.5 V/min') for text in texts(clause_row(client, '4.5')))
-                assert badge_of(client, '4.3.1.1').text == 'outside DUT rating' and not clause_box(client, '4.3.1.1').enabled
+                assert rows['4.5']['levels'].startswith('28 V → 1 V → 28 V') and rows['4.5']['levels'] in texts(clause_row(client, '4.5'))
+                assert badge_of(client, '4.3.1.1').text == rows['4.3.1.1']['badge_label'] == 'outside DUT rating' and not clause_box(client, '4.3.1.1').enabled
                 assert any('36 V level' in text and 'equals the DUT ceiling' in text for text in texts(clause_row(client, '4.3.1.1')))
                 assert badge_of(client, '4.3.1.2').text == 'not applicable'
-                assert all(clause_box(client, n).value is True for n in ('4.2', '4.5', '4.6.2'))
-                assert '3 of 19 clauses runnable on this bench' in texts(client.layout)
+                assert all(clause_box(client, n).value is default_ticked(rows[n]) for n in ('4.2', '4.5', '4.6.2'))
+                now = sum(1 for row in rows.values() if row['badge'] == 'runs_here')
+                assert any(text.startswith(f'{now} of 19 clauses runnable now on this bench') for text in texts(client.layout))
             assert page.errors == []
             # A fresh page for the same converter opens on the remembered class.
             again = await open_bench_page(monkeypatch, tmp_path, {})
@@ -1056,6 +1263,8 @@ def test_add_as_tests_saves_one_recipe_per_ticked_runnable_clause_with_the_catal
         try:
             with client:
                 await click(card_named(client, ISO_TITLE))
+                # §4.5 is ticked explicitly (it is not pre-ticked once the catalog marks it approval-first); §4.6.2 is left out.
+                clause_box(client, '4.5').set_value(True)
                 clause_box(client, '4.6.2').set_value(False)
                 await settle()
                 await click(button(client, 'Add as tests'))
@@ -1088,7 +1297,42 @@ def test_add_as_tests_saves_one_recipe_per_ticked_runnable_clause_with_the_catal
                 await click(sweep_card)
                 await click(button(client, 'Preview'))
                 shown = texts(find(client, css='bench-plan'))
-                assert '9 / 9' in shown and button(client, 'Start simulated test').enabled
+                assert '9 / 9' in shown and button(client, 'Start simulation').enabled
+            assert page.errors == []
+        finally:
+            client.delete()
+    asyncio.run(scenario())
+
+
+def test_an_approval_first_clause_is_amber_unticked_and_names_where_approval_happens(tmp_path, monkeypatch):
+    """B3 at the page: whatever the catalog version, a tickable clause that is not "runs here" is never pre-ticked
+    or green, and the row says where its approval is recorded."""
+    import dcdc_bench.ui as ui_module
+    real_rows = ui_module.clause_rows
+    how = 'Approval happens in the saved recipe, not on the bench page: set authorization.uvlo_approved to true.'
+
+    def rows_with_approval_first(bench, dut, system):
+        rows = real_rows(bench, dut, system)
+        for row in rows:
+            if row['number'] == '4.5':
+                row.update(badge='runs_after_approval', badge_label='runs here after approval', tickable=True,
+                           ticked_by_default=False, needs_approval=True, approval=how, text=how)
+        return rows
+    monkeypatch.setattr(ui_module, 'clause_rows', rows_with_approval_first)
+
+    async def scenario():
+        page = await open_bench_page(monkeypatch, tmp_path, {})
+        client = page.client
+        try:
+            with client:
+                await click(card_named(client, ISO_TITLE))
+                box, badge = clause_box(client, '4.5'), badge_of(client, '4.5')
+                assert box.enabled and box.value is False, 'tickable but not ticked by selecting the standard'
+                assert badge.text == 'runs here after approval' and 'bench-badge-partial' in badge.classes and 'bench-badge-ok' not in badge.classes
+                assert any(how in text for text in texts(clause_row(client, '4.5'))), 'where approval is recorded is said on the row'
+                assert clause_box(client, '4.2').value is True and 'bench-badge-ok' in badge_of(client, '4.2').classes
+                footer = find(client, css='bench-checklist-footer').text
+                assert footer == '2 of 19 clauses runnable now on this bench · 1 after approval', footer
             assert page.errors == []
         finally:
             client.delete()
@@ -1097,10 +1341,10 @@ def test_add_as_tests_saves_one_recipe_per_ticked_runnable_clause_with_the_catal
 
 # --- Concurrency at the page: a second tab that never saw the running job -------------------------
 
-def test_start_from_a_tab_that_missed_another_tabs_job_is_refused_and_launches_nothing(tmp_path, monkeypatch):
+def test_start_from_a_tab_that_missed_another_tabs_job_is_refused_and_marks_the_plan_stale(tmp_path, monkeypatch):
     """Tab B previewed while idle; Tab A then started a job. Tab B's Start must be refused by the
-    service and must not create a job directory or launch a worker. (Tab B's page state is not
-    pinned here: it only learns about jobs it polls; see docs/simulation-review/qa.md.)"""
+    service, must not create a job directory or launch a worker, and (QA m1) must leave the plan
+    stale so the same refused plan cannot be re-armed without a new Preview."""
     snapshots = {}
 
     async def scenario():
@@ -1109,15 +1353,407 @@ def test_start_from_a_tab_that_missed_another_tabs_job_is_refused_and_launches_n
         try:
             with client:
                 await click(button(client, 'Preview'))
-                assert button(client, 'Start simulated test').enabled
+                assert button(client, 'Start simulation').enabled
                 # Another tab (or the CLI) started a job after this tab's preview.
                 snapshots['job-2'] = snapshot('job-2', 'acquiring')
                 monkeypatch.setattr('dcdc_bench.job_service.subprocess.Popen',
                                     lambda *a, **k: pytest.fail('a refused start must not launch a worker'))
-                await click(button(client, 'Start simulated test'))
+                await click(button(client, 'Start simulation'))
                 assert any('already acquiring or reporting' in notice for notice in page.notices), page.notices
                 assert list((tmp_path / 'workspace' / 'jobs').iterdir()) == [], 'no job directory was created'
+                plan = find(client, css='bench-plan')
+                assert 'stale' in plan.classes and 'Start was refused — Preview again before starting.' in texts(plan)
+                assert not button(client, 'Start simulation').enabled
             assert page.errors == []
         finally:
             client.delete()
+    asyncio.run(scenario())
+
+
+def test_an_idle_tab_discovers_a_job_started_elsewhere_within_one_poll(tmp_path, monkeypatch):
+    """QA M1 (b, c): a tab with no job of its own follows the bench on the next tick — header, lock, Stop — and unlocks when it ends."""
+    snapshots = {}
+
+    async def scenario():
+        page = await open_bench_page(monkeypatch, tmp_path, snapshots)
+        client, poll = page.client, page.poll
+        try:
+            with client:
+                await click(button(client, 'Preview'))
+                assert button(client, 'Start simulation').enabled and find(client, css='bench-idle').visible
+                snapshots['job-9'] = snapshot('job-9', 'acquiring')
+                await poll()
+                pill = find(client, css='bench-activity')
+                assert pill.visible and texts(pill)[0] == 'Simulation: Acquiring… point 2 of 4'
+                assert all('bench-locked' in q.classes for q in find_all(client, css='bench-question'))
+                assert not button(client, 'Start simulation').enabled and not button(client, 'Preview').enabled
+                assert find(client, css='bench-stop').visible and button(client, 'Stop…')
+                assert 'Acquiring measurements' in texts(find(client, css='bench-run-section')), 'the Run section shows the discovered job'
+                snapshots['job-9'].update(REPORT_DONE)
+                await poll()
+                assert not pill.visible and find(client, css='bench-idle').visible
+                assert not any('bench-locked' in q.classes for q in find_all(client, css='bench-question')), 'unlocked without Refresh saved runs'
+                assert button(client, 'Preview').enabled
+            assert page.errors == []
+        finally:
+            client.delete()
+    asyncio.run(scenario())
+
+
+def test_page_load_attaches_to_a_report_queued_job_and_shows_its_deferral_reason(tmp_path, monkeypatch):
+    """QA M1 (a) and m4: F5 while the report is queued (and held back by the memory gate) lands on the truth, in operator words."""
+    queued = snapshot('job-1', 'report-queued', run_dir='/w/jobs/job-1/runs/r-0001', queued_utc='2026-09-30T10:00:00+00:00',
+                      deferred_reason='MemAvailable below 150 MiB', deferred_utc='2026-09-30T10:00:30+00:00',
+                      deferred_memory={'available_mib': 96.4, 'available_plus_swap_free_mib': 900.})
+    snapshots = {'job-1': queued}
+
+    async def scenario():
+        page = await open_bench_page(monkeypatch, tmp_path, snapshots)
+        client, poll = page.client, page.poll
+        try:
+            with client:
+                pill = find(client, css='bench-activity')
+                assert pill.visible and texts(pill)[0] == 'Simulation: Report queued — waiting for free memory: 96 MiB available, 150 MiB needed'
+                run = texts(find(client, css='bench-run-section'))
+                assert 'Measurements saved — report queued' in run
+                assert any(text.endswith('Waiting for free memory: 96 MiB available, 150 MiB needed.') for text in run)
+                assert not any('MemAvailable' in text for text in run), 'no /proc field name on the page (the raw reason is a tooltip)'
+                assert 'Report queued: ' + local_time_text('2026-09-30T10:00:00+00:00') in run
+                assert 'Waiting for free memory: 96 MiB available, 150 MiB needed' in texts(find(client, css='bench-reports')), 'the Reports row says so too'
+                assert not any('bench-locked' in q.classes for q in find_all(client, css='bench-question')), 'a queued report does not lock the bench'
+                assert button(client, 'Remove from report queue')
+                # The current step of the simulation sequence is marked.
+                steps = find_all(client, css='bench-sequence-step')
+                assert [('current' in step.classes, 'done' in step.classes) for step in steps[-4:]] == [(False, True), (True, False), (False, False), (False, False)]
+                snapshots['job-1'].update(state='reporting', deferred_reason=None, deferred_memory=None, action='report-only')
+                await poll()
+                assert texts(pill)[0] == 'Simulation: Generating report…'
+                assert all('bench-locked' in q.classes for q in find_all(client, css='bench-question')), 'rendering holds the bench'
+            assert page.errors == []
+        finally:
+            client.delete()
+    asyncio.run(scenario())
+
+
+def test_an_older_report_rendering_after_a_new_start_drives_the_header_and_the_lock(tmp_path, monkeypatch):
+    """QA M1 family: the tab shows its own queued job while the dispatcher renders an older one; header, lock and Start follow the bench."""
+    snapshots = {'job-2': snapshot('job-2', 'report-queued', run_dir='/w/jobs/job-2/runs/r', queued_utc='2026-09-30T11:00:00+00:00'),
+                 'job-1': snapshot('job-1', 'reporting', run_dir='/w/jobs/job-1/runs/r', queued_utc='2026-09-30T10:00:00+00:00')}
+
+    async def scenario():
+        page = await open_bench_page(monkeypatch, tmp_path, snapshots)
+        client, poll = page.client, page.poll
+        try:
+            with client:
+                # The page attached to the working job (job-1); the operator views the newer queued run.
+                assert texts(find(client, css='bench-activity'))[0] == 'Simulation: Generating report…'
+                view = [b for b in find_all(client, tag='q-btn', label='View run')]
+                await click(view[0])  # rows are newest first: job-2
+                assert 'Measurements saved — report queued' in texts(find(client, css='bench-run-section'))
+                assert texts(find(client, css='bench-activity'))[0] == 'Simulation: Generating report…', 'the header follows the bench, not the displayed run'
+                assert all('bench-locked' in q.classes for q in find_all(client, css='bench-question')) and not button(client, 'Start simulation').enabled
+                snapshots['job-1'].update(REPORT_DONE)
+                await poll()
+                assert texts(find(client, css='bench-activity'))[0] == 'Simulation: Report queued — starts when the bench is idle'
+                assert not any('bench-locked' in q.classes for q in find_all(client, css='bench-question'))
+            assert page.errors == []
+        finally:
+            client.delete()
+    asyncio.run(scenario())
+
+
+def test_double_click_start_creates_one_job_and_no_error_toast(tmp_path, monkeypatch):
+    """QA m2: two Start clicks in one tick create one job and no red notice."""
+    async def scenario():
+        page = await open_bench_page(monkeypatch, tmp_path, {})
+        client = page.client
+        try:
+            with client:
+                await click(button(client, 'Preview'))
+                monkeypatch.setattr('dcdc_bench.job_service.subprocess.Popen', lambda *a, **k: SimpleNamespace(pid=None))
+                await click_twice(button(client, 'Start simulation'))
+                jobs = list((tmp_path / 'workspace' / 'jobs').iterdir())
+                assert len(jobs) == 1, 'one job'
+                assert 'negative' not in page.notice_kinds, page.notices
+                assert texts(find(client, css='bench-activity'))[0] == 'Simulation: Queued — waiting for the worker to start'
+                assert 'Test started — the header shows its progress. Preview again to plan another test.' in texts(find(client, css='bench-plan'))
+                run = texts(find(client, css='bench-run-section'))
+                assert 'Simulation · synthetic data · no instrument is touched' in run
+                assert SIMULATION_SEQUENCE[0][0] + ' — ' + SIMULATION_SEQUENCE[0][1] in run, 'what happens next, with the current step marked'
+                assert 'current' in find_all(client, css='bench-sequence-step')[-4].classes
+            assert page.errors == []
+        finally:
+            client.delete()
+    asyncio.run(scenario())
+
+
+def test_regenerate_report_is_single_shot(tmp_path, monkeypatch):
+    """QA m2: a double click on Regenerate report queues one rebuild."""
+    snapshots = {'job-1': snapshot('job-1', **REPORT_DONE)}
+
+    async def scenario():
+        page = await open_bench_page(monkeypatch, tmp_path, snapshots)
+        client, service = page.client, page.service
+        try:
+            with client:
+                again = button(client, 'Regenerate report')
+                assert again._props.get('aria-label') == 'Regenerate report'
+                await click_twice(again)
+                assert service.retried == ['job-1']
+                assert 'Measurements saved — report queued' in texts(find(client, css='bench-reports'))
+                assert not find_all(client, tag='q-btn', label='Regenerate report'), 'a queued job offers no second rebuild'
+                await click(button(client, 'Remove from report queue'))
+                assert service.cancelled == ['job-1']
+            assert page.errors == []
+        finally:
+            client.delete()
+    asyncio.run(scenario())
+
+
+def test_dequeued_job_does_not_claim_a_failed_report(tmp_path, monkeypatch):
+    """QA m7: a job the operator removed from the queue says so; nothing 'needs attention'."""
+    snapshots = {'job-1': snapshot('job-1', 'cancelled', run_dir='/w/jobs/job-1/runs/r-0001', dequeued=True,
+                                   error='Report generation was removed from the queue; saved measurements are preserved',
+                                   shutdown={role: {'state': 'OFF', 'verified': True} for role in ('source', 'load')})}
+
+    async def scenario():
+        page = await open_bench_page(monkeypatch, tmp_path, snapshots)
+        client = page.client
+        try:
+            with client:
+                await click(button(client, 'View run'))
+                run = texts(find(client, css='bench-run-section'))
+                assert 'Removed from the report queue' in run
+                assert any(text.startswith('Removed from the report queue: no report was generated and none failed.') for text in run)
+                assert not any('needs attention' in text for text in run)
+                assert 'Removed from the report queue' in texts(find(client, css='bench-reports'))
+                assert button(client, 'Regenerate report'), 'the saved measurements can still be rendered'
+            assert page.errors == []
+        finally:
+            client.delete()
+    asyncio.run(scenario())
+
+
+def test_completed_simulation_notes_that_its_uncertainty_is_synthetic(tmp_path, monkeypatch):
+    """C31: the ± in a simulated report comes from example specifications, and the page says so next to the links."""
+    snapshots = {'job-1': snapshot('job-1', **REPORT_DONE)}
+
+    async def scenario():
+        page = await open_bench_page(monkeypatch, tmp_path, snapshots)
+        client = page.client
+        try:
+            with client:
+                await click(button(client, 'View run'))
+                run = texts(find(client, css='bench-run-section'))
+                assert SYNTHETIC_UNCERTAINTY_NOTE in run and 'Complete' in run
+                assert 'not an instrument' in SYNTHETIC_UNCERTAINTY_NOTE
+                snapshots['job-1']['mode'] = 'real'
+                await click(button(client, 'View run'))
+                assert SYNTHETIC_UNCERTAINTY_NOTE not in texts(find(client, css='bench-run-section'))
+            assert page.errors == []
+        finally:
+            client.delete()
+    asyncio.run(scenario())
+
+
+# --- Simulation identity: the tiles say what each bench can and cannot do -----------------------
+
+def test_simulation_and_real_tiles_state_what_they_can_and_cannot_do(tmp_path, monkeypatch):
+    async def scenario():
+        page = await open_bench_page(monkeypatch, tmp_path, {})
+        client = page.client
+        try:
+            with client:
+                sim, real = find_all(client, css='bench-tile')
+                shown_sim, shown_real = texts(sim), texts(real)
+                assert shown_sim[0] == 'Simulation'
+                assert 'What the simulation can and cannot do' in shown_sim
+                for line in SIMULATION_CAN:
+                    assert '✓ ' + line in shown_sim
+                for line in SIMULATION_CANNOT:
+                    assert '✗ ' + line in shown_sim
+                assert any('SYNTHETIC' in line for line in SIMULATION_CAN) and any('no instrument' in line.lower() for line in SIMULATION_CAN)
+                assert any('cannot' in line.lower() or 'Measure your converter' in line for line in SIMULATION_CANNOT)
+                assert any('ripple' in line for line in SIMULATION_CANNOT) and any('± ' in line for line in SIMULATION_CANNOT)
+                # UX M1: the synthetic envelope that decides the plan is on the tile, in the real tile's anatomy.
+                envelope = texts(find_all(client, css='bench-limits')[0])
+                assert envelope[:2] == ['Synthetic source', '0–60 V · 1 A · 60 W'] and 'Protective limits' in envelope
+                assert 'What the real bench can and cannot do' in shown_real
+                for line in REAL_CAN:
+                    assert '✓ ' + line in shown_real
+                for line in REAL_CANNOT:
+                    assert '✗ ' + line in shown_real
+                assert any('48 W' in line for line in REAL_CANNOT) and any('unsupervised' in line for line in REAL_CANNOT)
+                assert any('approvals' in line for line in REAL_CANNOT) and any('over-voltage guard' in line for line in REAL_CAN)
+                # Both panels stay visible whichever tile is selected.
+                await click(real)
+                sim, real = find_all(client, css='bench-tile')
+                assert 'What the simulation can and cannot do' in texts(sim) and 'What the real bench can and cannot do' in texts(real)
+            assert page.errors == []
+        finally:
+            client.delete()
+    asyncio.run(scenario())
+
+
+# --- No silent overwrite; editors follow deletes; operator-language errors ------------------------
+
+def test_add_converter_or_new_test_refuses_an_existing_file_name(tmp_path, monkeypatch):
+    """QA M4: '+ Add a converter' with a saved file name changes nothing and offers a free name or Edit; Edit with a new
+    file name replaces the old file instead of leaving two cards."""
+    async def scenario():
+        page = await open_bench_page(monkeypatch, tmp_path, {})
+        client, service = page.client, page.service
+        before = (tmp_path / 'workspace' / 'profiles' / 'dut' / '12t12-4a.json').read_bytes()
+        try:
+            with client:
+                await click(next(add for add in find_all(client, css='bench-add') if texts(add)[0] == '+ Add a converter'))
+                assert 'Add a converter' in texts(visible_editor(client))
+                field(client, 'Save converter as (file name, letters/digits/-_.)').set_value('12t12-4a')
+                field(client, 'Converter / board model').set_value('Impostor')
+                field(client, 'Minimum input (V)').set_value(20)
+                await click(button(client, 'Save converter'))
+                assert (tmp_path / 'workspace' / 'profiles' / 'dut' / '12t12-4a.json').read_bytes() == before, 'nothing was overwritten'
+                assert any("A converter with the file name '12t12-4a' already exists" in n for n in page.notices), page.notices
+                editor = visible_editor(client)
+                assert 'A converter file named “12t12-4a” already exists. Nothing was overwritten.' in texts(editor)
+                assert button(client, 'Open the existing converter')
+                await click(button(client, 'Use a free file name'))
+                assert field(client, 'Save converter as (file name, letters/digits/-_.)').value == '12t12-4a-copy'
+                await click(button(client, 'Save converter'))
+                assert set(service.list_profiles()['dut']) == {'12t12-4a', '12t12-4a-copy'}
+                assert card_named(client, 'Impostor') is not None and card_named(client, '12T12-4A') is not None
+                # The same for a new test with a saved test's file name.
+                await click(next(add for add in find_all(client, css='bench-add') if texts(add)[0] == '+ New test'))
+                field(client, 'Save test as (file name, letters/digits/-_.)').set_value(QUICK)
+                await click(button(client, 'Save test'))
+                assert any(f"A test with the file name '{QUICK}' already exists" in n for n in page.notices)
+                assert service.load_profile('recipe', QUICK)['title'] == QUICK_TITLE, 'the seeded test is untouched'
+                assert button(client, 'Open the existing test')
+                await click(button(client, 'Cancel'))
+                # Edit with a changed file name moves the profile; recipes that referenced the converter follow it.
+                await click(link_in(card_named(client, '12T12-4A'), 'Edit'))
+                field(client, 'Save converter as (file name, letters/digits/-_.)').set_value('board-a')
+                await click(button(client, 'Save converter'))
+                assert set(service.list_profiles()['dut']) == {'board-a', '12t12-4a-copy'}, 'no second card, no orphaned file'
+                assert all(service.load_profile('recipe', name)['dut_profile_id'] in ('board-a', '12t12-4a-copy')
+                           for name in service.list_profiles()['recipe'])
+            assert page.errors == []
+        finally:
+            client.delete()
+    asyncio.run(scenario())
+
+
+def test_delete_closes_an_open_editor_for_the_same_profile(tmp_path, monkeypatch):
+    """QA m9: Delete while the same test is open in the editor closes it, so Save cannot recreate the file."""
+    async def scenario():
+        page = await open_bench_page(monkeypatch, tmp_path, {})
+        client, service = page.client, page.service
+        try:
+            with client:
+                await click(link_in(card_named(client, QUICK_TITLE), 'Edit'))
+                assert 'Edit test' in texts(visible_editor(client))
+                await click(link_in(card_named(client, QUICK_TITLE), 'Delete'))
+                await click(button(client, 'Delete'))
+                assert QUICK not in service.list_profiles()['recipe']
+                assert not any(editor.visible for editor in find_all(client, css='bench-editor')), 'the editor closed with its profile'
+                assert not find_all(client, tag='q-btn', label='Save test')
+            assert page.errors == []
+        finally:
+            client.delete()
+    asyncio.run(scenario())
+
+
+def test_editor_errors_use_operator_language(tmp_path, monkeypatch):
+    """QA m6 at the page: a cleared number and a hidden-limit violation are refused in sentences naming the visible field."""
+    async def scenario():
+        page = await open_bench_page(monkeypatch, tmp_path, {})
+        client, service = page.client, page.service
+        try:
+            with client:
+                await click(next(add for add in find_all(client, css='bench-add') if texts(add)[0] == '+ New test'))
+                field(client, 'Save test as (file name, letters/digits/-_.)').set_value('my-grid')
+                field(client, 'Minimum settling time (s)').set_value(None)
+                await click(button(client, 'Save test'))
+                assert page.notices[-1] == 'Enter a number for “Minimum settling time (s)”.'
+                field(client, 'Minimum settling time (s)').set_value(45)
+                await click(button(client, 'Save test'))
+                assert page.notices[-1] == '“Minimum settling time (s)” must be at most 30 s, this test’s settling timeout.'
+                field(client, 'Minimum settling time (s)').set_value(5)
+                field(client, 'Planning efficiency estimate (%)').set_value(0)
+                await click(button(client, 'Save test'))
+                assert page.notices[-1] == '“Planning efficiency estimate (%)” must be greater than 0.'
+                assert 'my-grid' not in service.list_profiles()['recipe']
+                assert not any('TypeError' in n or 'NoneType' in n or 'timeout_s' in n for n in page.notices)
+            assert page.errors == []
+        finally:
+            client.delete()
+    asyncio.run(scenario())
+
+
+# --- Glossary page and the guide's labels ----------------------------------------------------------
+
+def guide_section(text, heading):
+    start = text.index('\n' + heading)
+    following = text.find('\n## ', start + 1)
+    return text[start:following if following != -1 else None]
+
+
+# Bold phrases of the guide's page walkthroughs that are prose, not labels on the page.
+NOT_UI_LABELS = {'8082', '8081', 'Ports → Forward a Port → 8082', 'Select.', 'Preview.', 'Confirm.', 'Start.',
+                 'Wait for the reports.', 'Find the evidence on disk.', 'Retry a report', 'no job is active', 'and'}
+# Labels the guide quotes with a placeholder or a runtime value: the literal fragments the page source must contain.
+COMPOSED_LABELS = {'Acquiring… point n of m': ('Acquiring… point ', ' of '),
+                   'Simulation: Acquiring… point 2 of 21': ('Simulation: ', 'Acquiring… point ', ' of '),
+                   'Waiting for free memory: 96 MiB available, 150 MiB needed': ('Waiting for free memory: ', ' MiB available', ' MiB needed'),
+                   'Report generation needs attention: PDF. Saved measurements are preserved.':
+                       ('Report generation needs attention: ', '. Saved measurements are preserved.')}
+# Bold UI labels in the guide that do not occur on the page today; each names its owner. Remove the entry when the guide is fixed.
+KNOWN_GUIDE_MISMATCHES = {'Open interactive HTML': 'getting-started §6.8: the link reads "Open HTML" (new-user C28); owned by the guide editor'}
+
+
+def test_every_bold_ui_label_quoted_in_the_guide_exists_in_the_page_source():
+    """New-user C27: the guide's bold labels are the page's labels, byte for byte (the simulated walkthrough in §4.6
+    and the real-test walkthrough in §6). A label composed at run time is checked by its literal fragments."""
+    import re
+    guide = (DOCS / 'getting-started.md').read_text(encoding='utf-8')
+    source = '\n'.join((SRC / name).read_text(encoding='utf-8') for name in ('ui.py', 'ui_models.py', 'job_service.py'))
+    simulated = guide_section(guide, '6. Optional: open the bench page')
+    real = guide_section(guide, '## 6. Run a real test through the UI')
+    phrases = [re.sub(r'\s+', ' ', phrase) for phrase in re.findall(r'\*\*(.+?)\*\*', simulated + real, flags=re.S)]
+    assert len(phrases) > 60, 'both walkthroughs were found'
+
+    def present(phrase):
+        phrase = re.sub(r'^\d+ ', '', phrase)  # '1 Which converter?': the number is its own label
+        if phrase in COMPOSED_LABELS:
+            return all(fragment in source for fragment in COMPOSED_LABELS[phrase])
+        if phrase in source:
+            return True
+        parts = [part for separator in (' → ', ' / ') for part in phrase.split(separator) if separator in phrase]
+        return bool(parts) and all(part in source for part in parts)
+    missing = sorted({phrase for phrase in phrases if phrase not in NOT_UI_LABELS and not present(phrase)})
+    assert missing == sorted(KNOWN_GUIDE_MISMATCHES), missing
+    assert all(mismatch in guide for mismatch in KNOWN_GUIDE_MISMATCHES), 'a fixed mismatch must be removed from the list'
+
+
+def test_glossary_page_renders_the_docs_glossary(tmp_path, monkeypatch):
+    """The footer's Glossary link opens docs/glossary.md, rendered from the same file the documentation links."""
+    assert GLOSSARY_PATH == DOCS / 'glossary.md' and GLOSSARY_PATH.is_file()
+    text = GLOSSARY_PATH.read_text(encoding='utf-8')
+    for term in ('Path efficiency', 'Qualified', 'Revision', 'Lease', '`approval_blocked`', '`assumption_limited`', '`unsupported`',
+                 'SYNTHETIC', '`report-queued`', 'Memory gate', 'M0', 'M5'):
+        assert term in text, term
+
+    async def scenario():
+        page = await open_bench_page(monkeypatch, tmp_path, {})
+        glossary = await open_page(monkeypatch, tmp_path, '/glossary')
+        try:
+            with glossary:
+                from nicegui import ui
+                rendered = [child for child in glossary.elements.values() if isinstance(child, ui.markdown)]
+                assert rendered and 'Path efficiency' in rendered[0].content and 'assumption_limited' in rendered[0].content
+                assert any(link._props.get('href') == '/' for link in glossary.elements.values() if link.tag == 'nicegui-link')
+            assert page.errors == []
+        finally:
+            glossary.delete()
+            page.client.delete()
     asyncio.run(scenario())

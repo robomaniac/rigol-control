@@ -14,6 +14,7 @@ say so in their first lines.
 | [getting-started.md](getting-started.md) | For an engineer who has never seen this repository: what the software does, what to install, how to run it with no hardware, what must be true before any real converter test, and how to run and read a real test; every command checked with `--help`, hardware-touching ones marked **REAL HARDWARE**. |
 | [bench-ui.md](bench-ui.md) | The local bench page: a saved converter plus input voltages and output loads, a check of what the equipment can reach, the measurements, then links to the interactive HTML report and printable PDF; starting the page, port forwarding and reconnect behaviour. |
 | [configured-runs.md](configured-runs.md) | Configure and run a converter test from saved DUT, equipment and recipe profiles (data, not Python): the supported real procedure, its current physical envelope, the systemd launcher and where job evidence is saved. |
+| [glossary.md](glossary.md) | Words the bench page, the reports and the guides use before they define them: path efficiency, qualified, the planner's status words, SYNTHETIC, revision, lease, memory gate, `report-queued`, the milestones M0–M5; each with where it comes from in the code. Linked from the page footer. |
 
 ## Design contract
 
