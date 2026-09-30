@@ -64,7 +64,9 @@ def test_CORE03_ch2_below_dut_minimum(profiles):
 
 
 def test_CORE04_ch1_sense_rejected_but_load_sense_independent(profiles):
-    dut, bench, recipe = profiles
+    dut, _, recipe = profiles
+    # The demo mock bench now mirrors the physical bench's local sense; the remote-sense branch lives in its own profile.
+    bench = load_profile(PROFILES / "bench/mock-remote-sense.yaml", BenchProfile)
     assert bench.source.remote_sense_supported is False
     assert bench.load.remote_sense_supported is True
     assert bench.load.remote_sense_required is True

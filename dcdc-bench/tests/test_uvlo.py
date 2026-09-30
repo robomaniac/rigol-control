@@ -19,7 +19,7 @@ from pydantic import ValidationError
 from dcdc_bench import domain
 from dcdc_bench.analysis import analyze_run, build_report_model, coverage_by_test, uvlo_ramp_brackets
 from dcdc_bench.domain import UVLO_TEST_TYPE, BenchProfile, DutProfile, Plan, TestRecipe, UvloRampPolicy, uvlo_ramp_phases
-from dcdc_bench.mock_uvlo import SyntheticUvlo, UvloMockBench
+from dcdc_bench.mock_uvlo import MODEL_PARAMETERS, SyntheticUvlo, UvloMockBench
 from dcdc_bench.planning import build_plan, load_profile, uvlo_approval_gaps, verify_plan_hash
 from dcdc_bench.runner import run_mock
 from dcdc_bench.services import default_plan
@@ -209,7 +209,9 @@ def test_synthetic_plant_latches_off_below_threshold_and_on_above_threshold_plus
     off = bench.state(20.1)
     assert (off.output_voltage_V, off.output_current_A, off.input_current_A) == (0., 0., .004)
     assert off.load_compliance and off.source_mode == "CV"
-    assert off.source_voltage_V * off.input_current_A == pytest.approx(off.module_loss_W + off.input_current_A**2 * .2)
+    # coupled-dc-2.0 refit the input lead to 0.06 ohm (was 0.2); conservation holds with the plant's own constant.
+    assert off.source_voltage_V * off.input_current_A == pytest.approx(
+        off.module_loss_W + off.input_current_A**2 * MODEL_PARAMETERS["input_lead_resistance_ohm"])
     bench.set_live_voltage(9., 30.)
     assert bench.state(30.1).output_voltage_V == 0.
     bench.set_live_voltage(9.2, 40.)

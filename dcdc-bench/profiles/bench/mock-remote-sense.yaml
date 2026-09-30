@@ -1,5 +1,9 @@
+# Remote-sense variant of the SYNTHETIC mock bench: the load senses at the DUT output through S+/S- leads,
+# so the boundary excludes the output wiring. The physical DP821A/DL3031A bench is wired in local sense;
+# the owner-facing demo bench (mock.yaml) mirrors that. This profile exists to exercise the remote-sense
+# branch of planning and reporting. Plant: coupled-dc-2.0 (docs/simulation-plant.md).
 schema_version: '1.0'
-bench_id: mock-dp821-envelope
+bench_id: mock-dp821-remote-sense
 mode: mock
 source:
   instrument_id: synthetic-source
@@ -25,9 +29,7 @@ load:
   max_current_A: 40.0
   max_power_W: 300.0
   remote_sense_supported: true
-  # Local sense, as on the physical DP821A/DL3031A bench (no S+/S- leads are wired there). The
-  # remote-sense branch is exercised by profiles/bench/mock-remote-sense.yaml instead.
-  remote_sense_required: false
+  remote_sense_required: true
   mode: CC
   min_current_A: 0.0
 # Every readback_specification below is a SYNTHETIC EXAMPLE (status synthetic_example).
@@ -90,7 +92,7 @@ measurements:
     instrument_id: synthetic-load
     quantity: Vout_V
     unit: V
-    location: load_input_terminals_local_sense
+    location: dut_output_sense
     measurement_range: null
     resolution: null
     accuracy: null
@@ -116,7 +118,7 @@ measurements:
     instrument_id: synthetic-load
     quantity: Iout_A
     unit: A
-    location: load_input
+    location: dut_output
     measurement_range: null
     resolution: null
     accuracy: null
@@ -144,18 +146,12 @@ uncertainty_policy:
   include_repeatability_in_combined: true
   policy_origin: draft default; adjust with a recorded justification
 readback_correlations: []
-measurement_boundary: source-to-load-terminal path (input and output wiring included; load in local sense)
+measurement_boundary: source-to-DUT-output path
 notes:
 - SYNTHETIC profiles model a coupled converter and source/load. These are not observations
-  of the physical DUT. The plant (coupled-dc-2.0) is fitted to the recorded behaviour of the
-  first converter sample; see docs/simulation-plant.md for what it models and what it deliberately does not.
+  of the physical DUT.
 - The synthetic source uses the published CH1 voltage/current envelope; the synthetic
   load capabilities are simulation assumptions.
 - Readback specifications are SYNTHETIC EXAMPLES so the mock path demonstrates an evaluated
   budget; they describe no instrument. Programming accuracy is not substituted for readback.
-- 'The boundary mirrors the physical bench: local load sensing at the load terminals, so input and
-  output wiring losses (0.06 ohm and 0.10 ohm in the plant) are inside path efficiency; no S+/S-
-  leads are depicted.'
-- 'Readbacks are quantised to the instruments'' displayed digits and held per channel; the load''s
-  current readback carries the recorded +11 mA offset under load and the 0 / 11 mA alternation with
-  its input OFF, so the readback cross-check and freshness paths are exercised by the plant.'
+- Source-terminal input measurements include input wiring losses in path efficiency.

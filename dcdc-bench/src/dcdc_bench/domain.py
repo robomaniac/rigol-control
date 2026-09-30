@@ -57,6 +57,25 @@ class ExecutionApproval(Contract):
     protective_policy_id: str | None = None
 
 
+class KnownBehaviours(Contract):
+    """Recorded behaviour of the physical sample: evidence, never a rating.
+
+    ``cold_start_failed_at_V`` lists the source voltages at which a direct cold
+    start of the sample failed on the bench (retained runs). The planner warns
+    whenever a requested input is at or below such a level, in both execution
+    modes, and the synthetic plant reproduces the recorded failure so a
+    rehearsal on the mock shows the same refusal the real startup gate applies.
+    """
+    notes: list[str] = Field(default_factory=list)
+    cold_start_failed_at_V: list[float] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def positive_levels(self) -> KnownBehaviours:
+        if any(v <= 0 for v in self.cold_start_failed_at_V):  # non-finite values are refused by the contract config
+            raise ValueError("Recorded failed cold-start voltages must be positive")
+        return self
+
+
 class DutProfile(Contract):
     schema_version: Literal["1.0"] = "1.0"
     profile_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
@@ -70,6 +89,8 @@ class DutProfile(Contract):
     # Optional with a None default: existing profiles validate unchanged, but
     # model_dump() gains the key, so every plan hash that embeds a DUT changes.
     system_voltage_class: Literal["12V", "24V"] | None = None
+    # Recorded bench behaviour of the sample (optional, additive; same hash caveat).
+    known_behaviours: KnownBehaviours | None = None
 
 
 class AccuracySpec(Contract):

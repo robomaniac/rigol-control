@@ -1287,9 +1287,44 @@ def _readback_cross_check(plan: Plan, points: list[dict]) -> dict[str, Any]:
             "limitation": limitation}
 
 
+SOURCE_LIMIT_FLAG = "source-current-limited"
+
+
+def _source_limited_phases(points: list[dict]) -> list[dict]:
+    """Each input-voltage phase whose source entered current limiting: the limited point and the higher
+    loads of that phase left not-run, in plan order. Computed from the retained outcomes, never invented."""
+    phases = []
+    for point in points:
+        if point.get("qualification") != "setup-limited":
+            continue
+        same_phase = [p for p in points if p["test_id"] == point["test_id"] and p["vin_target_V"] == point["vin_target_V"]]
+        skipped = [p for p in same_phase if p["iout_target_A"] > point["iout_target_A"] and p.get("qualification") == "not-run"]
+        phases.append({"point": point, "skipped": skipped})
+    return phases
+
+
+def _source_limit_statements(points: list[dict]) -> list[str]:
+    """One deterministic summary sentence per current-limited phase (brief 9.3: points unavailable because the
+    source budget was exceeded belong in the prose, not only in the coverage table)."""
+    statements = []
+    for phase in _source_limited_phases(points):
+        point, skipped = phase["point"], phase["skipped"]
+        vin, iout = point["vin_target_V"], point["iout_target_A"]
+        text = f"The source entered current limiting at {vin:g} V, {iout:g} A requested ({point['point_id']}); "
+        if skipped:
+            ids = ", ".join(p["point_id"] for p in skipped)
+            text += f"{len(skipped)} higher load{'s' if len(skipped) != 1 else ''} at {vin:g} V ({ids}) were not attempted."
+        else:
+            text += f"no higher load at {vin:g} V was requested."
+        statements.append(text)
+    return statements
+
+
 def _flag_figure_captions(figures: list[FigureSpec], points: list[dict]) -> None:
-    """Say what an open marker means on every figure that draws a flagged point."""
+    """Say what an open marker means on every figure that draws a flagged point, and where a curve ends
+    because the source entered current limiting."""
     by_id = {p["point_id"]: p for p in points}
+    limited = _source_limited_phases(points)
     for figure in figures:
         drawn = [pid for series in figure.series for pid in series.point_ids
                  if is_flagged_implausible(by_id[pid])
@@ -1298,6 +1333,16 @@ def _flag_figure_captions(figures: list[FigureSpec], points: list[dict]) -> None
         if drawn:
             figure.caption += (f" Open markers are {len(drawn)} point(s) flagged {IMPLAUSIBLE_RATIO_FLAG}; they are drawn "
                                "unclamped for visibility, are not qualified, and are excluded from issued results.")
+        for phase in limited:
+            point = phase["point"]
+            if not any(point["point_id"] in series.point_ids for series in figure.series):
+                continue
+            vin, iout = point["vin_target_V"], point["iout_target_A"]
+            figure.caption += (f" The {vin:g} V series stops before {iout:g} A: the source entered current limiting there "
+                               f"(flag {SOURCE_LIMIT_FLAG}; {point['point_id']} is not drawn)"
+                               + (f" and {len(phase['skipped'])} higher load"
+                                  f"{'s' if len(phase['skipped']) != 1 else ''} at {vin:g} V were not attempted."
+                                  if phase["skipped"] else "."))
 
 
 def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[dict],
@@ -1542,6 +1587,7 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
     for metric in metrics:
         metric.qualification = f"{observation} observation"
     summary = [f"{len(valid)} of {len(points)} requested operating points produced qualified {observation} DC results."]
+    summary.extend(_source_limit_statements(points))
     summary_evidence = []
     implausible_summary, implausible_limitation = _implausible_ratio_statements(points)
     if implausible_summary:
