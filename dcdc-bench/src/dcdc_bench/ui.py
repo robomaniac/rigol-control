@@ -14,7 +14,7 @@ from pathlib import Path
 
 from .standard_recipes import STANDARDS_GROUP, build_recipe, clause_rows, default_system, standard_cards
 from .ui_models import (BENCH_NAMES, DEFAULT_CATEGORY, DELETE_PROMPTS, PLAN_STATUS_LEGEND, REAL_CAN, REAL_CANNOT,
-                        SIMULATION_CAN, SIMULATION_CANNOT, SIMULATION_SEQUENCE, SIMULATION_TIME_ESTIMATE, START_LABELS,
+                        SIMULATION_CAN, SIMULATION_CANNOT, SIMULATION_SEQUENCE, SIMULATION_TIME_ESTIMATE, START_LABELS, simulation_time_text,
                         SYNTHETIC_UNCERTAINTY_NOTE, WORKING_STATES, activity_text, artifact_url, bench_equipment, bench_job,
                         bench_title, card_meta, deferred_text, dequeued, dut_approved, dut_subtitle, duration_text,
                         edited_dut, edited_recipe, elapsed_text, envelope_rows, event_text, friendly_error, grouped_recipes,
@@ -1256,7 +1256,7 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                 mode = preview.get('mode')
                 with ui.element('div').classes('bench-stats'):
                     for key, value, small in (('Points that will run', f'{ready} / {total}', False), ('Skipped', str(total - ready), False),
-                                              ('Estimated time', duration_text(preview.get('estimated_seconds')) or (SIMULATION_TIME_ESTIMATE if mode == 'mock' else '—'),
+                                              ('Estimated time', simulation_time_text(preview.get('estimated_seconds')) if mode == 'mock' else (duration_text(preview.get('estimated_seconds')) or '—'),
                                                mode == 'mock'),
                                               ('Bench', ('Real bench — ' + bench_equipment(preview.get('plan', {}).get('bench', {}), state['inventory']))
                                                if mode == 'real' else 'Simulation — nothing switched on', True)):

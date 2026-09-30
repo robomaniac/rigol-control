@@ -476,6 +476,13 @@ SIMULATION_SEQUENCE = (
 SIMULATION_TIME_ESTIMATE = 'Measurements: seconds (virtual clock) · Report: typically 1–4 min on a Raspberry Pi'
 
 
+def simulation_time_text(seconds) -> str:
+    """Plan-panel estimate for a simulated run: the planner's wall-time estimate when it exists, else the generic text."""
+    shown = duration_text(seconds)
+    return (f'Measurements: about {shown} (simulated) · Report: typically 1–4 min on a Raspberry Pi'
+            if shown else SIMULATION_TIME_ESTIMATE)
+
+
 def sequence_step(snapshot: dict | None) -> int | None:
     """Index into SIMULATION_SEQUENCE for a simulation job's current step; None when it does not apply."""
     if not snapshot or snapshot.get('mode') != 'mock':

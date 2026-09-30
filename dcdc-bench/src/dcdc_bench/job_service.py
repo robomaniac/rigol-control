@@ -377,6 +377,11 @@ class JobService:
                     inventory = self._inventory()
                 except (ValueError, OSError) as exc:
                     errors.append(str(exc))
+            else:
+                # The simulated run is budgeted too: the page shows its estimate and an
+                # over-budget plan is refused here, before Start, not by the worker.
+                from .planning import prepare_mock_plan
+                plan, errors, seconds = prepare_mock_plan(plan)
             counts = {}
             for point in plan.points:
                 counts[point.status] = counts.get(point.status, 0)+1
