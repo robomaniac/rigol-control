@@ -524,7 +524,7 @@ def test_issued_exports_match_model_points_with_unique_unit_headers_and_empty_mi
         assert recorded[name]["path"] == str(path)
         assert recorded[name]["bytes"] == path.stat().st_size > 0
         assert recorded[name]["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
-    text = csv_path.read_text(encoding="utf-8", newline="")
+    text = csv_path.open(encoding="utf-8", newline="").read()
     assert text.endswith("\r\n") and "\n" not in text.replace("\r\n", "")
     header = text.split("\r\n")[0].split(",")
     assert header == list(renderer.EXPORT_FIELDS) and len(set(header)) == len(header)
@@ -562,7 +562,7 @@ def test_timing_columns_are_exported_only_when_the_report_has_a_time_axis(model,
     model["figures"].append({**model["figures"][0], "id": "fig-demand-time", "x_key": "elapsed_s"})
     model["points"][0].update(phase_label="Increasing demand", elapsed_start_s=0., elapsed_s=4.5175, elapsed_end_s=9.035)
     renderer.write_exports(model, tmp_path)
-    rows = list(csv.DictReader(io.StringIO((tmp_path / "exports/points.csv").read_text(encoding="utf-8", newline=""))))
+    rows = list(csv.DictReader(io.StringIO((tmp_path / "exports/points.csv").open(encoding="utf-8", newline="").read())))
     assert list(rows[0]) == [*renderer.EXPORT_FIELDS, *renderer.EXPORT_TIMING_FIELDS]
     assert (rows[0]["phase_label"], rows[0]["elapsed_s"]) == ("Increasing demand", "4.5175")
     assert (rows[1]["phase_label"], rows[1]["elapsed_s"]) == ("", "")
@@ -605,7 +605,7 @@ def test_render_writes_issued_exports_before_documents_and_records_them(model, t
         assert record["bytes"] == path.stat().st_size
     assert json.loads((tmp_path / "build_manifest.json").read_text())["exports"] == manifest["exports"]
     assert 'href="exports/points.csv"' in (tmp_path / "report.qmd").read_text()
-    exported = list(csv.DictReader(io.StringIO((tmp_path / "exports/points.csv").read_text(encoding="utf-8", newline=""))))
+    exported = list(csv.DictReader(io.StringIO((tmp_path / "exports/points.csv").open(encoding="utf-8", newline="").read())))
     assert [row["point_id"] for row in exported] == [point["point_id"] for point in model["points"]]
 
 
@@ -621,7 +621,7 @@ def test_issued_real_models_still_render_and_export(model_path, tmp_path):
     assert isinstance(body, str) and issued["run_id"] in body
     exports = renderer.write_exports(issued, tmp_path)
     assert set(exports) == {"points.csv", "points.meta.json"}
-    rows = list(csv.DictReader(io.StringIO((tmp_path / "exports/points.csv").read_text(encoding="utf-8", newline=""))))
+    rows = list(csv.DictReader(io.StringIO((tmp_path / "exports/points.csv").open(encoding="utf-8", newline="").read())))
     assert len(rows) == len(issued["points"])
     assert len(rows[0]) == len(set(rows[0])) if rows else True
 
@@ -711,7 +711,7 @@ def test_issued_export_carries_quality_flags_next_to_qualification(model, tmp_pa
     _flag(model["points"][1], 112.3)
     model["points"][2]["quality_flags"] = []
     renderer.write_exports(model, tmp_path)
-    text = (tmp_path / "exports/points.csv").read_text(encoding="utf-8", newline="")
+    text = (tmp_path / "exports/points.csv").open(encoding="utf-8", newline="").read()
     header = text.split("\r\n")[0].split(",")
     assert header.index("quality_flags") == header.index("qualification") + 1
     rows = list(csv.DictReader(io.StringIO(text)))

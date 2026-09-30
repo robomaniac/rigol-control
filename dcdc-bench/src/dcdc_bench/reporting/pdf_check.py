@@ -698,8 +698,22 @@ class _Checker:
                              f"Heading {line.text.strip()[:80]!r} (font-size heuristic) is the last text on page {page.number}",
                              page.number, heading=line.text.strip()[:200], method="font-size heuristic")
 
+    def tables(self) -> list[Element]:
+        """Table elements to check and count, without a Table that merely wraps another.
+
+        Typst tags a table that a show rule re-emitted (the print theme's
+        footer pagination) as a Table whose rows all belong to a nested Table;
+        both hold the same TR nodes, so checking or counting both would report
+        one table, and one defect, twice.
+        """
+        tables = [element for element in self.elements if element.role == "Table"]
+        rows = {id(table): {id(node) for node in table.iter() if node.role == "TR"} for table in tables}
+        return [table for table in tables if not any(
+            nested is not table and nested.role == "Table" and rows[id(nested)] == rows[id(table)]
+            for nested in table.iter())]
+
     def check_tables(self) -> None:
-        for table in (element for element in self.elements if element.role == "Table"):
+        for table in self.tables():
             header_rows, body_rows = [], []
             for node in table.iter():
                 if node.role != "TR":
@@ -826,7 +840,7 @@ class _Checker:
         if not self.structured and self.document.text_available:
             headings = [line.text.strip()[:120] for line in self.body_lines(page)
                         if line.bold and line.size >= self._heuristic_body_size() * HEADING_SIZE_RATIO and len(line.text) < 120]
-        tables = sum(1 for element in self.elements if element.role == "Table" and page.number in self.regions(element))
+        tables = sum(1 for element in self.tables() if page.number in self.regions(element))
         figures = sum(1 for element in self.elements if element.role == "Figure" and page.number in self.regions(element))
         captions = sum(1 for element in self.elements if element.role == "Caption" and page.number in self.regions(element))
         run_id = self.model.get("run_id")
@@ -870,11 +884,31 @@ class _Checker:
                     self.check_headings_heuristic()
             if document.text_available:
                 self.check_caption_text()
-        findings = sorted(self.findings, key=lambda finding: (
-            finding.page or 0, SEVERITY_ORDER.get(finding.severity, 9), finding.code, finding.message))
+        findings = _unique(sorted(self.findings, key=lambda finding: (
+            finding.page or 0, SEVERITY_ORDER.get(finding.severity, 9), finding.code, finding.message)))
         self.findings = findings
         pages = [self.page_summary(page) for page in document.pages]
         return Analysis(findings=findings, pages=pages)
+
+
+def _unique(findings: list[Finding]) -> list[Finding]:
+    """Drop findings that repeat an earlier one's code, page and message.
+
+    One layout defect must be reported once. A structure tree can reach the
+    same element twice (Typst tags a table that a show rule re-emitted as a
+    Table wrapping a Table with the same rows), and two checks may describe
+    the same defect in the same words; the first occurrence, in sorted order,
+    is kept with its details.
+    """
+    seen: set[tuple[str, int | None, str]] = set()
+    unique: list[Finding] = []
+    for finding in findings:
+        key = (finding.code, finding.page, finding.message)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(finding)
+    return unique
 
 
 def _normalize(text: str) -> str:

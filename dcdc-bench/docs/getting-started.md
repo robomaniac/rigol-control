@@ -80,14 +80,15 @@ What it does **not** do:
 
    ```bash
    git clone https://github.com/robomaniac/rigol-control.git && cd rigol-control
+   git checkout dcdc-bench-hardening
    ```
 
    *What you should see:* a folder containing `dcdc-bench/`, `Software/`,
-   `Documentation/`, `Electrical/`, `Data/` and `pyproject.toml`. The bench
-   subproject was developed on the `dcdc-bench-hardening` branch and had not
-   been pushed when this guide was written (dcdc-bench README, "What comes
-   next"). If `dcdc-bench/` is missing after cloning, ask the project owner
-   which branch to check out.
+   `Documentation/`, `Electrical/`, `Data/` and `pyproject.toml`, and
+   `git status` reporting `On branch dcdc-bench-hardening`. `main` also has
+   the `dcdc-bench/` subproject (pull request #1 merged the branch on
+   2026-09-29), but it lags the branch by dozens of commits, so the branch is
+   the one to use until the next pull request updates `main`.
 
 2. Check Python.
 
@@ -158,7 +159,12 @@ What it does **not** do:
    .venv/bin/dcdc-bench --help
    ```
 
-   *What you should see:* `usage: ... {validate,plan,run,demo,analyze,report,ui,compare,doctor,publish,pdf-check} ...`.
+   *What you should see:* `usage: dcdc-bench [-h] {validate,plan,run,demo,analyze,report,ui,compare,doctor,publish,pdf-check} ...`
+   followed by a one-line description of each command. Every subcommand
+   answers `--help` with its arguments, their defaults and what it does or
+   does not touch (for example `.venv/bin/dcdc-bench run --help` says that
+   `--mode real` and `--arm` are refused there). `python -m dcdc_bench --help`
+   prints the same text.
 
    ```bash
    .venv/bin/benchctl --help
