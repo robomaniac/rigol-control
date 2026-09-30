@@ -63,5 +63,16 @@ list. This page consolidates them and records who is fixing what.
 - Delete the parked theme branch `worktree-agent-a6546934fb2137254` (design A was chosen).
 - The owner's 34-item characterization list for the IEC/ISO cross-check.
 
-Resolutions are appended to each review document by the implementer that
-closes its findings; this page is updated when the round ends.
+## Resolutions (2026-09-30)
+
+| Scope | Outcome |
+| --- | --- |
+| Plant and runner realism | Done. Source current limit now collapses to the recorded shape (Vin ≈ 2.66 Ω × Iin, Vout 0, Iin just above the limit) and the mock runner stops the input-voltage phase as the real guard does; soft-start with a start threshold reproduces "starts at 15 V, fails direct 12 V start, runs down to 9.1 V" and the mock runner applies the five-cycle source-only gate; plant refit to the measured 12T12-4A (86.0 % at 24 V / 0.9 A vs 86.5 % recorded; 87.2 % at 1.725 A vs 87.1 %; light-load loss overestimated, documented); readbacks quantised and held with the recorded ≈ +11 mA load offset; thermal τ = 600 s; simulated runs budgeted at preview and refused above `MOCK_RUN_BUDGET_S`; SIGTERM finalises as `interrupted` with `integrity.json`. `docs/simulation-plant.md` documents the model and its limits. |
+| Bench page | Done. "Simulation" naming, the two can/cannot panels (texts in `ui_models.SIMULATION_CAN/CANNOT`, `REAL_CAN/CANNOT`), the after-Start sequence with a real time estimate, operator-language deferral text, one status vocabulary with a legend, page follows the bench's active or queued job, single-shot Stop/Start/Regenerate with an idempotent `cancel()`, no silent profile overwrite, operator-language validation, `/glossary`, pill contrast and Reports column fixed, radiogroup tiles and one "⋯" menu per card, phone layout, `/annotations` clarity. |
+| Standards catalog | Done. Statuses `runs_after_approval` ("runs here after approval"), `mock_only`, `needs_split`; duration check against the 660 s / 720 s limits; §4.5 and §4.6.2 no longer pre-ticked and the row says where approval is recorded; edition claims marked "to be verified against the owner's copy". |
+| Hygiene | Done. Python 3.11 test compatibility (CI should turn green on the next run; the two 390 px browser gates were made font-tolerant from the CI log and could not be executed here); Typst rule keeps a table's head with its first rows (the fresh simulated report now passes PDF-02 with zero findings); duplicate PDF findings de-duplicated at their root; comparison demo re-created (6 pairs, 103 unpaired with the current analysis revisions; largest Δη −0.47 pp at 0.1 A); security review Resolution recorded (three lows still open: `include_pdf` naming, bidi controls in captions, PID-reuse window); one current test total; HANDOFF and getting-started clone instructions corrected; every CLI command and argument described. |
+
+Still open after the round, for the owner: the decisions listed above, plus the
+three security lows, the browser gates' behaviour on CI, and the report/CSV
+still labelling `assumption_limited` points `unsupported` (analysis vocabulary,
+noted by the new-user review as C49).
