@@ -81,6 +81,67 @@ a bar fixed to the bottom of the window. There are no tabs.
    optional standard clause. A test belongs to whichever converter is selected
    when it is previewed; the saved copy follows.
 
+### Automotive standards in Which test?
+
+Below the saved tests, the group **Automotive supply standards** shows one
+card per standard from the catalog in `docs/standards/`: ISO 16750-2:2023,
+ISO 7637-2, CISPR 25, ISO 11452, ISO 10605, ISO 16750-3 and ISO 16750-4. A
+standard this bench cannot run is greyed with its one-sentence reason (a
+transient generator, an EMC chamber, a shaker, a climatic chamber). The
+ISO 16750-2 card carries a **12 V system** / **24 V system** badge and its
+footer counts *N of M clauses runnable on this bench* for the selected
+converter and bench.
+
+Selecting the ISO 16750-2 card expands it into a **clause checklist** and
+ticks every runnable clause; selecting it again folds it. The **12 V / 24 V**
+toggle switches every row to the other system's parameters (supply codes,
+UA, levels) and is remembered on the converter profile
+(`system_voltage_class`, default 12 V). Each row shows the clause, its levels
+for this converter, and a badge:
+
+- **runs here** (green, ticked, untickable individually): §4.2, §4.5 and
+  §4.6.2 for the 12T12-4A on either system class.
+- **procedure not yet implemented** (amber, not tickable) with the concrete
+  requirement: §4.3.1.1 (*60-min hold exceeds the 540 s run budget; needs a
+  long-hold procedure*, 12 V only; at 24 V its 36 V level equals the DUT
+  ceiling) and §4.6.1.2 (*>=1 s interruptions only; needs an interruption
+  procedure*).
+- **needs \<instrument\>**, **not on this bench**, **outside DUT rating**,
+  **excluded by policy** or **not applicable** (grey, not tickable), with the
+  catalog's reason under the row and as a tooltip. Load dump, reversed
+  voltage, short circuit and overload stay excluded by policy (brief §2, §7.5).
+
+**Add as tests** saves one recipe per ticked clause under the category
+*ISO 16750-2 supply profiles*, titled like `ISO 16750-2 §4.2 — supply voltage
+range (12 V system)` with the clause as its badge:
+
+- §4.2 becomes an ordinary `steady_state_load_sweep` at UA, Usmin and Usmax
+  (14 / 9 / 16 V for code C at 12 V; 28 / 10 / 32 V for code E at 24 V) with a
+  0.1 / 0.25 / 0.5 A load grid. A level above the bench envelope or the
+  input over-voltage guard stays in the plan and Preview explains it; nothing
+  is dropped. Each level is a separate cold-started DC point; the standard's
+  t1/t2 hold profile is not reproduced.
+- §4.5 becomes a `slow_supply_ramp` and §4.6.2 a `reset_staircase`. Both run
+  on the **simulated bench only**: the real bench refuses them at Preview as
+  *not yet approved for real hardware*. The ramp walks UA down to 1 V and back
+  in 20 mV live steps every 2.4 s (0.5 V/min) with a qualified observation at
+  every 1 V; the staircase alternates Usmin with its 5 % lows, each low held
+  at least 5 s and each recovery at least 10 s. Because both step below the
+  converter's stated minimum, they take the approved UVLO-style path
+  (brief §7.5): the saved recipe ships with `authorization.uvlo_approved:
+  false` and its card stays greyed with the planner's reason until the recipe
+  is approved under the bench's protective policy, exactly like the shipped
+  UVLO example. The standard's 0 V end level is not requested (a 0 V source
+  setpoint is outside the planner's positive-input rule); the report records
+  that deviation.
+
+The report for a ramp or staircase states, per level, whether the output was
+in band, off (reset), recovered or not recovered, computed from the classified
+states only and labelled as the synthetic plant, and says plainly that the
+levels were commanded as bounded DC steps at the ~1 s cadence, that the ramp
+is a staircase of live steps rather than a linear ramp, and that no edge or
+transient was measured.
+
 Choose **Preview**. Nothing is switched on. The plan panel shows how many
 points will run, how many are skipped and why (identical reasons grouped), the
 estimated time on the real bench, the bench in use, and in red the **Before

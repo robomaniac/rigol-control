@@ -37,6 +37,8 @@ Rules that apply to everything in this folder:
 | --- | --- | --- | :-: |
 | 1 | Normal operating voltage | VIN sweep, efficiency, load/line regulation, dropout and minimum-input behaviour, mapped to the existing `steady_state_load_sweep` recipes, the fixed real workers (`voltage_sweep.py`, `extended.py`, `startup_descent.py`) and the mock-only UVLO ramp (`uvlo.py`) | yes |
 | 2 | ISO 16750-2 supply profiles | every test clause of section 4 as a checklist item | yes (4.2, 4.3.1.1 at 12 V, 4.5, 4.6.2; the >= 1 s part of 4.6.1.2) |
+
+The bench page renders this catalog as the "Automotive supply standards" group of "Which test?" (`src/dcdc_bench/standard_recipes.py`): the ISO 16750-2 card expands into the clause checklist, and "Add as tests" turns 4.2 into a `steady_state_load_sweep` recipe and 4.5 / 4.6.2 into the mock-only `slow_supply_ramp` / `reset_staircase` recipes (`src/dcdc_bench/supply_profiles.py`); 4.3.1.1 and 4.6.1.2 show "procedure not yet implemented" with the requirement a procedure would have to meet. See [docs/bench-ui.md](../bench-ui.md#automotive-standards-in-which-test).
 | 3 | ISO 7637-2 transients | one entry: pulses 1, 2a, 2b, 3a, 3b (ISO 7637-2:2011, clause 5.6) | no: transient generator |
 | 4 | EMC | CISPR 25, ISO 11452 (all parts), ISO 10605 | no: EMC chamber, ESD simulator |
 | 5 | Environmental | ISO 16750-3 mechanical, ISO 16750-4 climatic | no: shaker, climatic chamber |

@@ -65,6 +65,11 @@ class DutProfile(Contract):
     construction: Construction = Field(default_factory=Construction)
     acceptance: Acceptance = Field(default_factory=Acceptance)
     execution_approval: ExecutionApproval = Field(default_factory=ExecutionApproval)
+    # The automotive system class ("12V" or "24V") last chosen for this converter
+    # on the bench page's standards checklist; display state only, never a rating.
+    # Optional with a None default: existing profiles validate unchanged, but
+    # model_dump() gains the key, so every plan hash that embeds a DUT changes.
+    system_voltage_class: Literal["12V", "24V"] | None = None
 
 
 class AccuracySpec(Contract):
@@ -376,6 +381,13 @@ class BenchProfile(Contract):
 
 
 UVLO_TEST_TYPE = "uvlo_input_ramp"
+# ISO 16750-2 supply profiles realised as bounded DC steps at the ~1 s command
+# cadence (mock-only procedures in supply_profiles.py; refused on real benches).
+SLOW_SUPPLY_RAMP_TEST_TYPE = "slow_supply_ramp"
+RESET_STAIRCASE_TEST_TYPE = "reset_staircase"
+SUPPLY_PROFILE_TEST_TYPES = (SLOW_SUPPLY_RAMP_TEST_TYPE, RESET_STAIRCASE_TEST_TYPE)
+# Procedures with a phase-scoped guard: each runs alone in its recipe.
+PHASE_SCOPED_TEST_TYPES = (UVLO_TEST_TYPE, *SUPPLY_PROFILE_TEST_TYPES)
 
 
 def uvlo_ramp_phases(targets: list[float]) -> list[str]:
@@ -446,6 +458,100 @@ class UvloRampPolicy(Contract):
         return "indeterminate"
 
 
+def staircase_level_kinds(targets: list[float]) -> list[str]:
+    """Classify each declared reset-staircase level as ``recovery`` or ``low``; reject any other shape.
+
+    The staircase alternates the recovery level (the same value at every even
+    index, the level the DUT is expected to work at) with strictly decreasing
+    low levels at the odd indices, and ends on a recovery level:
+    ``[U, 0.95 U, U, 0.90 U, U, ...]``. Every low lies below the recovery level.
+    """
+    if len(targets) < 3 or len(targets) % 2 == 0:
+        raise ValueError("A reset staircase declares an odd number of levels (at least three): recovery, low, recovery, ...")
+    recovery = targets[0]
+    if any(level != recovery for level in targets[0::2]):
+        raise ValueError("Every even reset-staircase level must be the same recovery level")
+    lows = targets[1::2]
+    if any(low >= recovery for low in lows):
+        raise ValueError("Every reset-staircase low level must lie below the recovery level")
+    if any(b >= a for a, b in zip(lows, lows[1:])):
+        raise ValueError("Reset-staircase low levels must decrease strictly")
+    return ["recovery" if index % 2 == 0 else "low" for index in range(len(targets))]
+
+
+class SupplyProfilePolicy(Contract):
+    """Declared conventions for an ISO 16750-2 supply profile run as bounded DC steps (brief 7.5).
+
+    Shared with the UVLO ramp: ``floor_V`` is the lowest input the recipe may
+    request (lower levels are refused, never clipped); ``startup_interval_s``
+    bounds the unloaded startup before the load is enabled; the accepted Vout
+    mean at/above ``output_on_minimum_V`` is ``on`` (in band), at/below
+    ``output_off_maximum_V`` is ``off`` (reset), between is ``indeterminate``.
+    Output-off is an expected, recorded state only where the DUT documents it:
+    descending ramp levels and staircase low levels below
+    ``expected_off_below_V``, ascending ramp levels and staircase recovery
+    levels below ``expected_on_above_V``. Elsewhere the normal minimum-output
+    rule applies. Absolute protective limits are never scoped by this policy.
+
+    ``slow_supply_ramp``: the declared levels are observation levels; between
+    them the source is walked in ``step_V`` live steps held ``step_interval_s``
+    each, so the rate is ``step_V / step_interval_s`` (ISO 16750-2 4.5 wants
+    0.5 V/min in steps of at most 25 mV: 20 mV every 2.4 s). Intermediate
+    readings are guarded and preserved as raw samples; only observation levels
+    become qualified points.
+
+    ``reset_staircase``: each low level is held ``low_hold_s`` and each
+    recovery level ``recovery_hold_s`` before acquisition (ISO 16750-2 4.6.2:
+    at least 5 s and 10 s).
+    """
+    floor_V: float = Field(gt=0)
+    startup_interval_s: float = Field(gt=0)
+    output_on_minimum_V: float = Field(gt=0)
+    output_off_maximum_V: float = Field(ge=0)
+    expected_off_below_V: float = Field(gt=0)
+    expected_on_above_V: float = Field(gt=0)
+    step_V: float | None = Field(default=None, gt=0, le=1.0)
+    step_interval_s: float | None = Field(default=None, ge=1.0)
+    low_hold_s: float | None = Field(default=None, ge=0)
+    recovery_hold_s: float | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def consistent_conventions(self) -> SupplyProfilePolicy:
+        if self.output_off_maximum_V >= self.output_on_minimum_V:
+            raise ValueError("The output-off ceiling must lie below the output-on floor")
+        if self.expected_on_above_V < self.expected_off_below_V:
+            raise ValueError("The expected-on boundary cannot lie below the expected-off boundary")
+        if (self.step_V is None) != (self.step_interval_s is None):
+            raise ValueError("step_V and step_interval_s are declared together")
+        if (self.low_hold_s is None) != (self.recovery_hold_s is None):
+            raise ValueError("low_hold_s and recovery_hold_s are declared together")
+        return self
+
+    @property
+    def ramp_rate_V_per_min(self) -> float | None:
+        if self.step_V is None or self.step_interval_s is None:
+            return None
+        return self.step_V / self.step_interval_s * 60.0
+
+    def off_expected(self, vin_target_V: float, level_kind: str) -> bool:
+        """Whether output-off is an expected (recorded, not faulted) state at this level.
+
+        ``level_kind`` is ``down``/``low`` (judged against ``expected_off_below_V``)
+        or ``up``/``recovery`` (judged against ``expected_on_above_V``).
+        """
+        boundary = self.expected_off_below_V if level_kind in ("down", "low") else self.expected_on_above_V
+        return vin_target_V < boundary
+
+    def classify_output(self, vout_V: float | None) -> str | None:
+        if vout_V is None:
+            return None
+        if vout_V >= self.output_on_minimum_V:
+            return "on"
+        if vout_V <= self.output_off_maximum_V:
+            return "off"
+        return "indeterminate"
+
+
 class ThermalSettlingPolicy(Contract):
     """Separate from electrical settling: slope of rise above ambient over a window.
 
@@ -482,6 +588,7 @@ class TestDefinition(Contract):
     required_quantities: list[str] = Field(default_factory=lambda: ["Vin_V", "Iin_A", "Vout_V", "Iout_A"])
     optional_quantities: list[str] = Field(default_factory=list)
     uvlo: UvloRampPolicy | None = None
+    supply_profile: SupplyProfilePolicy | None = None
     thermal_settling: ThermalSettlingPolicy | None = None
 
     @model_validator(mode="after")
@@ -498,6 +605,21 @@ class TestDefinition(Contract):
             uvlo_ramp_phases(self.input_voltage_targets_V)
         elif self.uvlo is not None:
             raise ValueError("A uvlo block is only valid for the uvlo_input_ramp test type")
+        if self.type in SUPPLY_PROFILE_TEST_TYPES:
+            if self.supply_profile is None:
+                raise ValueError(f"{self.type} requires a declared supply_profile block")
+            if len(self.output_current_targets_A) != 1:
+                raise ValueError(f"{self.type} holds one fixed load")
+            if self.type == SLOW_SUPPLY_RAMP_TEST_TYPE:
+                if self.supply_profile.step_V is None:
+                    raise ValueError("slow_supply_ramp requires supply_profile.step_V and step_interval_s (the live-step realisation)")
+                uvlo_ramp_phases(self.input_voltage_targets_V)
+            else:
+                if self.supply_profile.low_hold_s is None:
+                    raise ValueError("reset_staircase requires supply_profile.low_hold_s and recovery_hold_s")
+                staircase_level_kinds(self.input_voltage_targets_V)
+        elif self.supply_profile is not None:
+            raise ValueError("A supply_profile block is only valid for the slow_supply_ramp and reset_staircase test types")
         return self
 
 

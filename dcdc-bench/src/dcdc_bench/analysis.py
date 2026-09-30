@@ -18,7 +18,8 @@ from typing import Any
 
 from pydantic import Field, model_validator
 
-from .domain import UVLO_TEST_TYPE, AcquisitionPolicy, Contract, Plan, RawSample, SettlingPolicy, uvlo_ramp_phases
+from .domain import (PHASE_SCOPED_TEST_TYPES, SLOW_SUPPLY_RAMP_TEST_TYPE, SUPPLY_PROFILE_TEST_TYPES, UVLO_TEST_TYPE,
+                     AcquisitionPolicy, Contract, Plan, RawSample, SettlingPolicy, staircase_level_kinds, uvlo_ramp_phases)
 from .storage import atomic_json, verify_integrity
 from .uncertainty import DERIVED as UNCERTAINTY_DERIVED, evaluate_run_budget, evaluated_quantity
 from .thermal import annotate_thermal_points, thermal_report_contribution
@@ -486,6 +487,184 @@ def _uvlo_analysis(plan: Plan, run: dict, points: list[dict]) -> dict[str, Any]:
     return result
 
 
+SUPPLY_PROFILE_LABELS = {SLOW_SUPPLY_RAMP_TEST_TYPE: "slow supply ramp (clause 4.5 profile)",
+                         "reset_staircase": "reset staircase (clause 4.6.2 profile)"}
+SUPPLY_PROFILE_CADENCE = ("levels are commanded as bounded DC steps at the ~1 s command cadence; the source's own slew "
+                          "between steps is not characterised and no edge, drop or transient is measured")
+
+
+def level_observation(level_kind: str, state: str | None, previous_state: str | None, off_expected: bool) -> str:
+    """One computed phrase per supply-profile level: in band / reset / recovered / not recovered, from classified states only."""
+    if state is None:
+        return "no qualified observation"
+    if state == "indeterminate":
+        return "output indeterminate (between the off ceiling and the on floor)"
+    if state == "on":
+        return "recovered: output back in band" if previous_state in ("off", "indeterminate") else "output in band"
+    if level_kind == "recovery":
+        phrase = "not recovered: output off at a recovery level"
+    elif level_kind == "up":
+        phrase = "output still off on the increase"
+    else:
+        phrase = "reset: output off"
+    return phrase + (" (documented expectation below the declared boundary)" if off_expected
+                     else " where the policy expects it on; cause unclassified")
+
+
+def _state_runs(levels: list[dict[str, Any]]) -> list[tuple[str | None, float, float]]:
+    """Consecutive levels with the same classified state as (state, first V, last V)."""
+    runs: list[tuple[str | None, float, float]] = []
+    for level in levels:
+        state, vin = level["output_state"], level["vin_target_V"]
+        if runs and runs[-1][0] == state:
+            runs[-1] = (state, runs[-1][1], vin)
+        else:
+            runs.append((state, vin, vin))
+    return runs
+
+
+def _describe_run(state: str | None, first: float, last: float) -> str:
+    words = {"on": "in band", "off": "off (reset)", "indeterminate": "indeterminate", None: "not qualified"}[state]
+    return f"{words} at {first:g} V" if first == last else f"{words} from {first:g} V to {last:g} V"
+
+
+def supply_profile_statements(test_type: str, levels: list[dict[str, Any]], policy: dict[str, Any],
+                              stop: dict[str, Any] | None, *, synthetic: bool) -> list[str]:
+    """Plain sentences computed from the classified levels; nothing here is inferred beyond the recorded states."""
+    prefix = "Synthetic plant: " if synthetic else ""
+    statements = []
+    if test_type == SLOW_SUPPLY_RAMP_TEST_TYPE:
+        down = [level for level in levels if level["level_kind"] == "down"]
+        up = [level for level in levels if level["level_kind"] == "up"]
+        if down:
+            statements.append(prefix + f"decreasing from {down[0]['vin_target_V']:g} V, the output was "
+                              + "; ".join(_describe_run(*run) for run in _state_runs(down)) + ".")
+        if up:
+            statements.append(f"Increasing to {up[-1]['vin_target_V']:g} V, the output was "
+                              + "; ".join(_describe_run(*run) for run in _state_runs(up)) + ".")
+        recovered = next((level for level in up if level["observation"].startswith("recovered")), None)
+        if recovered:
+            statements.append(f"The output was back in band at {recovered['vin_target_V']:g} V on the increase "
+                              "(the first qualified in-band level after an off level; the return lies between it and the previous level).")
+        elif any(level["output_state"] == "off" for level in down) and up:
+            statements.append("The output had not returned by the last increasing level.")
+        rate, step, interval = policy.get("ramp_rate_V_per_min"), policy.get("step_V"), policy.get("step_interval_s")
+        if step is not None and interval is not None:
+            rate = rate if rate is not None else step / interval * 60
+            statements.append(f"Levels were reached in {step * 1000:g} mV live steps held {interval:g} s ({rate:g} V/min); "
+                              f"{SUPPLY_PROFILE_CADENCE}; states are established at the {len(levels)} observation levels only.")
+    else:
+        lows = [level for level in levels if level["level_kind"] == "low"]
+        recoveries = [level for level in levels if level["level_kind"] == "recovery"]
+        in_band = [level["vin_target_V"] for level in lows if level["output_state"] == "on"]
+        reset = [level["vin_target_V"] for level in lows if level["output_state"] == "off"]
+        unqualified = [level["vin_target_V"] for level in lows if level["output_state"] is None]
+        parts = []
+        if in_band:
+            parts.append("in band at the " + ", ".join(f"{v:g} V" for v in in_band) + (" low" if len(in_band) == 1 else " lows"))
+        if reset:
+            parts.append("off (reset) at the " + ", ".join(f"{v:g} V" for v in reset) + (" low" if len(reset) == 1 else " lows"))
+        if unqualified:
+            parts.append("not qualified at " + ", ".join(f"{v:g} V" for v in unqualified))
+        statements.append(prefix + "at the low levels the output was " + ("; ".join(parts) if parts else "not qualified") + ".")
+        judged = [level for level in recoveries[1:] if level["output_state"] is not None]
+        back = [level for level in judged if level["output_state"] == "on"]
+        failed = [level for level in judged if level["output_state"] != "on"]
+        if recoveries:
+            text = f"At the {recoveries[0]['vin_target_V']:g} V recovery level after a low the output was back in band {len(back)} of {len(judged)} times"
+            if failed:
+                text += "; it was " + ", ".join(f"{level['output_state']} after the {lows[index]['vin_target_V']:g} V low"
+                                                 for index, level in ((recoveries.index(f) - 1, f) for f in failed) if 0 <= index < len(lows))
+            statements.append(text + ".")
+        low_hold, recovery_hold = policy.get("low_hold_s"), policy.get("recovery_hold_s")
+        if low_hold is not None:
+            statements.append(f"Each low was held {low_hold:g} s and each recovery {recovery_hold:g} s before acquisition; "
+                              f"{SUPPLY_PROFILE_CADENCE}.")
+    lowest = min(level["vin_target_V"] for level in levels)
+    statements.append(f"The lowest requested level was {lowest:g} V; the standard's profile continues to 0 V, which is not a "
+                      "positive source setpoint on this bench.")
+    if stop and any(level["point_id"] == stop.get("point_id") for level in levels):
+        level = next(level for level in levels if level["point_id"] == stop["point_id"])
+        statements.append(f"The run stopped at the {level['vin_target_V']:g} V {level['level_kind']} level "
+                          f"({stop.get('classification')}): {stop.get('reason')}. Later levels were not run.")
+    return statements
+
+
+def _supply_profile_analysis(plan: Plan, run: dict, points: list[dict]) -> dict[str, Any]:
+    """Recompute each ISO 16750-2 supply-profile level's state from accepted means; state per level what was observed.
+
+    Same rules as the UVLO ramp: off/indeterminate levels are recorded states,
+    not efficiency points; an off level where the policy expects the output on
+    is inconclusive; a worker claim that disagrees with the accepted mean is
+    rejected. The per-level statement (in band / reset / recovered / not
+    recovered) is computed here from the classified states and labelled as the
+    synthetic plant when the run is simulated.
+    """
+    outcomes = {p["point_id"]: p for p in run.get("points", [])}
+    by_point = {p["point_id"]: p for p in points}
+    method = (run.get("method") or {}).get("supply_profile") or {}
+    synthetic = run.get("data_source", "simulated") == "simulated"
+    result: dict[str, Any] = {}
+    for test in plan.recipe.tests:
+        if test.type not in SUPPLY_PROFILE_TEST_TYPES or test.supply_profile is None:
+            continue
+        policy = test.supply_profile
+        kinds = (uvlo_ramp_phases(test.input_voltage_targets_V) if test.type == SLOW_SUPPLY_RAMP_TEST_TYPE
+                 else staircase_level_kinds(test.input_voltage_targets_V))
+        requests = [p for p in plan.points if p.test_id == test.id]
+        if [p.vin_target_V for p in requests] != list(test.input_voltage_targets_V):
+            raise ValueError("Supply-profile plan points do not match the declared levels")
+        levels, previous = [], None
+        for request, kind in zip(requests, kinds):
+            point = by_point[request.point_id]
+            state = policy.classify_output(point["Vout_V"]) if point["qualification"] == "valid" else None
+            if point["qualification"] == "valid" and state is None:
+                raise ValueError(f"Valid supply-profile level {request.point_id} has no accepted Vout mean to classify")
+            recorded = outcomes.get(request.point_id, {}).get("output_state")
+            if state is not None and recorded is not None and recorded != state:
+                raise ValueError(f"Worker recorded output state {recorded!r} for {request.point_id}; "
+                                 f"the accepted Vout mean classifies as {state!r}")
+            off_expected = policy.off_expected(request.vin_target_V, kind)
+            point.update(level_kind=kind, ramp_phase=kind if kind in ("down", "up") else None, output_state=state,
+                         output_off_expected=off_expected, minimum_vout_rule_applied=not off_expected)
+            if state == "on" and point.get("metric_flags"):
+                point.update(qualification="inconclusive", quality_flags=list(point["metric_flags"]),
+                             reason=flag_reason(point, point, list(point["metric_flags"])))
+                point["requirements"].update(output_voltage="not-evaluated", efficiency="not-evaluated")
+            if state is not None and state != "on":
+                point.update(efficiency_pct=None,
+                             efficiency_reason=f"output {state}: recorded supply-profile state, not an efficiency point",
+                             Pout_W=None, loss_W=None,
+                             output_power_reason=f"not evaluated: output {state}; a standby reading is not delivered output power",
+                             loss_reason=f"not evaluated: output {state}; output power is not applicable to a recorded profile state")
+                point["requirements"].update(output_voltage="not-applicable", efficiency="not-applicable")
+                if not off_expected:
+                    point.update(qualification="inconclusive",
+                                 reason=f"output {state} at a level where the declared policy expects it on; cause unclassified")
+            observation = level_observation(kind, state, previous, off_expected)
+            if state == "on" and point["requirements"].get("output_voltage") == "fail":
+                observation = (f"output on but outside the ±{plan.dut.acceptance.output_voltage_tolerance_pct:g} % acceptance band"
+                               + (" (after an off level)" if previous in ("off", "indeterminate") else ""))
+            point["level_observation"] = observation
+            levels.append({"point_id": request.point_id, "vin_target_V": request.vin_target_V, "level_kind": kind,
+                           "ramp_phase": point["ramp_phase"], "output_state": state, "output_off_expected": off_expected,
+                           "observation": observation, "qualification": point["qualification"]})
+            if state is not None:
+                previous = state
+        detail: dict[str, Any] = {"type": test.type, "label": SUPPLY_PROFILE_LABELS.get(test.type, test.type),
+                                  "clause": plan.recipe.standard_clause, "policy": policy.model_dump(),
+                                  "load_A": test.output_current_targets_A[0], "levels": levels,
+                                  "cadence": method.get("cadence"), "synthetic": synthetic}
+        if test.type == SLOW_SUPPLY_RAMP_TEST_TYPE:
+            detail.update(uvlo_ramp_brackets(levels))
+            detail["bracket_note"] = ("brackets lie between adjacent observation levels; the live steps between them were "
+                                      "guarded, not qualified")
+        policy_dump = {**policy.model_dump(), "ramp_rate_V_per_min": policy.ramp_rate_V_per_min}
+        detail["statements"] = supply_profile_statements(test.type, levels, policy_dump, run.get("stop"), synthetic=synthetic)
+        result[test.id] = detail
+    return result
+
+
 def analyze_evidence(plan: Plan, run: dict, samples: list[dict], *, version: str = FORMULA_VERSION) -> dict:
     """Pure analysis. Accepted complete cycles are designated by the worker."""
     evidence_label = _evidence_label(plan, run)
@@ -506,7 +685,8 @@ def analyze_evidence(plan: Plan, run: dict, samples: list[dict], *, version: str
             raise ValueError("Raw measurement does not match its declared role, unit or location")
         grouped[row["point_id"]].append(row)
     outcomes = {p["point_id"]: p for p in run.get("points", [])}
-    uvlo_tests = {t.id for t in plan.recipe.tests if t.type == UVLO_TEST_TYPE}
+    # UVLO steps and supply-profile levels are classified from the accepted Vout mean first.
+    uvlo_tests = {t.id for t in plan.recipe.tests if t.type in PHASE_SCOPED_TEST_TYPES}
     points = []
     accepted_values: dict[str, dict[str, list[float]]] = {}
     for request in plan.points:
@@ -582,6 +762,8 @@ def analyze_evidence(plan: Plan, run: dict, samples: list[dict], *, version: str
     # UVLO steps are classified first so expected-off steps carry no efficiency
     # before the budget is evaluated on the final point set.
     uvlo = _uvlo_analysis(plan, run, points) if any(t.type == UVLO_TEST_TYPE for t in plan.recipe.tests) else None
+    profiles = (_supply_profile_analysis(plan, run, points)
+                if any(t.type in SUPPLY_PROFILE_TEST_TYPES for t in plan.recipe.tests) else None)
     annotate_thermal_points(plan, run, grouped, points)
     # Structured readback budget (section 9.2). Unknown terms yield not_evaluated
     # reasons, never zeros; the per-point qualification state follows the budget.
@@ -596,7 +778,8 @@ def analyze_evidence(plan: Plan, run: dict, samples: list[dict], *, version: str
             "boundary": run.get("measurement_boundary", plan.bench.measurement_boundary),
             "points": points, "coverage": coverage_by_test(points),
             "uncertainty": budget,
-            **({"uvlo_input_ramp": uvlo} if uvlo else {})}
+            **({"uvlo_input_ramp": uvlo} if uvlo else {}),
+            **({"supply_profiles": profiles} if profiles else {})}
 
 
 def _finite_number(value: Any) -> float | None:
@@ -768,6 +951,28 @@ def _report_method(plan: Plan, run: dict, analysis: dict, raw_samples: list[dict
         if recorded_method["uvlo_input_ramp"].get("synthetic_model"):
             notes.append("The synthetic plant's UVLO threshold, hysteresis and standby draw are simulation parameters, "
                          "not characteristics of the DUT.")
+    if recorded_method.get("supply_profile"):
+        profile = recorded_method["supply_profile"]
+        cadence = profile.get("cadence") or {}
+        label = SUPPLY_PROFILE_LABELS.get(profile.get("type"), str(profile.get("type")))
+        notes.append(f"ISO 16750-2 {label} run as bounded DC steps: {SUPPLY_PROFILE_CADENCE}. The source stays on from the "
+                     "first level to the last at a fixed light load.")
+        if profile.get("type") == SLOW_SUPPLY_RAMP_TEST_TYPE and cadence.get("live_step_V") is not None:
+            rate = cadence.get("rate_V_per_min")
+            notes.append(f"The {rate:g} V/min rate is realised as {cadence['live_step_V'] * 1000:g} mV live steps every "
+                         f"{cadence['live_step_interval_s']:g} s: a staircase, not a linear ramp. Readings between observation "
+                         "levels are guarded and preserved as raw samples but are not qualified points; each observation level "
+                         f"waits the {plan.recipe.settling.minimum_dwell_s:g} s dwell before acquisition.")
+        elif cadence.get("low_hold_s") is not None:
+            notes.append(f"Each low level is held {cadence['low_hold_s']:g} s and each recovery level "
+                         f"{cadence['recovery_hold_s']:g} s before acquisition.")
+        notes.append("The normal minimum-output and load-established rules apply only where output-off is not expected "
+                     "(descending or low levels at or above the expected-off boundary, ascending or recovery levels at or above "
+                     "the expected-on boundary); elsewhere output-off is recorded, not faulted. Absolute input-current, voltage "
+                     "and output-current limits apply at every level and every live step.")
+        if profile.get("synthetic_model"):
+            notes.append("The synthetic plant's UVLO threshold, hysteresis and standby draw are simulation parameters, "
+                         "not characteristics of the DUT; every statement about reset and recovery describes the mock plant.")
     if recorded_method.get("hold_settling"):
         notes.append(str(recorded_method["hold_settling"]) + f". The {plan.recipe.settling.minimum_dwell_s:g} s settling dwell applies to sweep steps; continuous hold bins do not restart it.")
     if recorded_method.get("sustained_load_actual_elapsed_s") is not None:
@@ -1114,10 +1319,11 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
     voltage_sweep = run.get("method", {}).get("voltage_efficiency_sweep")
     startup_descent = run.get("method", {}).get("startup_descent")
     uvlo = analysis.get("uvlo_input_ramp")
+    profiles = analysis.get("supply_profiles")
     comparison = _voltage_comparison(points, voltage_sweep) if voltage_sweep else []
     if voltage_sweep or startup_descent:
         _accepted_point_times(points, raw_samples)
-    executed = run.get("executed_point_ids") if search or voltage_sweep or startup_descent or uvlo else None
+    executed = run.get("executed_point_ids") if search or voltage_sweep or startup_descent or uvlo or profiles else None
     if executed is not None:
         known_ids = {p["point_id"] for p in points}
         if (not isinstance(executed, list) or any(not isinstance(pid, str) for pid in executed)
@@ -1233,6 +1439,22 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
                         f"(descending, then ascending) at a fixed {load_mA:g} mA load. Output-off steps are recorded states "
                         "under the declared UVLO convention, not faults. Transitions are bracketed between adjacent steps; "
                         "no exact threshold is claimed."))
+    if profiles:
+        for test in plan.recipe.tests:
+            detail = profiles.get(test.id)
+            if not detail:
+                continue
+            load_mA = detail["load_A"] * 1000
+            order = ("descending, then ascending" if detail["type"] == SLOW_SUPPLY_RAMP_TEST_TYPE
+                     else "the recovery level alternating with each low")
+            figures.append(FigureSpec(id=f"fig-profile-{test.id}", title=f"Output Voltage vs Input Level (ISO 16750-2 {detail['label']})",
+                x_key="Vin_V", y_key="Vout_V", x_label="Input Voltage (V)", y_label="Output Voltage (V)",
+                series=[FigureSeries(id=f"profile-{test.id}", label=f"{load_mA:g} mA load · declared level order",
+                    vin_target_V=None, iout_target_A=detail["load_A"], selection_key=f"profile-{test.id}",
+                    point_ids=[level["point_id"] for level in detail["levels"]])],
+                caption=f"{evidence_label}. {boundary}. Accepted DC means at each declared level in execution order ({order}) "
+                        f"at a fixed {load_mA:g} mA load. Output-off levels are recorded states under the declared policy, not "
+                        f"faults. {SUPPLY_PROFILE_CADENCE[0].upper() + SUPPLY_PROFILE_CADENCE[1:]}."))
     metrics: list[MetricResult] = []
     efficiency = [p for p in valid if p["efficiency_pct"] is not None]
     if efficiency:
@@ -1258,8 +1480,8 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
             selector={"point_id": point["point_id"]}, point_ids=[point["point_id"]], figure_ids=[]))
     nominal = plan.dut.ratings.output_voltage_nominal_V
     for test in plan.recipe.tests:
-        if test.type == UVLO_TEST_TYPE:
-            continue  # a ramp through an expected-off region is not a regulation sweep
+        if test.type in PHASE_SCOPED_TEST_TYPES:
+            continue  # a ramp or staircase through an expected-off region is not a regulation sweep
         for vin in dict.fromkeys(test.input_voltage_targets_V):
             rows = [p for p in valid if p["test_id"] == test.id and p["vin_target_V"] == vin]
             if len(rows) >= 2 and len({p["iout_target_A"] for p in rows}) >= 2:
@@ -1342,6 +1564,19 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
             summary.append(" ".join(parts))
             for note in detail["notes"]:
                 summary.append(f"UVLO input ramp '{test_id}': {note}.")
+    if profiles:
+        for test_id, detail in profiles.items():
+            summary.append(f"ISO 16750-2 {detail['label']} '{test_id}' at {detail['load_A'] * 1000:g} mA. "
+                           + " ".join(detail["statements"]))
+            if detail["type"] == SLOW_SUPPLY_RAMP_TEST_TYPE:
+                off, on = detail.get("turn_off"), detail.get("turn_on")
+                parts = [(f"On the observation grid the output went off between {off['upper_V']:g} V (last in band) and "
+                          f"{off['lower_V']:g} V (first off) on the decrease." if off else
+                          "No off level was observed on the decrease, so no turn-off is bracketed."),
+                         (f"It came back between {on['lower_V']:g} V (last off) and {on['upper_V']:g} V (first in band) on the increase."
+                          if on else "No return to band is bracketed on the increase.")]
+                parts.append("These are observation-grid intervals; no threshold value is claimed.")
+                summary.append(" ".join(parts))
     if startup_descent:
         summary.append(f"This run checks continued operation after starting at {start_text}: the source is kept on while "
                        f"input voltage decreases in steps, with a {load_phrase}. It does not test cold start at the lower input voltages.")
@@ -1519,6 +1754,7 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
                    **({"voltage_efficiency_sweep": copy.deepcopy(voltage_sweep), "voltage_comparison": comparison} if voltage_sweep else {}),
                    **({"startup_descent": copy.deepcopy(startup_descent)} if startup_descent else {}),
                    **({"uvlo_input_ramp": copy.deepcopy(uvlo)} if uvlo else {}),
+                   **({"supply_profiles": copy.deepcopy(profiles)} if profiles else {}),
                    **({"executed_point_ids": list(executed)} if executed is not None else {})},
         coverage=analysis["coverage"], points=points, metrics=metrics, figures=figures,
         tables=[TableSpec(id="table-points", title="All requested operating points", columns=CSV_FIELDS,

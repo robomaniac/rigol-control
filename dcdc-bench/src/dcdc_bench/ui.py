@@ -12,6 +12,7 @@ import json
 import sys
 from pathlib import Path
 
+from .standard_recipes import STANDARDS_GROUP, build_recipe, clause_rows, default_system, standard_cards
 from .ui_models import (BENCH_NAMES, DEFAULT_CATEGORY, DELETE_PROMPTS, START_LABELS, activity_text, artifact_url,
                         bench_equipment, bench_title, card_meta, dut_approved, dut_subtitle, duration_text, edited_dut,
                         edited_recipe, elapsed_text, event_text, grouped_recipes, job_actions, limits_rows, limits_summary,
@@ -51,6 +52,12 @@ body{background:#fff;color:#183047;font-family:system-ui,-apple-system,"Segoe UI
 .bench-badge{display:inline-block;border-radius:4px;padding:1px 7px;font-size:12.5px;font-weight:600;white-space:nowrap;background:#eef2f5;color:#516677}
 .bench-badge-standard{background:#e6f1fb;color:#174c6e}.bench-badge-ok{background:#edf7f4;color:#174b42}
 .bench-badge-partial{background:#fff7e9;color:#785018}.bench-badge-real{background:#fff1dc;color:#785018}
+.bench-badge-grey{background:#eef2f5;color:#516677}
+.bench-checklist{border:1px solid #dce4e9;border-radius:8px;padding:12px 14px;background:#f8fafb;width:100%}
+.bench-clause-row{display:grid;grid-template-columns:minmax(220px,1.4fr) auto minmax(160px,1fr);gap:4px 12px;align-items:center;padding:6px 0;border-bottom:1px solid #e6edf1;width:100%}
+.bench-clause-row.untickable{opacity:.72}
+.bench-clause-note{color:#5a6f7e;font-size:12.5px;grid-column:1 / -1;margin-top:-2px}
+.bench-checklist-footer{font-weight:600;color:#183047}
 .bench-add{border:2px dashed #dce4e9;border-radius:8px;display:flex;align-items:center;justify-content:center;color:#15608f;font-weight:600;padding:13px;text-align:center;cursor:pointer;min-height:104px}
 .bench-add:hover{background:#f3f7fa}
 .bench-tiles{display:grid;grid-template-columns:1fr 1fr;gap:13px;align-items:start;width:100%}
@@ -324,7 +331,11 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                  'seen': {},
                  # Real-start confirmation widgets; emptied whenever the panel is cleared so a
                  # later invalidation never touches deleted inputs.
-                 'confirm': {}, 'stop_armed': False, 'stop_key': None, 'editor': None}
+                 'confirm': {}, 'stop_armed': False, 'stop_key': None, 'editor': None,
+                 # The automotive-standards checklist: expanded or not, the 12 V / 24 V system class chosen
+                 # for the current converter (None: the converter's remembered class, else 12 V) and the
+                 # ticked ISO 16750-2 clause numbers.
+                 'standards': {'open': False, 'system': None, 'ticked': set()}}
         panels = {}
         widgets = {}
 
@@ -426,6 +437,7 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                 if state['dut'] == name:
                     return
                 state['dut'] = name
+                state['standards'].update(system=None, ticked=set())  # the checklist follows the converter's ratings and class
                 await refresh_feasibility()  # the cards' runnability depends on the converter's ratings
                 render_converters()
             else:
@@ -896,9 +908,143 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                                         ('Delete', lambda _=None, name=name: delete_profile('recipe', name))])
                 if not state['catalog']['recipe']:
                     ui.label('No saved tests yet.').classes('bench-muted')
+                render_standards()
                 with ui.element('div').classes('bench-cards'):
                     add_card('+ New test', lambda _=None: open_recipe_editor(None))
                 ui.label('Simulated vs real is not part of a test any more — it comes from question 2. Each input voltage is tested at each requested load.').classes('bench-muted')
+
+        # --- automotive standards: one card per standard, the ISO 16750-2 card expands into a clause checklist ---
+
+        def standards_system():
+            return state['standards']['system'] or default_system(current('dut') or {})
+
+        def render_standards():
+            """Cards for the automotive standards catalog; non-runnable standards are greyed with their one-sentence reason."""
+            dut, bench = current('dut'), current('bench')
+            ui.label(STANDARDS_GROUP).classes('bench-group')
+            if not dut or not bench:
+                ui.label('Select a converter and a bench to see which clauses can run here.').classes('bench-muted')
+                return
+            system = standards_system()
+            try:
+                infos = standard_cards(bench, dut, system)
+                rows = clause_rows(bench, dut, system) if state['standards']['open'] else []
+            except (ValueError, KeyError) as exc:
+                ui.label('Standards catalog unavailable: ' + str(exc)).classes('bench-card-reason')
+                return
+            with ui.element('div').classes('bench-cards'):
+                for info in infos:
+                    if info['expandable']:
+                        item = card(selected=state['standards']['open'], title=info['title'], subtitle=info['subtitle'],
+                                    meta=f"{info['runnable_count']} of {info['clause_count']} clauses runnable on this bench",
+                                    reason=None if info['runnable'] else info['reason'], badge=f'{system[:-1]} V system',
+                                    on_select=lambda _=None: toggle_standard())
+                        item.classes(add='bench-standard-card')
+                        item.props(f'aria-expanded={"true" if state["standards"]["open"] else "false"}')
+                    else:
+                        card(selected=False, title=info['title'], subtitle=info['subtitle'], reason=info['reason'],
+                             on_select=lambda _=None: None).classes(add='bench-standard-card')
+            if state['standards']['open']:
+                render_checklist(rows, system)
+
+        def toggle_standard():
+            """Selecting the standard opens its checklist with every runnable clause ticked; selecting again folds it."""
+            standards = state['standards']
+            standards['open'] = not standards['open']
+            if standards['open']:
+                rows = clause_rows(current('bench'), current('dut'), standards_system())
+                standards['ticked'] = {row['number'] for row in rows if row['tickable']}
+            render_tests()
+
+        def render_checklist(rows, system):
+            ticked = state['standards']['ticked']
+            runnable = sum(1 for row in rows if row['tickable'])
+            with ui.column().classes('bench-checklist gap-1'):
+                with ui.row().classes('items-center gap-3 flex-wrap w-full'):
+                    ui.label('System voltage class').classes('bench-lbl')
+                    toggle = ui.toggle({'12V': '12 V', '24V': '24 V'}, value=system, on_change=lambda e: system_changed(e.value))
+                    toggle.props('no-caps dense unelevated toggle-color=primary aria-label="System voltage class"')
+                    widgets['system_toggle'] = toggle
+                    ui.label('Remembered on the converter profile. Levels follow ISO 16750-2 Tables 3/4 for the chosen class.').classes('bench-muted')
+                for row in rows:
+                    with ui.element('div').classes('bench-clause-row' + ('' if row['tickable'] else ' untickable')):
+                        box = ui.checkbox(f"§{row['number']} {row['title']}", value=row['tickable'] and row['number'] in ticked,
+                                          on_change=lambda e, number=row['number']: tick_clause(number, e.value))
+                        box.props(f'aria-label="clause {row["number"]}"')
+                        if not row['tickable']:
+                            box.disable()
+                        style = {'runs_here': 'bench-badge-ok', 'procedure_pending': 'bench-badge-partial'}.get(row['badge'], 'bench-badge-grey')
+                        badge = ui.label(row['badge_label']).classes('bench-badge ' + style)
+                        badge.tooltip(row['text'] or row['reason'])
+                        ui.label(row['levels']).classes('bench-muted')
+                        note = row['text'] if not row['tickable'] else '; '.join(row['conditions'])
+                        if note:
+                            ui.label(note).classes('bench-clause-note')
+                with ui.row().classes('items-center justify-between w-full flex-wrap gap-2'):
+                    ui.label(f'{runnable} of {len(rows)} clauses runnable on this bench').classes('bench-card-meta bench-checklist-footer')
+                    widgets['add_tests'] = ui.button('Add as tests', on_click=add_as_tests, icon='playlist_add').props('unelevated no-caps')
+                    widgets['add_tests'].set_enabled(bool(ticked))
+                ui.label('Each ticked clause becomes a saved test under “ISO 16750-2 supply profiles”. §4.5 and §4.6.2 run on the '
+                         'simulated bench only and, because they step below the converter’s stated minimum, plan as executable '
+                         'only after the recipe is approved under the bench’s protective policy (brief §7.5).').classes('bench-muted')
+
+        def tick_clause(number, value):
+            ticked = state['standards']['ticked']
+            (ticked.add if value else ticked.discard)(number)
+            if 'add_tests' in widgets:
+                widgets['add_tests'].set_enabled(bool(ticked))
+
+        async def system_changed(value):
+            """Switch the clause parameters to the other system class and remember it on the converter profile."""
+            if value not in ('12V', '24V') or value == standards_system():
+                return
+            name = state['dut']
+            data = copy.deepcopy(state['catalog']['dut'][name])
+            data['system_voltage_class'] = value
+            try:
+                await run.io_bound(service.save_profile, 'dut', data)
+            except (ValueError, OSError) as exc:
+                notify_error(exc)
+                return
+            if client.is_deleted:
+                return
+            state['catalog']['dut'][name] = data
+            state['standards']['system'] = value
+            rows = clause_rows(current('bench'), data, value)
+            state['standards']['ticked'] = {row['number'] for row in rows if row['tickable']}
+            render_tests()
+            changed()
+
+        async def add_as_tests():
+            """Save one recipe per ticked runnable clause and select the last one; every field comes from the catalog and the ratings."""
+            standards = state['standards']
+            dut, bench = current('dut'), current('bench')
+            numbers = sorted(standards['ticked'], key=lambda number: [int(part) for part in number.split('.')])
+            if not (dut and bench and numbers):
+                ui.notify('Tick at least one runnable clause first.', type='warning')
+                return
+            system, saved = standards_system(), []
+            try:
+                for number in numbers:
+                    data = build_recipe(number, system, dut, bench)
+                    taken = set(state['catalog']['recipe']) | set(saved)
+                    if data['recipe_id'] in taken:
+                        data['recipe_id'] = unique_name(data['recipe_id'], taken)
+                    name = await run.io_bound(service.save_profile, 'recipe', data)
+                    if client.is_deleted:
+                        return
+                    saved.append(name)
+            except (ValueError, TypeError, OSError) as exc:
+                notify_error(exc)
+                if not saved:
+                    return
+            await reload(recompute=False)
+            state['recipe'] = saved[-1]
+            await refresh_feasibility()
+            standards['ticked'] = set()
+            render_tests()
+            changed()
+            ui.notify(f'Added {len(saved)} test{"" if len(saved) == 1 else "s"} under “ISO 16750-2 supply profiles”.', type='positive')
 
         # --- plan, confirmation, start -----------------------------------------------------------
 

@@ -684,7 +684,10 @@ def test_page_asks_three_questions_then_preview_and_start(tmp_path, monkeypatch)
                 assert not find_all(client, tag='q-tab'), 'no tabs any more'
                 assert find(client, css='bench-summary-text').text == f'12T12-4A · Simulated bench · {QUICK_TITLE}'
                 titles = [name for name, _ in cards(client)]
-                assert titles == ['12T12-4A', SMALL_GRID_TITLE, QUICK_TITLE], 'converter first, then tests by title'
+                assert titles[:3] == ['12T12-4A', SMALL_GRID_TITLE, QUICK_TITLE], 'converter first, then tests by title'
+                assert titles[3:] == ['ISO 16750-2:2023 — electrical loads', 'ISO 7637-2:2011 — conducted transients', 'CISPR 25:2021 — emissions',
+                                      'ISO 11452 — radiated immunity', 'ISO 10605:2023 — electrostatic discharge',
+                                      'ISO 16750-3:2023 — mechanical loads', 'ISO 16750-4:2023 — climatic loads'], 'then the standards catalog'
                 converter = card_named(client, '12T12-4A')
                 assert 'selected' in converter.classes and '9–36 V in, 12 V / 4 A out' in texts(converter)
                 assert 'Not yet approved for the real bench' in texts(converter)
@@ -924,6 +927,168 @@ def test_new_test_editor_saves_a_modeless_recipe_bound_to_the_selected_converter
                 card = card_named(client, '24 V — no-load window, then 0.1 A')
                 assert 'selected' in card.classes and '24 V × 0 / 0.1 A' in texts(card) and '2 points · simulated' in texts(card)
                 assert not any(editor.visible for editor in find_all(client, css='bench-editor')), 'saving closes the editor'
+            assert page.errors == []
+        finally:
+            client.delete()
+    asyncio.run(scenario())
+
+
+# --- Automotive standards in "Which test?" ---------------------------------------------------------
+
+ISO_TITLE = 'ISO 16750-2:2023 — electrical loads'
+
+
+def clause_box(client, number):
+    return next(element for element in find_all(client, tag='q-checkbox') if str(element.text).startswith(f'§{number} '))
+
+
+def clause_row(client, number):
+    box = clause_box(client, number)
+    return next(ancestor for ancestor in ancestors(box) if 'bench-clause-row' in ancestor.classes)
+
+
+def badge_of(client, number):
+    return next(child for child in descendants(clause_row(client, number)) if 'bench-badge' in child.classes)
+
+
+def test_standards_group_lists_every_standard_and_greys_those_not_on_this_bench(tmp_path, monkeypatch):
+    async def scenario():
+        page = await open_bench_page(monkeypatch, tmp_path, {})
+        client = page.client
+        try:
+            with client:
+                assert 'Automotive supply standards' in texts(client.layout)
+                titles = [name for name, _ in cards(client)]
+                assert titles.index(ISO_TITLE) > titles.index(QUICK_TITLE), 'the standards group follows the saved tests'
+                for title in ('ISO 7637-2:2011 — conducted transients', 'CISPR 25:2021 — emissions', 'ISO 11452 — radiated immunity',
+                              'ISO 10605:2023 — electrostatic discharge', 'ISO 16750-3:2023 — mechanical loads', 'ISO 16750-4:2023 — climatic loads'):
+                    other = card_named(client, title)
+                    assert 'greyed' in other.classes and 'selected' not in other.classes
+                    assert any(text.startswith('Cannot run on this bench: ') for text in texts(other))
+                transients = card_named(client, 'ISO 7637-2:2011 — conducted transients')
+                assert any('transient pulse generator' in text and 'different laboratory' in text for text in texts(transients))
+                iso = card_named(client, ISO_TITLE)
+                assert 'greyed' not in iso.classes and '3 of 19 clauses runnable on this bench' in texts(iso) and '12 V system' in texts(iso)
+                assert not find_all(client, tag='q-checkbox', text='§4.2 Direct current (DC) supply voltage'), 'folded until selected'
+            assert page.errors == []
+        finally:
+            client.delete()
+    asyncio.run(scenario())
+
+
+def test_iso_card_expands_into_a_clause_checklist_with_one_badge_per_status(tmp_path, monkeypatch):
+    async def scenario():
+        page = await open_bench_page(monkeypatch, tmp_path, {})
+        client = page.client
+        try:
+            with client:
+                await click(card_named(client, ISO_TITLE))
+                assert 'selected' in card_named(client, ISO_TITLE).classes
+                shown = texts(client.layout)
+                assert '3 of 19 clauses runnable on this bench' in shown
+                for number in ('4.2', '4.5', '4.6.2'):
+                    box = clause_box(client, number)
+                    assert box.value is True and box.enabled, f'§{number} is ticked by selecting the standard'
+                    assert badge_of(client, number).text == 'runs here' and 'bench-badge-ok' in badge_of(client, number).classes
+                for number, label, note in (('4.3.1.1', 'procedure not yet implemented', '60-min hold exceeds the 540 s run budget; needs a long-hold procedure'),
+                                            ('4.6.1.2', 'procedure not yet implemented', '>=1 s interruptions only (source output switched off at the command cadence); needs an interruption procedure')):
+                    box, badge = clause_box(client, number), badge_of(client, number)
+                    assert box.value is False and not box.enabled and box._props.get('disable') is True
+                    assert badge.text == label and 'bench-badge-partial' in badge.classes
+                    assert note in texts(clause_row(client, number))
+                for number, label in (('4.3.2', 'needs ms pulse generator'), ('4.6.4', 'excluded by policy'), ('4.7', 'excluded by policy'),
+                                      ('4.11', 'not on this bench'), ('4.6.1.1', 'needs 10 ms edges, ms pulse generator')):
+                    box, badge = clause_box(client, number), badge_of(client, number)
+                    assert not box.enabled and box.value is False, f'§{number} cannot be ticked'
+                    assert badge.text == label and 'bench-badge-grey' in badge.classes
+                    assert any(text.endswith('.') and len(text) > 40 for text in texts(clause_row(client, number))), 'the reason sentence is shown'
+                assert 'Load dump is a fault-injection overvoltage transient that this release does not perform (implementation brief §2 and §7.5).' in texts(clause_row(client, '4.6.4'))
+                assert any('code C: UA 14 V, Usmin 9 V, Usmax 16 V' in text for text in texts(clause_row(client, '4.2')))
+                assert any(text.startswith('14 V → 1 V → 14 V at 0.5 V/min (20 mV every 2.4 s)') for text in texts(clause_row(client, '4.5')))
+                assert any("Levels below the DUT's stated 9 V minimum need the approved UVLO-style recipe" in text for text in texts(clause_row(client, '4.6.2')))
+                assert len(find_all(client, css='bench-clause-row')) == 19
+                assert button(client, 'Add as tests').enabled
+                await click(card_named(client, ISO_TITLE))
+                assert not find_all(client, css='bench-clause-row'), 'selecting the standard again folds the checklist'
+            assert page.errors == []
+        finally:
+            client.delete()
+    asyncio.run(scenario())
+
+
+def test_system_toggle_switches_to_24_v_levels_and_is_remembered_on_the_converter(tmp_path, monkeypatch):
+    async def scenario():
+        page = await open_bench_page(monkeypatch, tmp_path, {})
+        client, service = page.client, page.service
+        try:
+            with client:
+                await click(card_named(client, ISO_TITLE))
+                toggle = find(client, tag='q-btn-toggle')
+                assert toggle.value == '12V'
+                toggle.set_value('24V')
+                await settle()
+                assert service.load_profile('dut', '12t12-4a')['system_voltage_class'] == '24V', 'remembered on the converter profile'
+                assert '24 V system' in texts(card_named(client, ISO_TITLE))
+                assert any('code E: UA 28 V, Usmin 10 V, Usmax 32 V' in text for text in texts(clause_row(client, '4.2')))
+                assert any(text.startswith('28 V → 1 V → 28 V at 0.5 V/min') for text in texts(clause_row(client, '4.5')))
+                assert badge_of(client, '4.3.1.1').text == 'outside DUT rating' and not clause_box(client, '4.3.1.1').enabled
+                assert any('36 V level' in text and 'equals the DUT ceiling' in text for text in texts(clause_row(client, '4.3.1.1')))
+                assert badge_of(client, '4.3.1.2').text == 'not applicable'
+                assert all(clause_box(client, n).value is True for n in ('4.2', '4.5', '4.6.2'))
+                assert '3 of 19 clauses runnable on this bench' in texts(client.layout)
+            assert page.errors == []
+            # A fresh page for the same converter opens on the remembered class.
+            again = await open_bench_page(monkeypatch, tmp_path, {})
+            try:
+                with again.client:
+                    assert '24 V system' in texts(card_named(again.client, ISO_TITLE))
+            finally:
+                again.client.delete()
+        finally:
+            client.delete()
+    asyncio.run(scenario())
+
+
+def test_add_as_tests_saves_one_recipe_per_ticked_runnable_clause_with_the_catalog_fields(tmp_path, monkeypatch):
+    async def scenario():
+        page = await open_bench_page(monkeypatch, tmp_path, {})
+        client, service = page.client, page.service
+        try:
+            with client:
+                await click(card_named(client, ISO_TITLE))
+                clause_box(client, '4.6.2').set_value(False)
+                await settle()
+                await click(button(client, 'Add as tests'))
+                saved = service.list_profiles()['recipe']
+                assert 'iso16750-2-4-2-12v' in saved and 'iso16750-2-4-5-12v' in saved and 'iso16750-2-4-6-2-12v' not in saved
+                assert not any(name.startswith('iso16750-2-4-3') for name in saved), 'a clause without a procedure never becomes a test'
+                sweep = service.load_profile('recipe', 'iso16750-2-4-2-12v')
+                assert sweep['title'] == 'ISO 16750-2 §4.2 — supply voltage range (12 V system)'
+                assert sweep['category'] == 'ISO 16750-2 supply profiles' and sweep['standard_clause'] == 'ISO 16750-2:2023 §4.2'
+                assert sweep['dut_profile_id'] == '12t12-4a' and sweep['execution_mode'] is None
+                assert sweep['tests'][0]['type'] == 'steady_state_load_sweep' and sweep['tests'][0]['input_voltage_targets_V'] == [14., 9., 16.]
+                assert sweep['tests'][0]['output_current_targets_A'] == [.1, .25, .5]
+                ramp = service.load_profile('recipe', 'iso16750-2-4-5-12v')
+                assert ramp['title'] == 'ISO 16750-2 §4.5 — slow decrease and increase (12 V system)'
+                assert ramp['tests'][0]['type'] == 'slow_supply_ramp' and ramp['tests'][0]['input_voltage_targets_V'][:3] == [14., 13., 12.]
+                assert min(ramp['tests'][0]['input_voltage_targets_V']) == 1. and ramp['tests'][0]['output_current_targets_A'] == [.1]
+                policy = ramp['tests'][0]['supply_profile']
+                assert (policy['step_V'], policy['step_interval_s'], policy['expected_off_below_V'], policy['output_on_minimum_V']) == (.02, 2.4, 9., 10.8)
+                assert ramp['authorization']['uvlo_approved'] is False
+                assert 'ISO 16750-2 supply profiles' in texts(client.layout), 'the new cards are grouped under the standard'
+                sweep_card = card_named(client, 'ISO 16750-2 §4.2 — supply voltage range (12 V system)')
+                assert 'greyed' not in sweep_card.classes and 'ISO 16750-2:2023 §4.2' in texts(sweep_card) and '9 points · simulated' in texts(sweep_card)
+                ramp_card = card_named(client, 'ISO 16750-2 §4.5 — slow decrease and increase (12 V system)')
+                assert 'selected' in ramp_card.classes, 'the last added test is selected'
+                assert 'greyed' in ramp_card.classes and any('approved UVLO-style path' in text for text in texts(ramp_card)), \
+                    'below the stated minimum the profile waits for the recipe approval, as the UVLO example does'
+                assert '27 points · simulated' in texts(ramp_card)
+                assert any(n.startswith('Added 2 tests') for n in page.notices)
+                assert not button(client, 'Add as tests').enabled, 'ticks are consumed'
+                await click(sweep_card)
+                await click(button(client, 'Preview'))
+                shown = texts(find(client, css='bench-plan'))
+                assert '9 / 9' in shown and button(client, 'Start simulated test').enabled
             assert page.errors == []
         finally:
             client.delete()

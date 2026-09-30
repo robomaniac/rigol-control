@@ -63,6 +63,22 @@ class SourceBoundaryStop(UvloStop):
     qualification = "setup-limited"
 
 
+def absolute_limits(plan: Plan) -> dict[str, Any]:
+    """The absolute protective limits a phase-scoped procedure enforces at every observation of every phase."""
+    controls, ratings = plan.bench.protective_controls, plan.dut.ratings
+    return {
+        "input_current_A": controls.source_current_limit_A,
+        "input_voltage_V": controls.dut_input_overvoltage_V if controls.dut_input_overvoltage_V is not None
+                           else ratings.input_voltage_max_V,
+        "input_voltage_ceiling_source": ("bench protective_controls.dut_input_overvoltage_V"
+                                         if controls.dut_input_overvoltage_V is not None
+                                         else "DUT input_voltage_max_V (no bench input OVP declared)"),
+        "output_voltage_V": controls.dut_output_overvoltage_V,
+        "output_current_A": controls.output_overcurrent_A,
+        "load_current_tolerance_A": LOAD_CURRENT_TOLERANCE_A,
+    }
+
+
 class UvloInputRampProcedure:
     """Plan-driven UVLO ramp. Construction refuses anything the planner did not approve outright."""
 
@@ -86,18 +102,7 @@ class UvloInputRampProcedure:
         self.policy = None
         self.step: dict[str, Any] | None = None
         self.acquiring = False  # the load-established rule judges acquisition cycles, not the settling transient
-        controls, ratings = plan.bench.protective_controls, plan.dut.ratings
-        self.limits = {
-            "input_current_A": controls.source_current_limit_A,
-            "input_voltage_V": controls.dut_input_overvoltage_V if controls.dut_input_overvoltage_V is not None
-                               else ratings.input_voltage_max_V,
-            "input_voltage_ceiling_source": ("bench protective_controls.dut_input_overvoltage_V"
-                                             if controls.dut_input_overvoltage_V is not None
-                                             else "DUT input_voltage_max_V (no bench input OVP declared)"),
-            "output_voltage_V": controls.dut_output_overvoltage_V,
-            "output_current_A": controls.output_overcurrent_A,
-            "load_current_tolerance_A": LOAD_CURRENT_TOLERANCE_A,
-        }
+        self.limits = absolute_limits(plan)
 
     # -- contract surface -------------------------------------------------------------------------
     def plan(self) -> Plan:
@@ -297,7 +302,30 @@ def run_uvlo_mock(plan: Plan, out: Path, *, seed: int = 1, synthetic: SyntheticU
     """
     if plan.bench.mode != "mock":  # the bench decides; a legacy recipe mode is metadata
         raise ValueError("run_uvlo_mock accepts mock profiles only; real UVLO execution is not implemented and requires review")
-    procedure = UvloInputRampProcedure(plan)
+    return run_phase_scoped_mock(plan, out, procedure_factory=UvloInputRampProcedure, method_key="uvlo_input_ramp",
+                                 run_tag="uvlo", scenario="uvlo-input-ramp",
+                                 authorization_note="explicit run_uvlo_mock call under the recipe's UVLO approval block; "
+                                                    "never arms real equipment",
+                                 seed=seed, synthetic=synthetic, reading_override=reading_override,
+                                 operator_observations=operator_observations, attachment_descriptors=attachment_descriptors)
+
+
+def run_phase_scoped_mock(plan: Plan, out: Path, *, procedure_factory: Callable[[Plan], Any], method_key: str, run_tag: str,
+                          scenario: str, authorization_note: str, seed: int = 1, synthetic: SyntheticUvlo | None = None,
+                          reading_override: ReadingOverride | None = None, operator_observations: list[str] | None = None,
+                          attachment_descriptors: list[dict] | None = None) -> Path:
+    """The in-process harness shared by the phase-scoped mock procedures (UVLO ramp, supply profiles).
+
+    ``procedure_factory(plan)`` builds the procedure (it refuses what the planner
+    did not approve); ``method_key`` is the ``run["method"]`` entry the procedure's
+    metadata declares. The harness owns the synthetic plant (``UvloMockBench``),
+    the virtual clock, the file locks, fsync-per-record persistence, the
+    fault/stop bookkeeping and the verified-OFF shutdown. Nothing here imports
+    or creates a real instrument.
+    """
+    if plan.bench.mode != "mock":
+        raise ValueError("phase-scoped mock procedures accept mock profiles only; real execution is not implemented")
+    procedure = procedure_factory(plan)
     if plan.bench.source.max_current_A is None:
         raise ValueError("mock source current capability is required")
     if any(quantity not in plan.bench.measurements for quantity in QUANTITIES):
@@ -307,13 +335,13 @@ def run_uvlo_mock(plan: Plan, out: Path, *, seed: int = 1, synthetic: SyntheticU
                           plan.bench.protective_controls.source_current_limit_A or plan.bench.source.max_current_A,
                           plan.bench.load.min_voltage_V, seed, uvlo=synthetic)
     created = datetime.now(timezone.utc)
-    run_id = created.strftime("%Y%m%dT%H%M%S.%fZ") + "_uvlo_" + uuid.uuid4().hex[:8]
+    run_id = created.strftime("%Y%m%dT%H%M%S.%fZ") + f"_{run_tag}_" + uuid.uuid4().hex[:8]
     directory = Path(out) / run_id
     snapshot = plan.model_dump(mode="json")
     run: dict[str, Any] = {
         "schema_version": "1.0", "run_id": run_id, "data_source": "simulated", "execution_status": "running",
         "lifecycle_state": "VALIDATING", "created_utc": created.isoformat(), "plan_hash": plan.plan_hash,
-        "scenario": "uvlo-input-ramp",
+        "scenario": scenario,
         "points": [{**p.model_dump(), "planning_status": p.status, "qualification": "not-run", "reason": "not reached",
                     "acquisition_cycle_ids": [], "requirement_result": "not-evaluated"} for p in plan.points],
         "shutdown": {"source": {"state": "UNKNOWN"}, "load": {"state": "UNKNOWN"}},
@@ -326,7 +354,7 @@ def run_uvlo_mock(plan: Plan, out: Path, *, seed: int = 1, synthetic: SyntheticU
         "operator_observations": list(operator_observations or []),
         "attachment_descriptors": list(attachment_descriptors or []), "real_hardware_opened": False, "errors": []}
     run.update(procedure.metadata())
-    run["method"]["uvlo_input_ramp"]["synthetic_model"] = synthetic.parameters()
+    run["method"][method_key]["synthetic_model"] = synthetic.parameters()
     store = RunStore(directory)
     store.initialize({"dut": snapshot["dut"], "bench": snapshot["bench"], "recipe": snapshot["recipe"],
                       "authorization": run["authorization"]}, snapshot, run)
@@ -419,8 +447,7 @@ def run_uvlo_mock(plan: Plan, out: Path, *, seed: int = 1, synthetic: SyntheticU
     try:
         transition("PLAN_READY")
         transition("AWAITING_ARM")
-        event("mock_authorized", detail="explicit run_uvlo_mock call under the recipe's UVLO approval block; "
-                                        "never arms real equipment")
+        event("mock_authorized", detail=authorization_note)
         for path in _lock_paths(plan):
             locks.enter_context(FileLock(str(path), timeout=.1))
         owned = True
@@ -444,7 +471,8 @@ def run_uvlo_mock(plan: Plan, out: Path, *, seed: int = 1, synthetic: SyntheticU
         run["stop"] = {"classification": stop.classification, "point_id": active["point_id"] if active else None,
                        "procedure_stage": procedure.stage, "ramp_phase": (procedure.step or {}).get("ramp_phase"),
                        "output_off_expected": (procedure.step or {}).get("output_off_expected"), "values": stop.values,
-                       "reason": str(stop)}
+                       "reason": str(stop),
+                       **({"level_kind": procedure.step["level_kind"]} if procedure.step and "level_kind" in procedure.step else {})}
         if active is not None:
             active.update(qualification=stop.qualification, reason=message, acquisition_cycle_ids=[])
         try:
@@ -488,7 +516,7 @@ def run_uvlo_mock(plan: Plan, out: Path, *, seed: int = 1, synthetic: SyntheticU
         else:
             run["shutdown"] = {role: {"state": "UNKNOWN", "reason": "resource not owned; no commands sent"}
                                for role in ("source", "load")}
-        run["method"]["uvlo_input_ramp"]["synthetic_transitions"] = list(synthetic.transitions)
+        run["method"][method_key]["synthetic_transitions"] = list(synthetic.transitions)
         run.update(execution_status=state, lifecycle_state=state.upper(), completed_utc=clock.utc(),
                    duration_s=clock.now(), raw_sample_count=persisted)
         try:

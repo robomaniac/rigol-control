@@ -12,7 +12,7 @@ from pathlib import Path
 
 from .analysis import analyze_run, build_report_model
 from .annotations import annotations_file
-from .domain import UVLO_TEST_TYPE, BenchProfile, DutProfile, Plan, ReportProfile, TestRecipe
+from .domain import SUPPLY_PROFILE_TEST_TYPES, UVLO_TEST_TYPE, BenchProfile, DutProfile, Plan, ReportProfile, TestRecipe
 from .planning import build_plan, load_profile
 from .storage import atomic_json, verify_integrity
 
@@ -166,6 +166,16 @@ def acquire_mock(plan: Plan, out: Path, *, scenario: str = "normal", operator_ob
     if UVLO_TEST_TYPE in types:
         raise ValueError("A recipe that mixes uvlo_input_ramp with other test types cannot be executed; "
                          "plan the ramp as its own recipe")
+    if len(types) == 1 and types <= set(SUPPLY_PROFILE_TEST_TYPES):
+        # ISO 16750-2 slow ramp / reset staircase: the phase-scoped supply-profile procedure (synthetic plant only).
+        if scenario != "normal":
+            raise ValueError("The supply-profile procedures have no failure-injection scenarios; use scenario 'normal'")
+        from .supply_profiles import run_supply_profile_mock
+        return run_supply_profile_mock(plan, out, operator_observations=operator_observations,
+                                       attachment_descriptors=attachment_descriptors)
+    if types & set(SUPPLY_PROFILE_TEST_TYPES):
+        raise ValueError("A recipe that mixes a supply profile (slow_supply_ramp, reset_staircase) with other test types "
+                         "cannot be executed; plan each profile as its own recipe")
     from .runner import run_mock
     return run_mock(plan, out, scenario=scenario, operator_observations=operator_observations,
                     attachment_descriptors=attachment_descriptors)

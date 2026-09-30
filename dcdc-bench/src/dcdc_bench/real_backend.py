@@ -91,7 +91,8 @@ def prepare_real_plan(original: Plan) -> tuple[Plan, list[str], float]:
     if any(t.optional_quantities or set(t.required_quantities) != {"Vin_V", "Iin_A", "Vout_V", "Iout_A"} for t in r.tests):
         errors.append("Only the four electrical channels are supported")
     if any(t.type != "steady_state_load_sweep" for t in r.tests):
-        errors.append("Real execution supports steady_state_load_sweep only; no real UVLO execution context exists")
+        errors.append("Real execution supports steady_state_load_sweep only; no real UVLO execution context exists and the "
+                      "ISO 16750-2 supply profiles (slow_supply_ramp, reset_staircase) are not yet approved for real hardware")
     if not (5 <= r.settling.minimum_dwell_s <= 15 and 4 <= r.settling.window_s <= 15
             and 5 <= r.settling.minimum_fresh_samples <= 15 and r.settling.timeout_s >= r.settling.minimum_dwell_s):
         errors.append("Settling requires 5–15 s dwell, 4–15 s window and 5–15 queried samples")

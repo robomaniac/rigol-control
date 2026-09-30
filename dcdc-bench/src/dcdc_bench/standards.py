@@ -217,6 +217,9 @@ class Clause(Contract):
     recipe_kind: str | None = None
     procedure: str | None = None
     procedure_status: Literal["real_fixed", "mock_only", "recipe", "planned"] | None = None
+    # For a clause the bench could run but has no procedure for yet: the concrete
+    # requirement a procedure would have to meet (shown on the checklist row).
+    procedure_gap: str | None = None
     notes: list[str] = Field(default_factory=list)
 
     @property
@@ -577,7 +580,9 @@ def _iso16750_2() -> Standard:
                        "operating_modes": "3.3 and 3.4 at Tmin and Tmax; 3.2 at room temperature"}},
            peak_voltage_V={"12V": 16.0, "24V": 32.0}, uses_supply_code=True,
            requires={DC_STEADY, DC_RAMP_SLOW}, environment={CLIMATIC_CHAMBER}, functional_status="A",
-           recipe_kind="steady_min_max",
+           recipe_kind="steady_min_max", procedure_status="recipe",
+           procedure="steady_state_load_sweep recipe at UA, Usmin and Usmax with a small load grid (each level a "
+                     "cold-started DC point; the t1/t2 hold profile is not reproduced)",
            notes=["Redundant supplies: every Usmin/Usmax combination across ports"]),
         _c("4.3", "Overvoltage", "Long-term and transient overvoltage on the supply.", kind="heading"),
         _c("4.3.1", "Long term overvoltage", "Alternator-failure and jump-start overvoltage holds.", kind="heading"),
@@ -586,7 +591,9 @@ def _iso16750_2() -> Standard:
            parameters={"12V": {"level_V": 18.0, "duration_s": 3600.0, "temperature": "Tmax - 20 K", "operating_mode": "3.4"},
                        "24V": {"level_V": 36.0, "duration_s": 3600.0, "temperature": "Tmax - 20 K", "operating_mode": "3.4"}},
            peak_voltage_V={"12V": 18.0, "24V": 36.0}, requires={DC_STEADY}, environment={CLIMATIC_CHAMBER},
-           functional_status="C minimum; A where more stringent", recipe_kind="overvoltage_hold"),
+           functional_status="C minimum; A where more stringent", recipe_kind="overvoltage_hold",
+           procedure_status="planned",
+           procedure_gap="60-min hold exceeds the 540 s run budget; needs a long-hold procedure"),
         _c("4.3.1.2", "Long term overvoltage: jump start (12 V systems only)",
            "Simulate a jump start from a 24 V donor without its engine running.", systems={"12V"},
            parameters={"12V": {"Utrans_V": 26.0, "ttrans_s": 60.0, "ttrans_tolerance_s": 6.0, "trise_max_s": 0.01,
@@ -621,7 +628,10 @@ def _iso16750_2() -> Standard:
                        "24V": {"start_V": 28.0, "floor_V": 0.0, "rate_V_per_min": 0.5, "rate_tolerance_V_per_min": 0.1,
                                "max_step_V": 0.025, "operating_mode": "3.2"}},
            peak_voltage_V={"12V": 14.0, "24V": 28.0}, minimum_voltage_V={"12V": 0.0, "24V": 0.0}, requires={DC_RAMP_SLOW},
-           functional_status="A inside the Table 3/4 range; D minimum outside it", recipe_kind="slow_ramp"),
+           functional_status="A inside the Table 3/4 range; D minimum outside it", recipe_kind="slow_ramp",
+           procedure_status="mock_only",
+           procedure="slow_supply_ramp recipe (supply_profiles.py, synthetic plant only): 20 mV live steps every 2.4 s "
+                     "between 1 V observation levels; refused on real benches"),
         _c("4.6", "Discontinuities in supply voltage", "Drops, interruptions, reset behaviour, cranking and load dump.", kind="heading"),
         _c("4.6.1", "Drops or interrupts in supply voltage", "Momentary drop and micro interruptions.", kind="heading"),
         _c("4.6.1.1", "Momentary drop in supply voltage", "Simulate a fuse element melting in a parallel circuit.",
@@ -641,13 +651,18 @@ def _iso16750_2() -> Standard:
                            "switch": "reaction time at most 10 us, open resistance at least 10 MOhm, checked with 1 kOhm and 10 Ohm references",
                            "operating_mode": "3.4"} for s in both},
            peak_voltage_V={"12V": 12.0, "24V": 24.0}, requires={PULSE_US, LINE_SWITCH},
-           functional_status="A for interruptions up to 100 us; C minimum above", recipe_kind="long_interruptions"),
+           functional_status="A for interruptions up to 100 us; C minimum above", recipe_kind="long_interruptions",
+           procedure_status="planned",
+           procedure_gap=">=1 s interruptions only (source output switched off at the command cadence); needs an interruption procedure"),
         _c("4.6.2", "Reset behaviour at voltage drop", "Check reset behaviour of microcontroller equipment at stepped voltage drops.",
            parameters={s: {"start": "Usmin of the chosen code", "step_fraction_of_Usmin": 0.05, "low_hold_min_s": 5.0,
                            "recovery_hold_min_s": 10.0, "functional_test": "at Usmin after each recovery", "end_V": 0.0,
                            "operating_mode": "3.4"} for s in both},
            peak_voltage_V={"12V": 10.5, "24V": 22.0}, minimum_voltage_V={"12V": 0.0, "24V": 0.0}, uses_supply_code=True,
            requires={DC_STEP_1S}, functional_status="C minimum", recipe_kind="reset_staircase",
+           procedure_status="mock_only",
+           procedure="reset_staircase recipe (supply_profiles.py, synthetic plant only): Usmin and 5 % lows alternate with "
+                     ">=5 s / >=10 s holds; refused on real benches",
            notes=["Internal capacitor buffers: monitor or otherwise show that the internal supply follows each step"]),
         _c("4.6.3", "Starting profile", "Check behaviour during and after engine cranking, ten cycles.",
            parameters={

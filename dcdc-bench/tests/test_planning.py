@@ -266,3 +266,139 @@ def test_rigol_dp821a_dl3031a_profile_keeps_readback_and_programming_terms_apart
     data["measurements"]["Vin_V"]["accuracy"]["applies_to"] = "programming"
     with pytest.raises(ValidationError, match="not a readback"):
         BenchProfile.model_validate(data)
+
+
+# --- ISO 16750-2 supply profiles: mock-only test types and the generated clause 4.2 sweep ---------------
+
+def _supply_profile_recipe(recipe, kind, levels, *, approved=True, policy_id="synthetic-uvlo-ramp-v1", **overrides):
+    from dcdc_bench.domain import SupplyProfilePolicy, TestDefinition
+    values = dict(floor_V=min(levels), startup_interval_s=1., output_on_minimum_V=10.8, output_off_maximum_V=1.2,
+                  expected_off_below_V=9., expected_on_above_V=9.)
+    if kind == "slow_supply_ramp":
+        values.update(step_V=.5, step_interval_s=1.)
+    else:
+        values.update(low_hold_s=5., recovery_hold_s=10.)
+    values.update(overrides)
+    recipe = recipe.model_copy(deep=True)
+    recipe.execution_mode = None
+    recipe.tests = [TestDefinition(id="profile", type=kind, input_voltage_targets_V=list(levels), output_current_targets_A=[.1],
+                                   supply_profile=SupplyProfilePolicy(**values))]
+    recipe.authorization.uvlo_approved = approved
+    recipe.authorization.protective_policy_id = policy_id if approved else None
+    return recipe
+
+
+def _declare_policy(bench, policy_id="synthetic-uvlo-ramp-v1"):
+    bench = bench.model_copy(deep=True)
+    bench.protective_controls.policy_id = policy_id
+    bench.protective_controls.source_current_limit_A = .5
+    bench.protective_controls.dut_output_overvoltage_V = 13.2
+    bench.protective_controls.output_overcurrent_A = .15
+    return bench
+
+
+def test_supply_profile_contracts_validate_their_shape_and_policy():
+    from dcdc_bench.domain import SupplyProfilePolicy, TestDefinition, staircase_level_kinds
+    assert staircase_level_kinds([10., 9.5, 10., 9., 10.]) == ["recovery", "low", "recovery", "low", "recovery"]
+    for bad in ([10., 9.5], [10., 9.5, 10., 9.], [10., 9.5, 9.9, 9., 10.], [10., 9., 10., 9.5, 10.], [10., 10.5, 10.]):
+        with pytest.raises(ValueError):
+            staircase_level_kinds(bad)
+    policy = SupplyProfilePolicy(floor_V=1., startup_interval_s=5., output_on_minimum_V=10.8, output_off_maximum_V=1.2,
+                                 expected_off_below_V=9., expected_on_above_V=9., step_V=.02, step_interval_s=2.4)
+    assert policy.ramp_rate_V_per_min == pytest.approx(.5)
+    assert policy.off_expected(8.5, "down") and policy.off_expected(8.5, "low") and not policy.off_expected(9., "up")
+    with pytest.raises(ValidationError, match="declared together"):
+        SupplyProfilePolicy(floor_V=1., startup_interval_s=5., output_on_minimum_V=10.8, output_off_maximum_V=1.2,
+                            expected_off_below_V=9., expected_on_above_V=9., step_V=.02)
+    with pytest.raises(ValidationError, match="requires a declared supply_profile block"):
+        TestDefinition(id="t", type="slow_supply_ramp", input_voltage_targets_V=[12., 9., 12.], output_current_targets_A=[.1])
+    with pytest.raises(ValidationError, match="step_V and step_interval_s"):
+        TestDefinition(id="t", type="slow_supply_ramp", input_voltage_targets_V=[12., 9., 12.], output_current_targets_A=[.1],
+                       supply_profile=policy.model_copy(update={"step_V": None, "step_interval_s": None}))
+    with pytest.raises(ValidationError, match="odd number of levels"):
+        TestDefinition(id="t", type="reset_staircase", input_voltage_targets_V=[10., 9.5], output_current_targets_A=[.1],
+                       supply_profile=policy.model_copy(update={"step_V": None, "step_interval_s": None, "low_hold_s": 5., "recovery_hold_s": 10.}))
+    with pytest.raises(ValidationError, match="only valid for the slow_supply_ramp"):
+        TestDefinition(id="t", input_voltage_targets_V=[24.], output_current_targets_A=[.1], supply_profile=policy)
+    # An existing DUT profile validates unchanged and simply gains the optional class.
+    dut = DutProfile.model_validate(load_profile(PROFILES / "dut/12t12-4a.yaml", DutProfile).model_dump(exclude={"system_voltage_class"}))
+    assert dut.system_voltage_class is None and "system_voltage_class" in dut.model_dump()
+
+
+def test_supply_profile_types_plan_on_the_mock_and_are_refused_on_a_real_bench(profiles):
+    dut, bench, recipe = profiles
+    bench = _declare_policy(bench)
+    ramp = _supply_profile_recipe(recipe, "slow_supply_ramp", [12., 11., 10., 9., 8., 9., 10., 11., 12.])
+    plan = build_plan(dut, bench, ramp)
+    assert [p.status for p in plan.points] == ["executable"] * 9 and verify_plan_hash(plan)
+    low = plan.points[4]
+    assert low.vin_target_V == 8. and "down level of the slow supply ramp" in low.reason
+    assert "output-off is the DUT's documented expectation" in low.reason and low.planning_output_current_limit_A is None
+    assert low.estimated_input_current_A is None, "a standby draw is unknown, not estimated from the output"
+    assert "up level" in plan.points[6].reason and plan.points[6].planning_output_current_limit_A is not None
+    stair = _supply_profile_recipe(recipe, "reset_staircase", [10., 9.5, 10., 9., 10., 8.5, 10., 8., 10.])
+    plan = build_plan(dut, bench, stair)
+    assert all(p.status == "executable" for p in plan.points)
+    assert "recovery level of the reset staircase" in plan.points[0].reason and "low level" in plan.points[1].reason
+    # Below the declared floor: refused, never clipped. Above the DUT maximum: refused.
+    plan = build_plan(dut, bench, _supply_profile_recipe(recipe, "slow_supply_ramp", [12., 9., 7., 9., 12.], floor_V=8.))
+    assert plan.points[2].status == "unsupported" and "below the declared supply-profile floor 8 V" in plan.points[2].reason
+    assert [p.status for p in plan.points] == ["executable"] * 2 + ["unsupported"] + ["executable"] * 2
+    plan = build_plan(dut, bench, _supply_profile_recipe(recipe, "reset_staircase", [37., 9., 37.]))
+    assert all(p.status == "unsupported" and "recovery level must lie inside" in p.reason for p in plan.points[0::2])
+    # Below the DUT minimum without the approved UVLO-style authorization: every level is approval_blocked.
+    unapproved = build_plan(dut, bench, _supply_profile_recipe(recipe, "slow_supply_ramp", [12., 9., 8., 9., 12.], approved=False))
+    assert all(p.status == "approval_blocked" for p in unapproved.points)
+    assert all("approved UVLO-style path" in p.reason and "uvlo_approved is false" in p.reason for p in unapproved.points)
+    inside = build_plan(dut, bench, _supply_profile_recipe(recipe, "slow_supply_ramp", [12., 10., 9., 10., 12.], approved=False))
+    assert all(p.status == "executable" for p in inside.points), "a profile that stays inside the DUT rating needs no excursion approval"
+    # Mixed with another test type: no executor; every point says so.
+    mixed = ramp.model_copy(deep=True)
+    mixed.tests = mixed.tests + [recipe.tests[0]]
+    plan = build_plan(dut, bench, mixed)
+    assert all(p.status == "unsupported" and "mixes slow_supply_ramp with other test types" in p.reason for p in plan.points)
+    # Real bench: not yet approved for real hardware, in the planner and in the real backend's preview.
+    real = bench.model_copy(deep=True)
+    real.mode = "real"
+    plan = build_plan(dut, real, ramp)
+    assert all(p.status == "unsupported" for p in plan.points)
+    assert all("'slow_supply_ramp' is not yet approved for real hardware" in p.reason for p in plan.points)
+    from dcdc_bench.real_backend import prepare_real_plan
+    _, errors, _ = prepare_real_plan(plan)
+    assert any("not yet approved for real hardware" in error for error in errors)
+    from dcdc_bench.runner import run_mock
+    with pytest.raises(ValueError, match="steady_state_load_sweep tests only"):
+        run_mock(build_plan(dut, bench, ramp), PROFILES.parent / "never-created")
+
+
+def test_iso16750_2_clause_4_2_recipe_keeps_out_of_envelope_levels_as_unsupported(profiles):
+    """The generated 4.2 sweep requests UA, Usmin and Usmax; a level above the guard stays in the plan with the planner's reason."""
+    from dcdc_bench.standard_recipes import build_recipe
+    dut, bench, _ = profiles
+    guarded = bench.model_copy(deep=True)
+    guarded.protective_controls.dut_input_overvoltage_V = 26.
+    recipe = TestRecipe.model_validate(build_recipe("4.2", "24V", dut, guarded))
+    assert recipe.tests[0].type == "steady_state_load_sweep" and recipe.tests[0].input_voltage_targets_V == [28., 10., 32.]
+    assert recipe.title == "ISO 16750-2 §4.2 — supply voltage range (24 V system)"
+    assert recipe.category == "ISO 16750-2 supply profiles" and recipe.standard_clause == "ISO 16750-2:2023 §4.2"
+    plan = build_plan(dut, guarded, recipe)
+    assert len(plan.points) == 9, "every requested level x load stays in the plan"
+    above = [p for p in plan.points if p.vin_target_V in (28., 32.)]
+    assert len(above) == 6 and all(p.status == "unsupported" for p in above), "UA and Usmax of a 24 V system both exceed a 26 V guard"
+    assert all(f"Requested input voltage {p.vin_target_V:g} V exceeds the configured input voltage guard 26 V; request retained "
+               "without clipping" in p.reason for p in above)
+    assert all(p.status == "executable" for p in plan.points if p.vin_target_V == 10.)
+    twelve = TestRecipe.model_validate(build_recipe("4.2", "12V", dut, bench))
+    assert twelve.tests[0].input_voltage_targets_V == [14., 9., 16.]
+    assert all(p.status == "executable" for p in build_plan(dut, bench, twelve).points)
+    # The mock-only profiles ship unapproved: below-minimum levels plan as approval_blocked until the owner approves.
+    staircase = TestRecipe.model_validate(build_recipe("4.6.2", "12V", dut, bench))
+    assert staircase.tests[0].type == "reset_staircase" and staircase.tests[0].input_voltage_targets_V[:4] == [9., 8.55, 9., 8.1]
+    assert staircase.tests[0].input_voltage_targets_V[-2:] == [.45, 9.] and 0. not in staircase.tests[0].input_voltage_targets_V
+    assert staircase.authorization.uvlo_approved is False and staircase.authorization.protective_policy_id is None
+    assert {p.status for p in build_plan(dut, bench, staircase).points} == {"approval_blocked"}
+    ramp = TestRecipe.model_validate(build_recipe("4.5", "24V", dut, bench))
+    levels = ramp.tests[0].input_voltage_targets_V
+    assert levels[0] == levels[-1] == 28. and min(levels) == 1. and len(levels) == 55
+    assert ramp.tests[0].supply_profile.step_V == .02 and ramp.tests[0].supply_profile.step_interval_s == 2.4
+    assert ramp.tests[0].supply_profile.expected_off_below_V == 9. == ramp.tests[0].supply_profile.expected_on_above_V

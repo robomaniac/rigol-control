@@ -8,13 +8,17 @@ from typing import TypeVar
 
 import yaml
 
-from .domain import (MOCK_THERMAL_ADAPTER, UVLO_TEST_TYPE, BenchProfile, Contract, DutProfile, Plan, PlannedPoint, TestDefinition,
-                     TestRecipe)
+from .domain import (MOCK_THERMAL_ADAPTER, RESET_STAIRCASE_TEST_TYPE, SLOW_SUPPLY_RAMP_TEST_TYPE, SUPPLY_PROFILE_TEST_TYPES,
+                     UVLO_TEST_TYPE, BenchProfile, Contract, DutProfile, Plan, PlannedPoint, TestDefinition, TestRecipe,
+                     staircase_level_kinds, uvlo_ramp_phases)
 
 Profile = TypeVar("Profile", bound=Contract)
 REQUIRED_MEASUREMENTS = {"Vin_V": "V", "Iin_A": "A", "Vout_V": "V", "Iout_A": "A"}
 # Procedure types with an implemented executor. Any other type fails planning.
-IMPLEMENTED_TEST_TYPES = ("steady_state_load_sweep", UVLO_TEST_TYPE)
+# The supply-profile types exist on the synthetic plant only; a real bench refuses them.
+IMPLEMENTED_TEST_TYPES = ("steady_state_load_sweep", UVLO_TEST_TYPE, *SUPPLY_PROFILE_TEST_TYPES)
+REAL_HARDWARE_NOT_APPROVED = ("is not yet approved for real hardware: the procedure exists on the synthetic plant only "
+                              "and no real execution context exists in this release")
 
 
 def load_profile(path: str | Path, model: type[Profile]) -> Profile:
@@ -90,10 +94,43 @@ def uvlo_step_reasons(dut: DutProfile, test: TestDefinition, vin: float) -> list
     return reasons
 
 
+def supply_profile_level_kinds(test: TestDefinition) -> list[str]:
+    """``down``/``up`` for a slow ramp's observation levels, ``recovery``/``low`` for a staircase's levels."""
+    if test.type == SLOW_SUPPLY_RAMP_TEST_TYPE:
+        return uvlo_ramp_phases(test.input_voltage_targets_V)
+    if test.type == RESET_STAIRCASE_TEST_TYPE:
+        return staircase_level_kinds(test.input_voltage_targets_V)
+    raise ValueError(f"{test.type!r} is not a supply-profile test type")
+
+
+def supply_profile_needs_approval(dut: DutProfile, test: TestDefinition) -> bool:
+    """A profile that steps below the DUT's stated minimum takes the approved UVLO-style path (brief 7.5)."""
+    return any(vin < dut.ratings.input_voltage_min_V for vin in test.input_voltage_targets_V)
+
+
+def supply_profile_step_reasons(dut: DutProfile, test: TestDefinition, vin: float, level_kind: str) -> list[str]:
+    """Refuse (never clip) supply-profile levels below the declared floor, above the DUT rating, or a start outside it."""
+    ratings, policy = dut.ratings, test.supply_profile
+    reasons = []
+    if policy is not None and vin < policy.floor_V:
+        reasons.append(f"Requested input voltage {vin:g} V is below the declared supply-profile floor {policy.floor_V:g} V; "
+                       "request retained without clipping")
+    if vin > ratings.input_voltage_max_V:
+        reasons.append("Requested input voltage is above the DUT maximum input rating")
+    inside = ratings.input_voltage_min_V <= vin <= ratings.input_voltage_max_V
+    if test.type == SLOW_SUPPLY_RAMP_TEST_TYPE and vin == test.input_voltage_targets_V[0] and not inside:
+        reasons.append("A slow supply ramp must start inside the DUT's stated input range")
+    if test.type == RESET_STAIRCASE_TEST_TYPE and level_kind == "recovery" and not inside:
+        reasons.append("The reset-staircase recovery level must lie inside the DUT's stated input range")
+    return reasons
+
+
 def _unsupported_capabilities(dut: DutProfile, bench: BenchProfile, test: TestDefinition) -> list[str]:
     reasons: list[str] = []
     if test.type not in IMPLEMENTED_TEST_TYPES:
         reasons.append(f"Test type {test.type!r} is not an implemented procedure")
+    elif test.type in SUPPLY_PROFILE_TEST_TYPES and bench.mode == "real":
+        reasons.append(f"Test type {test.type!r} {REAL_HARDWARE_NOT_APPROVED}")
     for name, instrument in (("Source", bench.source), ("Load", bench.load)):
         if not instrument.capabilities_confirmed:
             reasons.append(f"{name} capabilities have not been confirmed for this profile")
@@ -132,13 +169,21 @@ def _unsupported_capabilities(dut: DutProfile, bench: BenchProfile, test: TestDe
 
 
 def _point(dut: DutProfile, bench: BenchProfile, recipe: TestRecipe, test: TestDefinition,
-           point_id: str, vin: float, iout: float) -> PlannedPoint:
+           point_id: str, vin: float, iout: float, level_index: int = 0) -> PlannedPoint:
     ratings, source, load, policy = dut.ratings, bench.source, bench.load, recipe.planning
     reasons = _unsupported_capabilities(dut, bench, test)
     types = {t.type for t in recipe.tests}
     if UVLO_TEST_TYPE in types and len(types) > 1:
         # The ramp is its own phase-scoped procedure; no executor runs it inside a load sweep.
         reasons.append("Recipe mixes uvlo_input_ramp with other test types; plan the UVLO ramp as a separate recipe")
+    elif types & set(SUPPLY_PROFILE_TEST_TYPES) and len(types) > 1:
+        mixed = sorted(types & set(SUPPLY_PROFILE_TEST_TYPES))[0]
+        reasons.append(f"Recipe mixes {mixed} with other test types; plan the supply profile as a separate recipe")
+    # Supply profiles: the level's kind decides where output-off is an expected, recorded state.
+    profile_kind, off_expected = None, False
+    if test.type in SUPPLY_PROFILE_TEST_TYPES and test.supply_profile is not None:
+        profile_kind = supply_profile_level_kinds(test)[level_index]
+        off_expected = test.supply_profile.off_expected(vin, profile_kind)
     physical_power = None
     if source.max_current_A is not None and source.max_power_W is not None:
         physical_power = min(vin * source.max_current_A, source.max_power_W)
@@ -151,13 +196,20 @@ def _point(dut: DutProfile, bench: BenchProfile, recipe: TestRecipe, test: TestD
             usable_current = min(usable_current, bench.protective_controls.source_current_limit_A)
         available_input_power = min(assumed_dut_vin * usable_current, source.max_power_W * policy.source_current_budget_fraction)
         planning_limit = max(0., (available_input_power - policy.auxiliary_input_power_estimate_W) * policy.efficiency_estimate_fraction / ratings.output_voltage_nominal_V)
-        if iout > 0:
+        if iout > 0 and not off_expected:
             estimated_iin = ((ratings.output_voltage_nominal_V * iout) / policy.efficiency_estimate_fraction + policy.auxiliary_input_power_estimate_W) / assumed_dut_vin
     else:
         reasons.append("Planning input voltage after wiring allowance must be positive, and source capabilities must be known")
+    if off_expected:
+        # Output-off is the documented state here: the load draws nothing, so the
+        # efficiency-based budget does not describe the point. The source-CV guard
+        # governs at run time; a standby draw is unknown, not estimated.
+        planning_limit = None
     pout = ratings.output_voltage_nominal_V * iout
     if test.type == UVLO_TEST_TYPE:
         reasons.extend(uvlo_step_reasons(dut, test, vin))
+    elif profile_kind is not None:
+        reasons.extend(supply_profile_step_reasons(dut, test, vin, profile_kind))
     elif not ratings.input_voltage_min_V <= vin <= ratings.input_voltage_max_V:
         reasons.append("Requested input voltage is outside the DUT operating rating")
     if iout > ratings.output_current_rated_A + 1e-12 or pout > ratings.output_power_rated_W + 1e-12:
@@ -185,7 +237,9 @@ def _point(dut: DutProfile, bench: BenchProfile, recipe: TestRecipe, test: TestD
         reasons.append("Requested output current is below the load controllable current envelope")
     if load.max_power_W is not None and pout > load.max_power_W:
         reasons.append("Requested nominal output power exceeds the load power capability")
-    if physical_power is not None and pout > physical_power + 1e-12:
+    if physical_power is not None and pout > physical_power + 1e-12 and not off_expected:
+        # At an expected-off level no output power is delivered; if the output stays on and the
+        # source leaves CV, the procedure's source-boundary guard stops the run instead.
         reasons.append("Requested nominal output exceeds the source physical input-power capability even at 100% efficiency")
     expected = {"Vin_V": vin, "Iin_A": estimated_iin, "Vout_V": ratings.output_voltage_nominal_V, "Iout_A": iout}
     for quantity, value in expected.items():
@@ -204,6 +258,11 @@ def _point(dut: DutProfile, bench: BenchProfile, recipe: TestRecipe, test: TestD
         status = "approval_blocked"
         missing = gaps + (missing_approvals(dut, bench) if bench.mode == "real" else [])
         reason = "UVLO input ramp is blocked by approvals: " + "; ".join(missing)
+    elif (profile_kind is not None and supply_profile_needs_approval(dut, test)
+          and (gaps := uvlo_approval_gaps(bench, recipe))):
+        status = "approval_blocked"
+        reason = (f"Supply profile {test.type} steps below the DUT's stated {ratings.input_voltage_min_V:g} V minimum and "
+                  "takes the approved UVLO-style path (brief 7.5); blocked by approvals: " + "; ".join(gaps))
     elif bench.mode == "real":
         status = "approval_blocked"
         missing = missing_approvals(dut, bench)
@@ -217,6 +276,13 @@ def _point(dut: DutProfile, bench: BenchProfile, recipe: TestRecipe, test: TestD
         if test.type == UVLO_TEST_TYPE and vin < ratings.input_voltage_min_V:
             reason += ("; below the DUT's stated minimum input, inside the declared UVLO floor: "
                        "output-off is a recorded state here, not a fault")
+        if profile_kind is not None:
+            reason += f"; {profile_kind} level of the {test.type.replace('_', ' ')}"
+            if off_expected:
+                reason += (" where output-off is the DUT's documented expectation: recorded as a state, not a fault; "
+                           "the planning load budget does not apply to an off output")
+            elif vin < ratings.input_voltage_min_V:
+                reason += "; below the DUT's stated minimum input, inside the declared floor"
     return PlannedPoint(point_id=point_id, test_id=test.id, vin_target_V=vin, iout_target_A=iout,
                         status=status, reason=reason, estimated_input_current_A=estimated_iin,
                         physical_input_power_limit_W=physical_power, planning_output_current_limit_A=planning_limit)
@@ -232,9 +298,9 @@ def build_plan(dut: DutProfile, bench: BenchProfile, recipe: TestRecipe) -> Plan
                      if recipe.execution_mode not in (None, bench.mode) else [])
     points = []
     for test in recipe.tests:
-        for vin in test.input_voltage_targets_V:
+        for index, vin in enumerate(test.input_voltage_targets_V):
             for iout in test.output_current_targets_A:
-                points.append(_point(dut, bench, recipe, test, f"p{len(points)+1:04d}", vin, iout))
+                points.append(_point(dut, bench, recipe, test, f"p{len(points)+1:04d}", vin, iout, index))
     plan = Plan(dut=dut.model_copy(deep=True), bench=bench.model_copy(deep=True),
                 recipe=recipe.model_copy(deep=True), points=points, plan_hash="",
                 warnings=["Planning estimates are not measurements or validated safety limits.",
