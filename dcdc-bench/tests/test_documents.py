@@ -269,6 +269,20 @@ def test_web_time_stage_guides_follow_filters_without_creating_observations(view
         page.evaluate("dcdcReport.restoreDefaults()")
 
 
+def _richest_series(model, spec):
+    """The series with the most valid, finite points on this figure.
+
+    The simulated demo's first series is an input phase that can end at the
+    cold-start gate with no valid point; fixtures must not assume series[0]
+    has data to toggle or edit.
+    """
+    def valid_count(series):
+        ids = set(series["point_ids"])
+        return sum(1 for point in model["points"] if point["point_id"] in ids and point["qualification"] == "valid"
+                   and point.get(spec["y_key"]) is not None)
+    return max(spec["series"], key=valid_count)
+
+
 @pytest.mark.browser
 def test_web03_real_legend_checkbox_and_band_share_export_selection(viewer, documents, tmp_path):
     def add_fixture_bands(model):
@@ -281,12 +295,13 @@ def test_web03_real_legend_checkbox_and_band_share_export_selection(viewer, docu
 
     with _report_variant(viewer, documents, tmp_path, add_fixture_bands) as (page, model):
         spec = model["figures"][0]
-        key = format(spec["series"][0]["vin_target_V"], "g")
+        series = _richest_series(model, spec)
+        key = format(series["vin_target_V"], "g")
         graph_id = "plot-" + spec["id"]
         selector = '#trace-options input[data-series="' + key + '"]'
         graph = page.locator("#" + graph_id)
-        # Actual Plotly legend event, including its click-delay behavior.
-        graph.locator('.legend .legendtoggle').first.click()
+        # Actual Plotly legend event, including its click-delay behavior, on the entry of a series that has points.
+        graph.locator('.legend .traces').filter(has_text=series["label"]).first.locator('.legendtoggle').click()
         page.wait_for_function("key => !dcdcReport.state.selected_series.includes(key)", arg=key)
         page.evaluate("dcdcReport.whenIdle()")
         assert not page.locator(selector).is_checked()
@@ -347,7 +362,7 @@ def test_web08_log_mode_excludes_zero_and_negative_current_points_explicitly(vie
 
     def nonpositive_fixture(model):
         spec = next(f for f in model["figures"] if f["id"] == "fig-efficiency")
-        series = spec["series"][0]
+        series = _richest_series(model, spec)
         rows = [p for p in model["points"] if p["point_id"] in series["point_ids"] and p["qualification"] == "valid"
                 and p.get("efficiency_pct") is not None and (p.get("Iout_A") or 0) > 0]
         assert len(rows) >= 4, "the fixture needs positive points left after the two edits"
