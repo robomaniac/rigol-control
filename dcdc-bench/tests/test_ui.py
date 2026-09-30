@@ -1093,3 +1093,31 @@ def test_add_as_tests_saves_one_recipe_per_ticked_runnable_clause_with_the_catal
         finally:
             client.delete()
     asyncio.run(scenario())
+
+
+# --- Concurrency at the page: a second tab that never saw the running job -------------------------
+
+def test_start_from_a_tab_that_missed_another_tabs_job_is_refused_and_launches_nothing(tmp_path, monkeypatch):
+    """Tab B previewed while idle; Tab A then started a job. Tab B's Start must be refused by the
+    service and must not create a job directory or launch a worker. (Tab B's page state is not
+    pinned here: it only learns about jobs it polls; see docs/simulation-review/qa.md.)"""
+    snapshots = {}
+
+    async def scenario():
+        page = await open_bench_page(monkeypatch, tmp_path, snapshots)
+        client = page.client
+        try:
+            with client:
+                await click(button(client, 'Preview'))
+                assert button(client, 'Start simulated test').enabled
+                # Another tab (or the CLI) started a job after this tab's preview.
+                snapshots['job-2'] = snapshot('job-2', 'acquiring')
+                monkeypatch.setattr('dcdc_bench.job_service.subprocess.Popen',
+                                    lambda *a, **k: pytest.fail('a refused start must not launch a worker'))
+                await click(button(client, 'Start simulated test'))
+                assert any('already acquiring or reporting' in notice for notice in page.notices), page.notices
+                assert list((tmp_path / 'workspace' / 'jobs').iterdir()) == [], 'no job directory was created'
+            assert page.errors == []
+        finally:
+            client.delete()
+    asyncio.run(scenario())
