@@ -5,17 +5,20 @@ import asyncio
 import copy
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pytest
 
 from dcdc_bench.cli import main
 from dcdc_bench.job_service import JobService
-from dcdc_bench.ui import RequestBodyLimit, file_headers, published_file, require_loopback, run_ui
-from dcdc_bench.ui_models import (activity_text, artifact_url, edited_dut, edited_recipe, elapsed_text, event_text,
-                                  job_actions, job_title, local_time_text, plan_rows, quantity, report_became_ready,
-                                  report_link_rows, saved_runs_key, shutdown_label, state_label, target_values,
-                                  time_legend)
+from dcdc_bench.ui import RequestBodyLimit, file_headers, published_file, require_loopback, run_ui, unique_name
+from dcdc_bench.ui_models import (activity_text, artifact_url, bench_equipment, bench_title, card_meta, dut_approved,
+                                  dut_subtitle, duration_text, edited_dut, edited_recipe, elapsed_text, event_text,
+                                  grouped_recipes, job_actions, job_title, limits_rows, limits_summary, local_time_text,
+                                  plan_rows, point_count, quantity, recipe_category, recipe_grid, recipe_title,
+                                  report_became_ready, report_link_rows, report_rows, saved_runs_key, shutdown_label,
+                                  skip_reasons, state_label, summary_text, target_values, time_legend)
 
 LOS_ANGELES = ZoneInfo('America/Los_Angeles')
 
@@ -50,6 +53,12 @@ def test_recipe_edits_keep_other_tests_and_original_evidence_metadata():
     assert result['settling']['extra'] == 'preserved'
     assert result['planning'] == {'efficiency_estimate_fraction': .8, 'source_current_budget_fraction': .95}
     assert result['dut_profile_id'] == 'board-2' and result['execution_mode'] == 'real'
+    # The page passes no mode (the bench decides) and may supply the card text.
+    modeless = edited_recipe(original, {'recipe_id': 'new', 'voltages': '24', 'currents': '0.1', 'minimum_dwell_s': 3,
+        'duration_s': 4, 'efficiency_estimate_pct': 80, 'current_budget_pct': 95, 'title': ' 24 V check ', 'category': '',
+        'standard_clause': 'MIL-STD-704F §5.1', 'description': None}, dut_id='dut', test_id='first')
+    assert modeless['execution_mode'] is None and modeless['title'] == '24 V check'
+    assert modeless['category'] is None and modeless['standard_clause'] == 'MIL-STD-704F §5.1' and modeless['description'] is None
 
 
 def test_dut_edits_preserve_identity_metadata_and_do_not_authorize_a_run():
@@ -159,7 +168,7 @@ def test_kept_report_artifacts_stay_linked_and_named_by_status():
                 'report_artifacts': {'html': {'status': 'success'}, 'pdf': {'status': 'unverified'}, 'model': {'status': 'success'}}}
     rows = report_link_rows(snapshot)
     assert [relative for _, relative in rows] == ['report/report.html', 'report/report.pdf', 'report/report_model.json']
-    assert rows[1][0] == 'Open PDF (not verified: checker tool missing)' and rows[0][0] == 'Open interactive HTML'
+    assert rows[1][0] == 'Open PDF (not verified: checker tool missing)' and rows[0][0] == 'Open HTML'
     snapshot['report_artifacts']['pdf'] = {'status': 'failed-validation', 'error': 'p1: orphan-heading'}
     assert report_link_rows(snapshot)[1][0] == 'Open PDF (failed the layout check; kept for inspection)'
     for status in ('failed', 'missing', 'unavailable'):
@@ -320,7 +329,76 @@ def test_saved_runs_key_changes_only_when_the_list_would_and_report_ready_fires_
     assert not report_became_ready(saved_runs_key(acquiring), saved_runs_key({'job_id': 'j', 'state': 'failed'}))
 
 
-# --- The rendered page, driven through its own poll --------------------------
+# --- One-page bench: card text, bench tiles, plan panel, reports rows (pure parts) ---
+
+def test_card_text_derives_from_the_grid_and_saved_plain_names():
+    quick = {'title': None, 'tests': [{'input_voltage_targets_V': [12., 24., 30.],
+                                        'output_current_targets_A': [0., .05, .1, .25, .5, .75, 1.]}]}
+    assert recipe_grid(quick) == '12 / 24 / 30 V × 0–1 A'
+    assert recipe_title(quick) == '12 / 24 / 30 V × 0–1 A', 'a test without a saved name is titled from its grid'
+    assert point_count(quick) == 21
+    assert recipe_grid({'tests': [{'input_voltage_targets_V': [24.], 'output_current_targets_A': [0., .1]}]}) == '24 V × 0 / 0.1 A'
+    assert recipe_grid({'tests': [{'input_voltage_targets_V': [12.], 'output_current_targets_A': [0., .1, .25, .5]}]}) == '12 V × 0 / 0.1 / 0.25 / 0.5 A'
+    assert recipe_grid({'tests': [{'input_voltage_targets_V': [15., 18., 24., 30., 35.8],
+                                   'output_current_targets_A': [.1, .25, .5, .75, 1.]}]}) == '15…35.8 V × 0.1–1 A'
+    assert recipe_title({'title': ' 24 V small grid ', 'tests': []}) == '24 V small grid'
+    assert recipe_category({}) == 'Normal operating voltage' and recipe_category({'category': 'Bench checks'}) == 'Bench checks'
+    assert card_meta(2, 'real', 62) == '2 points · ~62 s' and card_meta(2, 'real', 95) == '2 points · ~2 min'
+    assert card_meta(21, 'mock', None) == '21 points · simulated', 'the simulated bench runs on a virtual clock: no invented time'
+    assert card_meta(1, 'real', None) == '1 point'
+    assert duration_text(45) == '~45 s' and duration_text(89.6) == '~90 s' and duration_text(150) == '~2 min'
+    assert duration_text(None) == '' and duration_text(float('nan')) == '' and duration_text(-1) == ''
+    grouped = grouped_recipes({'b': {'category': 'MIL-STD-704F', 'title': 'Z'}, 'a': {'title': 'Quick'},
+                               'c': {'category': 'Bench checks', 'title': 'Wire'}, 'd': {'title': 'Alpha'}})
+    assert [(category, [name for name, _ in items]) for category, items in grouped] == \
+        [('Normal operating voltage', ['d', 'a']), ('Bench checks', ['c']), ('MIL-STD-704F', ['b'])]
+    assert unique_name('quick', {'quick', 'quick-copy'}) == 'quick-copy-2' and unique_name('quick', {}) == 'quick-copy'
+
+
+def test_converter_and_bench_text_never_invent_limits_or_names():
+    dut = {'identity': {'model': '12T12-4A', 'sample_id': 'S1'},
+           'ratings': {'input_voltage_min_V': 9., 'input_voltage_max_V': 36., 'output_voltage_nominal_V': 12., 'output_current_rated_A': 4.},
+           'execution_approval': {'real_hardware_enabled': True, 'wiring_and_polarity_confirmed': False}}
+    assert dut_subtitle(dut) == '9–36 V in, 12 V / 4 A out · sample S1'
+    assert not dut_approved(dut) and dut_approved({**dut, 'execution_approval': {'real_hardware_enabled': True, 'wiring_and_polarity_confirmed': True}})
+    bench = {'bench_id': 'rigol-local-limited', 'title': None, 'source': {'channel': 1}, 'load': {},
+             'protective_controls': {'source_current_limit_A': 1., 'dut_input_overvoltage_V': 26., 'dut_output_overvoltage_V': 13.2,
+                                     'output_overcurrent_A': None}}
+    assert bench_title(bench) == 'rigol-local-limited', 'a plain name is not derivable; the identifier is the fallback'
+    assert bench_title({**bench, 'title': '24 V converter tests'}) == '24 V converter tests'
+    assert limits_rows(bench) == [('Supply current limit', '1 A'), ('Input over-voltage', '26 V'),
+                                  ('Output voltage guard', '13.2 V'), ('Output current guard', '—')]
+    assert limits_summary(bench) == '1 A supply · 26 V input · 13.2 V / — output'
+    assert bench_equipment(bench) == 'supply CH1 + load'
+    assert bench_equipment(bench, {'source': {'model': 'DP821A'}, 'load': {'model': 'DL3031A'}}) == 'DP821A CH1 + DL3031A'
+    assert bench_equipment({**bench, 'source': {'channel': 1, 'physical_model': 'DP821A'}}, {'load': {'model': 'DL3031A'}}) == 'DP821A CH1 + DL3031A'
+    assert summary_text(dut, 'real', {**bench, 'title': '24 V converter tests'}, {'title': '24 V small grid'}) == \
+        '12T12-4A · Real bench (24 V converter tests) · 24 V small grid'
+    assert summary_text(None, 'mock', None, None) == '— no converter — · Simulated bench · — no test —'
+
+
+def test_plan_panel_groups_skip_reasons_and_report_rows_use_local_time():
+    preview = {'points': [{'status': 'executable', 'reason': 'ok'}, {'status': 'unsupported', 'reason': 'Above guard'},
+                          {'status': 'unsupported', 'reason': 'Above guard'}, {'status': 'assumption_limited', 'reason': 'Budget'}]}
+    assert skip_reasons(preview) == [(2, 'Above guard'), (1, 'Budget')]
+    job = {'job_id': 'j1', 'state': 'completed', 'mode': 'real', 'dut_model': '12T12-4A', 'recipe_id': 'real-24v-small-grid',
+           'recipe_title': 'old name', 'created_utc': '2026-09-29T20:37:14+00:00', 'run_dir': '/w/r',
+           'progress': {'completed': 3, 'total': 3}, 'report_dir': '/w/r/reports/r0001',
+           'report_artifacts': {'html': {'status': 'success'}, 'pdf': {'status': 'success'}, 'model': {'status': 'success'}}}
+    [row] = report_rows([job], zone=LOS_ANGELES, recipes={'real-24v-small-grid': {'title': '24 V small grid', 'tests': []}})
+    assert row['when'] == '13:37:14 PDT (2026-09-29)' and row['run'] == '12T12-4A · 24 V small grid' and row['bench'] == 'Real'
+    assert row['status'] == 'Complete' and row['points'] == '3 / 3 points' and row['regenerate'] and not row['dequeue']
+    assert row['links'] == [('Open HTML', 'report/report.html'), ('Open PDF', 'report/report.pdf')], 'the JSON model stays on the run panel'
+    [fallback] = report_rows([{**job, 'recipe_id': 'deleted'}], zone=LOS_ANGELES)
+    assert fallback['run'] == '12T12-4A · old name', 'a deleted test keeps the name recorded at Start'
+    [legacy] = report_rows([{'job_id': 'j0', 'state': 'acquiring', 'mode': 'mock', 'dut_model': '12T12-4A'}], zone=LOS_ANGELES)
+    assert legacy['run'] == '12T12-4A' and legacy['when'] == 'unknown' and legacy['bench'] == 'Simulated'
+    assert not legacy['regenerate'] and legacy['status'] == 'Acquiring measurements'
+    [queued] = report_rows([{'job_id': 'j2', 'state': 'report-queued', 'mode': 'mock', 'dut_model': 'X', 'run_dir': '/w/r'}], zone=LOS_ANGELES)
+    assert queued['dequeue'] and not queued['regenerate']
+
+
+# --- The rendered page, driven through its own handlers and poll --------------
 
 def snapshot(job_id, state, **extra):
     """A JobService.status()-shaped record; the fake below returns copies of these."""
@@ -337,18 +415,22 @@ REPORT_DONE = {'state': 'completed', 'run_id': 'r-0001', 'run_dir': '/w/jobs/job
                'report_artifacts': {'html': {'status': 'success'}, 'pdf': {'status': 'success'}, 'model': {'status': 'success'}},
                'shutdown': {role: {'state': 'OFF', 'verified': True} for role in ('source', 'load')}}
 
+QUICK, SMALL_GRID = '12t12-4a-quick', 'real-24v-small-grid'  # the two seeded tests
+QUICK_TITLE, SMALL_GRID_TITLE = 'Quick sweep — 12 / 24 / 30 V × 0–1 A', '24 V small grid — 0.1 / 0.25 / 0.5 A'
+
 
 async def open_bench_page(monkeypatch, tmp_path, snapshots):
     """Render the real '/' page against a fake JobService without a server, socket or browser.
 
     Returns the NiceGUI client (its element tree is the page), the poll callback the page
     registered with ``ui.timer`` (a test calls it to simulate a tick), the notifications the
-    page issued, and the fake service (which counts ``list_jobs`` calls).
+    page issued, the fake service (real seeded profiles on disk; job status from the test's
+    dictionaries) and the exceptions NiceGUI's handler dispatch swallowed (must stay empty).
     """
-    from nicegui import app, run, ui
+    from nicegui import app, core, run, ui
     from nicegui.client import Client
     from nicegui.page import page
-    created, timers, notices = [], [], []
+    created, timers, notices, errors = [], [], [], []
 
     class FakeService(JobService):
         """Real seeded mock profiles; job status comes from the test's dictionaries."""
@@ -356,6 +438,7 @@ async def open_bench_page(monkeypatch, tmp_path, snapshots):
         def __init__(self, root, inventory_path=None, gate=None):
             super().__init__(root, inventory_path=inventory_path)
             self.list_jobs_calls = 0
+            self.cancelled = []
             created.append(self)
 
         def status(self, job_id):
@@ -368,13 +451,21 @@ async def open_bench_page(monkeypatch, tmp_path, snapshots):
         def dispatch_reports(self):
             return None
 
+        def cancel(self, job_id):
+            self.cancelled.append(job_id)
+            snapshots[job_id]['cancel_requested'] = True
+            return self.status(job_id)
+
     async def inline(callback, *args, **kwargs):
         return callback(*args, **kwargs)
     monkeypatch.setattr(ui, 'run', lambda *args, **kwargs: None)
     monkeypatch.setattr(app, 'timer', lambda *args, **kwargs: None)
+    monkeypatch.setattr(app, 'handle_exception', lambda exc: errors.append(exc))
     monkeypatch.setattr(ui, 'timer', lambda interval, callback, **kwargs: timers.append(callback))
     monkeypatch.setattr(ui, 'notify', lambda message, **kwargs: notices.append(str(message)))
     monkeypatch.setattr(run, 'io_bound', inline)
+    # Async click/change handlers become background tasks on the NiceGUI loop; point it at ours.
+    monkeypatch.setattr(core, 'loop', asyncio.get_running_loop())
     monkeypatch.setattr('dcdc_bench.job_service.JobService', FakeService)
     monkeypatch.setenv('DCDC_ACTIVITY_LOCK', str(tmp_path / 'activity.lock'))
     monkeypatch.setenv('DCDC_JOB_LAUNCHER', 'detached')
@@ -384,7 +475,35 @@ async def open_bench_page(monkeypatch, tmp_path, snapshots):
     client.tab_id = 'test-tab'  # counts as connected, so ``await client.connected()`` returns at once
     with client:
         await bench_page()
-    return client, timers[-1], notices, created[-1]
+    # No browser is attached: the client's outbox loop would try to deliver updates with
+    # run-time settings that only ``ui.run`` (stubbed above) configures. The element tree
+    # is what the tests read, so the delivery loop is stopped.
+    client.outbox.stop()
+    return SimpleNamespace(client=client, poll=timers[-1], notices=notices, service=created[-1], errors=errors)
+
+
+async def settle():
+    """Let every background task NiceGUI scheduled for an async handler run to completion."""
+    from nicegui import background_tasks
+    for _ in range(50):
+        await asyncio.sleep(0)
+        # Every client owns an endless 'outbox loop' task; only handler tasks are awaited.
+        pending = [task for task in background_tasks.running_tasks
+                   if not task.done() and not task.get_name().startswith('outbox loop')]
+        if not pending:
+            return
+        await asyncio.gather(*pending, return_exceptions=True)
+    raise AssertionError('background handlers did not settle')
+
+
+async def click(element):
+    """Fire the element's click listener the way the browser would, then let async handlers finish."""
+    from nicegui.events import GenericEventArguments, handle_event
+    listeners = [listener for listener in element._event_listeners.values() if listener.type.startswith('click')]
+    assert listeners, f'{element} has no click handler'
+    for listener in listeners:
+        handle_event(listener.handler, GenericEventArguments(sender=element, client=element.client, args={}))
+    await settle()
 
 
 def descendants(element):
@@ -400,14 +519,59 @@ def texts(element):
 
 
 def find(client, **props):
-    from nicegui import ui
+    matches = find_all(client, **props)
+    if not matches:
+        raise AssertionError(f'no element {props}')
+    return matches[-1]  # the newest, so a fresh dialog wins over an older one
+
+
+def find_all(client, **props):
     tag = props.pop('tag', None)
     css = props.pop('css', None)
-    for element in client.elements.values():
-        if (tag is None or element.tag == tag) and (css is None or css in element.classes) and \
-                all(element._props.get(key) == value for key, value in props.items()):
-            return element
-    raise AssertionError(f'no element {tag} {css} {props}')
+    text = props.pop('text', None)
+    return [element for element in client.elements.values()
+            if (tag is None or element.tag == tag) and (css is None or css in element.classes)
+            and (text is None or getattr(element, 'text', None) == text)
+            and all(element._props.get(key) == value for key, value in props.items())]
+
+
+def button(client, label):
+    return find(client, tag='q-btn', label=label)
+
+
+def checkbox(client, text):
+    return find(client, tag='q-checkbox', text=text)
+
+
+def field(client, label):
+    """A text (nicegui-input) or number (q-input) field by its label."""
+    matches = [element for element in find_all(client, label=label) if element.tag in ('nicegui-input', 'q-input')]
+    assert matches, f'no field {label!r}'
+    return matches[-1]
+
+
+def links(element):
+    return [child.text for child in descendants(element) if child.tag == 'nicegui-link']
+
+
+def visible_editor(client):
+    """The one inline editor (converter, test or limits) that is open; the others stay hidden."""
+    open_editors = [editor for editor in find_all(client, css='bench-editor') if editor.visible]
+    assert len(open_editors) == 1, f'{len(open_editors)} editors open'
+    return open_editors[0]
+
+
+def cards(client):
+    """(title, card element) for every selectable card on the page, in document order."""
+    return [(texts(card)[0], card) for card in find_all(client, css='bench-card-item')]
+
+
+def card_named(client, title):
+    return next(card for name, card in cards(client) if name == title)
+
+
+def link_in(card, label):
+    return next(child for child in descendants(card) if child.tag == 'q-btn' and child._props.get('label') == label)
 
 
 def ancestors(element):
@@ -416,22 +580,26 @@ def ancestors(element):
         yield element
 
 
-def test_header_shows_background_activity_from_every_tab_until_the_job_settles(tmp_path, monkeypatch):
+def test_header_shows_background_activity_until_the_job_settles(tmp_path, monkeypatch):
     """Owner: 'I wish it had a loading-type icon to let me know it's working in the background.'"""
     from nicegui import ui
     snapshots = {'job-1': snapshot('job-1', 'acquiring')}
 
     async def scenario():
-        client, poll, notices, service = await open_bench_page(monkeypatch, tmp_path, snapshots)
+        page = await open_bench_page(monkeypatch, tmp_path, snapshots)
+        client, poll = page.client, page.poll
         try:
             with client:
                 pill = find(client, css='bench-activity')
-                assert not any(ancestor.tag == 'q-tab-panel' for ancestor in ancestors(pill)), 'header, not inside a tab'
+                assert any('bench-header' in ancestor.classes for ancestor in ancestors(pill)), 'in the sticky header'
                 assert any(isinstance(child, ui.spinner) for child in descendants(pill))
                 assert pill.visible, 'the page attached to the active job on load and polled it'
+                assert not find(client, css='bench-idle').visible
                 phrase, detail = texts(pill)
                 assert phrase == 'Acquiring… point 2 of 4'
                 assert detail.startswith('12T12-4A · started ' + local_time_text('2026-09-29T20:40:12+00:00') + ' · elapsed ')
+                questions = find_all(client, css='bench-question')
+                assert len(questions) == 3 and all('bench-locked' in q.classes for q in questions), 'the three questions are locked while a job runs'
                 for state_name, expected in (('queued', 'Queued — waiting for the worker to start'),
                                              ('reporting', 'Generating report…'),
                                              ('report-queued', 'Report queued — starts when the bench is idle')):
@@ -441,24 +609,28 @@ def test_header_shows_background_activity_from_every_tab_until_the_job_settles(t
                 snapshots['job-1'].update(REPORT_DONE)
                 await poll()
                 assert not pill.visible, 'nothing runs in the background any more'
-                assert 'Started: ' + local_time_text('2026-09-29T20:40:12+00:00') in texts(find(client, tag='q-tab-panel', name='Run'))
+                assert find(client, css='bench-idle').visible and find(client, css='bench-idle').text == 'Idle — nothing switched on'
+                assert 'Started: ' + local_time_text('2026-09-29T20:40:12+00:00') in texts(find(client, css='bench-run-section'))
                 assert time_legend() in texts(client.layout)
+            assert page.errors == []
         finally:
             client.delete()
     asyncio.run(scenario())
 
 
-def test_reports_tab_follows_the_job_without_pressing_refresh(tmp_path, monkeypatch):
+def test_reports_follow_the_job_without_pressing_refresh(tmp_path, monkeypatch):
     """Owner: 'I am in Reports and the new test does not show automatically — I have to press Refresh.'"""
     snapshots = {'job-1': snapshot('job-1', 'acquiring')}
 
     async def scenario():
-        client, poll, notices, service = await open_bench_page(monkeypatch, tmp_path, snapshots)
+        page = await open_bench_page(monkeypatch, tmp_path, snapshots)
+        client, poll, notices, service = page.client, page.poll, page.notices, page.service
         try:
             with client:
-                reports = find(client, tag='q-tab-panel', name='Reports')
+                reports = find(client, css='bench-reports')
                 assert 'Acquiring measurements' in texts(reports)
-                assert job_title(snapshots['job-1']) in texts(reports), 'saved runs are titled with the local start time'
+                assert local_time_text('2026-09-29T20:40:12+00:00') in texts(reports), 'rows show the local start time'
+                assert '12T12-4A' in texts(reports) and 'Simulated' in texts(reports)
                 listed = service.list_jobs_calls
                 snapshots['job-1']['progress'] = {'completed': 3, 'total': 4, 'current': 'p4'}
                 await poll()
@@ -469,11 +641,13 @@ def test_reports_tab_follows_the_job_without_pressing_refresh(tmp_path, monkeypa
                 await poll()
                 assert service.list_jobs_calls == listed + 1, 'the terminal transition refreshed the list from the poll'
                 assert 'Complete' in texts(reports) and 'Acquiring measurements' not in texts(reports)
-                assert any(link.text == 'Open interactive HTML' for link in descendants(reports) if hasattr(link, 'text'))
+                assert links(reports) == ['Open HTML', 'Open PDF']
+                assert any(child._props.get('label') == 'Regenerate report' for child in descendants(reports))
                 assert notices == ['Report ready: r-0001']
                 await poll()
                 assert service.list_jobs_calls == listed + 1 and notices == ['Report ready: r-0001'], 'settled: no busy loop, no repeat'
-                assert any(button._props.get('label') == 'Refresh saved runs' for button in descendants(reports)), 'manual button kept'
+                button(client, 'Refresh saved runs')
+            assert page.errors == []
         finally:
             client.delete()
     asyncio.run(scenario())
@@ -483,35 +657,274 @@ def test_idle_page_shows_no_activity_indicator(tmp_path, monkeypatch):
     snapshots = {'job-1': snapshot('job-1', **REPORT_DONE)}
 
     async def scenario():
-        client, poll, notices, service = await open_bench_page(monkeypatch, tmp_path, snapshots)
+        page = await open_bench_page(monkeypatch, tmp_path, snapshots)
+        client, poll, notices = page.client, page.poll, page.notices
         try:
             with client:
                 pill = find(client, css='bench-activity')
                 assert not pill.visible
                 await poll()
                 assert not pill.visible and notices == []
+            assert page.errors == []
         finally:
             client.delete()
     asyncio.run(scenario())
 
 
-def test_stopped_run_shows_when_the_operator_requested_the_stop(tmp_path, monkeypatch):
-    """Job 20260929T213318Z_6290205b showed only 'Stopped' (error None, no time). The recorded request
-    time now appears with the other local times so an operator can match it to what they did."""
+def test_page_asks_three_questions_then_preview_and_start(tmp_path, monkeypatch):
+    """The approved one-page layout: converter cards, two bench tiles with the limit presets, test cards, sticky bar."""
+    async def scenario():
+        page = await open_bench_page(monkeypatch, tmp_path, {})
+        client = page.client
+        try:
+            with client:
+                shown = texts(client.layout)
+                for heading in ('Which converter?', 'Simulated or real bench?', 'Which test?', 'Reports'):
+                    assert heading in shown
+                assert not find_all(client, tag='q-tab'), 'no tabs any more'
+                assert find(client, css='bench-summary-text').text == f'12T12-4A · Simulated bench · {QUICK_TITLE}'
+                titles = [name for name, _ in cards(client)]
+                assert titles == ['12T12-4A', SMALL_GRID_TITLE, QUICK_TITLE], 'converter first, then tests by title'
+                converter = card_named(client, '12T12-4A')
+                assert 'selected' in converter.classes and '9–36 V in, 12 V / 4 A out' in texts(converter)
+                assert 'Not yet approved for the real bench' in texts(converter)
+                quick = card_named(client, QUICK_TITLE)
+                assert 'selected' in quick.classes and '12 / 24 / 30 V × 0–1 A' in texts(quick) and '21 points · simulated' in texts(quick)
+                small = card_named(client, SMALL_GRID_TITLE)
+                assert 'selected' not in small.classes and '24 V × 0.1 / 0.25 / 0.5 A' in texts(small) and '3 points · simulated' in texts(small)
+                assert [link._props['label'] for link in descendants(quick) if link.tag == 'q-btn'] == ['Rename', 'Duplicate', 'Edit', 'Delete']
+                assert [link._props['label'] for link in descendants(converter) if link.tag == 'q-btn'] == ['Rename', 'Edit', 'Delete']
+                assert 'Normal operating voltage' in shown, 'tests are grouped by category'
+                assert [texts(add)[0] for add in find_all(client, css='bench-add')] == ['+ Add a converter', '+ New test']
+                sim, real = find_all(client, css='bench-tile')
+                assert 'selected' in sim.classes and 'selected' not in real.classes
+                assert texts(real)[0] == 'Real bench' and texts(real)[1].startswith('supply CH1 + load.')
+                pill = find(client, css='bench-pill')
+                assert pill._props['label'] == '24 V converter tests' and 'on' in pill.classes, 'the seeded preset by its plain name'
+                limits = texts(find(client, css='bench-limits'))
+                assert limits == ['Supply current limit', '1 A', 'Input over-voltage', '26 V', 'Output voltage guard', '13.2 V',
+                                  'Output current guard', '2.55 A'], 'protective limits are always visible'
+                approve = checkbox(client, 'I reviewed these limits — required once')
+                assert approve.value is False
+                start, preview = button(client, 'Start simulated test'), button(client, 'Preview')
+                assert not start.enabled and preview.enabled
+                assert find(client, css='bench-bar-summary').text == f'12T12-4A · Simulated bench · {QUICK_TITLE}'
+                assert not find(client, css='bench-plan').visible
+            assert page.errors == []
+        finally:
+            client.delete()
+    asyncio.run(scenario())
+
+
+def test_card_selection_updates_the_summary_and_any_change_makes_the_plan_stale(tmp_path, monkeypatch):
+    async def scenario():
+        page = await open_bench_page(monkeypatch, tmp_path, {})
+        client = page.client
+        try:
+            with client:
+                await click(card_named(client, SMALL_GRID_TITLE))
+                assert find(client, css='bench-summary-text').text == f'12T12-4A · Simulated bench · {SMALL_GRID_TITLE}'
+                assert 'selected' in card_named(client, SMALL_GRID_TITLE).classes and 'selected' not in card_named(client, QUICK_TITLE).classes
+                await click(button(client, 'Preview'))
+                plan = find(client, css='bench-plan')
+                assert plan.visible and 'stale' not in plan.classes
+                shown = texts(plan)
+                assert 'Points that will run' in shown and '3 / 3' in shown and 'Skipped' in shown and '0' in shown
+                assert 'Simulated — nothing switched on' in shown and 'simulated · seconds' in shown
+                assert 'Ready. HTML and PDF reports are generated automatically after acquisition.' in shown
+                assert 'Before Start' not in shown
+                assert button(client, 'Start simulated test').enabled
+                assert (tmp_path / 'workspace' / 'previews').is_dir() and list((tmp_path / 'workspace' / 'previews').iterdir())
+                await click(card_named(client, QUICK_TITLE))
+                assert 'Settings changed — Preview again before starting.' in texts(plan) and 'stale' in plan.classes
+                assert not button(client, 'Start simulated test').enabled
+                await click(button(client, 'Preview'))
+                shown = texts(plan)
+                assert '19 / 21' in shown and '2' in shown and 'Why points are skipped' in shown
+                assert any(text.startswith('2 points skipped: Requested load exceeds the planning budget') for text in shown)
+            assert page.errors == [] and not any('negative' in n for n in page.notices)
+        finally:
+            client.delete()
+    asyncio.run(scenario())
+
+
+def test_real_bench_changes_the_start_label_and_lists_what_blocks_a_real_start(tmp_path, monkeypatch):
+    """Question 2 decides real vs simulated; approvals, limits and the inventory are the 'Before Start' list."""
+    async def scenario():
+        page = await open_bench_page(monkeypatch, tmp_path, {})
+        client, service = page.client, page.service
+        try:
+            with client:
+                sim, real = find_all(client, css='bench-tile')
+                await click(real)
+                sim, real = find_all(client, css='bench-tile')
+                assert 'selected' in real.classes and 'selected' not in sim.classes
+                start = button(client, 'Start test on the real bench')
+                assert not start.enabled and not find_all(client, tag='q-btn', label='Start simulated test')
+                assert find(client, css='bench-summary-text').text == f'12T12-4A · Real bench (24 V converter tests) · {QUICK_TITLE}'
+                approve = checkbox(client, 'I reviewed these limits — required once')
+                assert 'bench-approve-missing' in approve.classes
+                small = card_named(client, SMALL_GRID_TITLE)
+                assert '3 points · ~62 s' in texts(small), 'the real backend\'s own time arithmetic (3 × 16 s + 14 s startup), not a guess'
+                await click(small)
+                await click(button(client, 'Preview'))
+                shown = texts(find(client, css='bench-plan'))
+                assert 'Before Start' in shown
+                assert any('real_hardware_enabled is false' in text for text in shown)
+                assert any('protective_controls.approved is false' in text for text in shown)
+                assert any('Configure the private bench inventory before a real run' in text for text in shown)
+                assert any(text.startswith('Real — ') for text in shown) and 'Limits: 1 A supply · 26 V input · 13.2 V / 2.55 A output' in shown
+                assert not button(client, 'Start test on the real bench').enabled
+                approve.set_value(True)
+                await settle()
+                assert service.load_profile('bench', 'rigol-local-limited')['protective_controls']['approved'] is True
+                assert checkbox(client, 'Limits approved for this preset').value is True
+                assert 'Settings changed — Preview again before starting.' in texts(find(client, css='bench-plan'))
+                await click(button(client, 'Change limits…'))
+                assert 'Change limits — 24 V converter tests' in texts(visible_editor(client))
+                field(client, 'Supply current limit (A)').set_value(0.5)
+                await click(button(client, 'Save limits'))
+                saved = service.load_profile('bench', 'rigol-local-limited')['protective_controls']
+                assert saved['source_current_limit_A'] == .5 and saved['approved'] is False, 'changing a limit clears the approval'
+                assert '0.5 A' in texts(find(client, css='bench-limits'))
+                assert checkbox(client, 'I reviewed these limits — required once').value is False
+            assert page.errors == []
+        finally:
+            client.delete()
+    asyncio.run(scenario())
+
+
+def test_stop_is_a_two_step_control_at_the_far_right_of_the_header(tmp_path, monkeypatch):
+    """Stop… → Confirm stop / Keep running, never where Start was; the request time is shown afterwards."""
     snapshots = {'job-1': snapshot('job-1', 'acquiring')}
 
     async def scenario():
-        client, poll, notices, service = await open_bench_page(monkeypatch, tmp_path, snapshots)
+        page = await open_bench_page(monkeypatch, tmp_path, snapshots)
+        client, poll, service = page.client, page.poll, page.service
         try:
             with client:
-                run_tab = find(client, tag='q-tab-panel', name='Run')
-                assert not any(text.startswith('Stop requested') for text in texts(run_tab))
-                snapshots['job-1'].update(state='cancelled', run_dir='/w/jobs/job-1/runs/r-0001', acquisition_cancelled=True,
-                                          acquisition_cancelled_utc='2026-09-29T20:40:15+00:00')
+                stop_area = find(client, css='bench-stop')
+                assert stop_area.visible and any('bench-header' in a.classes for a in ancestors(stop_area))
+                assert not find_all(client, tag='q-btn', label='Stop test safely')
+                bar = find(client, css='bench-bar')
+                assert not button(client, 'Start simulated test').enabled
+                assert not any(b._props.get('label', '').startswith('Stop') for b in descendants(bar)), 'Stop never sits where Start was'
+                await click(button(client, 'Stop…'))
+                assert service.cancelled == [], 'the first step only arms'
+                assert button(client, 'Confirm stop') and button(client, 'Keep running') and not find_all(client, tag='q-btn', label='Stop…')
+                await click(button(client, 'Keep running'))
+                assert service.cancelled == [] and button(client, 'Stop…') and not find_all(client, tag='q-btn', label='Confirm stop')
+                await click(button(client, 'Stop…'))
+                await click(button(client, 'Confirm stop'))
+                assert service.cancelled == ['job-1']
+                assert 'Stop requested — waiting for the worker' in texts(stop_area)
+                assert texts(find(client, css='bench-activity'))[0].startswith('Stopping…')
+                snapshots['job-1'].update(state='cancelled', cancel_requested=False, run_dir='/w/jobs/job-1/runs/r-0001',
+                                          acquisition_cancelled=True, acquisition_cancelled_utc='2026-09-29T20:40:15+00:00')
                 await poll()
-                shown = texts(run_tab)
-                assert 'Stopped' in shown
-                assert 'Stop requested: ' + local_time_text('2026-09-29T20:40:15+00:00') in shown
+                shown = texts(find(client, css='bench-run-section'))
+                assert 'Stopped' in shown and 'Stop requested: ' + local_time_text('2026-09-29T20:40:15+00:00') in shown
+                assert not stop_area.visible
+            assert page.errors == []
+        finally:
+            client.delete()
+    asyncio.run(scenario())
+
+
+def test_rename_duplicate_and_delete_go_through_dialogs_and_persist(tmp_path, monkeypatch):
+    async def scenario():
+        page = await open_bench_page(monkeypatch, tmp_path, {})
+        client, service = page.client, page.service
+        try:
+            with client:
+                await click(link_in(card_named(client, '12T12-4A'), 'Rename'))
+                name_field = field(client, 'New name')
+                assert name_field.value == '12T12-4A'
+                name_field.set_value('Board A')
+                await click(button(client, 'Save'))
+                assert service.load_profile('dut', '12t12-4a')['identity']['model'] == 'Board A', 'the saved identifier is unchanged'
+                assert card_named(client, 'Board A') is not None
+                assert find(client, css='bench-summary-text').text.startswith('Board A · ')
+                await click(link_in(card_named(client, QUICK_TITLE), 'Rename'))
+                field(client, 'New name').set_value('Quick sweep')
+                await click(button(client, 'Save'))
+                assert service.load_profile('recipe', QUICK)['title'] == 'Quick sweep'
+                assert 'selected' in card_named(client, 'Quick sweep').classes
+                await click(link_in(card_named(client, SMALL_GRID_TITLE), 'Duplicate'))
+                copied = service.load_profile('recipe', SMALL_GRID + '-copy')
+                assert copied['title'] == SMALL_GRID_TITLE + ' (copy)' and copied['execution_mode'] is None
+                assert 'selected' in card_named(client, SMALL_GRID_TITLE + ' (copy)').classes
+                await click(link_in(card_named(client, 'Quick sweep'), 'Delete'))
+                assert 'Delete this saved test? Past runs keep their own copy.' in texts(client.layout)
+                await click(button(client, 'Cancel'))
+                assert QUICK in service.list_profiles()['recipe'], 'Cancel keeps it'
+                await click(link_in(card_named(client, 'Quick sweep'), 'Delete'))
+                await click(button(client, 'Delete'))
+                assert QUICK not in service.list_profiles()['recipe']
+                assert 'Quick sweep' not in [name for name, _ in cards(client)]
+                assert any(n.startswith('Deleted “' + QUICK + '”') for n in page.notices)
+                await click(link_in(card_named(client, 'Board A'), 'Delete'))
+                assert 'Delete this saved converter? Past runs keep their own copy.' in texts(client.layout)
+                await click(button(client, 'Delete'))
+                assert service.list_profiles()['dut'] == []
+                assert find(client, css='bench-summary-text').text.startswith('— no converter —')
+                assert not button(client, 'Preview').enabled
+            assert page.errors == []
+        finally:
+            client.delete()
+    asyncio.run(scenario())
+
+
+def test_a_test_the_planner_cannot_run_on_the_selected_bench_is_greyed_with_the_reason(tmp_path, monkeypatch):
+    seeded = JobService(tmp_path / 'workspace')
+    recipe = seeded.load_profile('recipe', QUICK)
+    recipe.update(recipe_id='hundred-volt', title='100 V check', execution_mode=None, standard_clause='MIL-STD-704F §5.1.2',
+                  category='MIL-STD-704F')
+    recipe['tests'][0]['input_voltage_targets_V'] = [100.]
+    seeded.save_profile('recipe', recipe)
+
+    async def scenario():
+        page = await open_bench_page(monkeypatch, tmp_path, {})
+        client = page.client
+        try:
+            with client:
+                greyed = card_named(client, '100 V check')
+                assert 'greyed' in greyed.classes
+                assert 'Cannot run on this bench: Requested input voltage is outside the DUT operating rating' in texts(greyed)
+                assert 'MIL-STD-704F §5.1.2' in texts(greyed), 'a standard clause shows as a badge'
+                assert 'MIL-STD-704F' in texts(client.layout), 'grouped under its standard'
+                assert 'greyed' not in card_named(client, QUICK_TITLE).classes
+                await click(greyed)
+                await click(button(client, 'Preview'))
+                shown = texts(find(client, css='bench-plan'))
+                assert '0 / 7' in shown and 'No feasible point is available' in shown
+                assert not button(client, 'Start simulated test').enabled
+            assert page.errors == []
+        finally:
+            client.delete()
+    asyncio.run(scenario())
+
+
+def test_new_test_editor_saves_a_modeless_recipe_bound_to_the_selected_converter(tmp_path, monkeypatch):
+    async def scenario():
+        page = await open_bench_page(monkeypatch, tmp_path, {})
+        client, service = page.client, page.service
+        try:
+            with client:
+                await click(next(add for add in find_all(client, css='bench-add') if texts(add)[0] == '+ New test'))
+                assert 'New test' in texts(visible_editor(client))
+                field(client, 'Save test as (file name, letters/digits/-_.)').set_value('noload-then-0p1')
+                field(client, 'Plain name shown on the card').set_value('24 V — no-load window, then 0.1 A')
+                field(client, 'Input voltages (V)').set_value('24')
+                field(client, 'Output loads (A)').set_value('0, 0.1')
+                await click(button(client, 'Save test'))
+                saved = service.load_profile('recipe', 'noload-then-0p1')
+                assert saved['execution_mode'] is None and saved['dut_profile_id'] == '12t12-4a'
+                assert saved['tests'][0]['output_current_targets_A'] == [0., .1] and saved['category'] == 'Normal operating voltage'
+                card = card_named(client, '24 V — no-load window, then 0.1 A')
+                assert 'selected' in card.classes and '24 V × 0 / 0.1 A' in texts(card) and '2 points · simulated' in texts(card)
+                assert not any(editor.visible for editor in find_all(client, css='bench-editor')), 'saving closes the editor'
+            assert page.errors == []
         finally:
             client.delete()
     asyncio.run(scenario())

@@ -123,7 +123,7 @@ def run_mock(plan: Plan, out: Path, scenario: str = "normal", real_time: bool = 
 
     if not verify_plan_hash(plan):
         raise ValueError("plan hash mismatch; regenerate the plan after changing any settings")
-    if plan.bench.mode != "mock" or plan.recipe.execution_mode != "mock":
+    if plan.bench.mode != "mock":  # the bench decides; a legacy recipe mode is metadata
         raise ValueError("run_mock accepts mock profiles only; real execution is not implemented")
     if scenario not in SCENARIOS:
         raise ValueError(f"unknown scenario: {scenario}")

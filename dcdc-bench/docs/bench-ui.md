@@ -48,47 +48,83 @@ restore the tunnel after reconnecting.
 
 ## Run a test
 
-1. **Bench:** choose the simulated or real saved bench and review its limits.
-2. **DUT and recipe:** choose the converter, confirm its ratings, then enter
-   input voltages and output loads as comma-separated numbers. For example,
-   `24, 35.8` and `0.1, 0.25, 0.5`. Every voltage is paired with every load.
-3. Choose **Preview test and limits**. This saves your profiles locally and
-   shows every requested point, including points excluded by the bench limits
-   or planning assumptions. Preview never enables an output.
-4. For real equipment, review the limits, confirm the wiring/channel and enter
-   the configured instrument serial numbers. Choose **Start test**. The worker
-   verifies the connected identities before it enables outputs.
-5. **Run** shows measured voltage/current, progress, measurement age and shutdown
-   status. **Stop test safely** requests shutdown; wait for both outputs to be
-   reported as verified OFF before changing wiring.
-6. After acquisition the worker exits with both outputs verified OFF and the
-   job shows **Measurements saved — report queued**. The page starts a
-   separate report process automatically when no test is running and enough
-   memory is free; while it waits, the reason (for example
-   `MemAvailable below 150 MiB`) is shown on the Run tab. A new test may be
-   started while reports are queued; they are generated afterwards. Open
-   **interactive HTML** to inspect points and export plots, or **PDF** for a
-   printable report. **Reports** retains completed and interrupted runs. If
-   rendering fails, **Retry report generation** queues the preserved
-   measurements for a new report without running the instruments again. See
-   [the process model](pi-process-model.md) for the thresholds and logs.
+The page is one column with three questions, then **Preview** and **Start** in
+a bar fixed to the bottom of the window. There are no tabs.
 
-While a job is queued, acquiring or generating its report, a spinner with a
-short phrase (for example `Acquiring… point 2 of 4`, `Generating report…`) and
-the time elapsed since Start sits under the page title, visible from every tab;
-it disappears when nothing is working in the background, and clicking it opens
-**Run**. The same two-second poll keeps **Reports** current: when a job changes
-state or its report becomes available, the saved-runs list refreshes itself and
-a `Report ready: <run id>` notice appears, so **Refresh saved runs** is only
-needed for runs created outside this page. Every time the page shows (job start,
-report times, recent events, saved runs) is the bench computer's local clock
-with its zone abbreviation, e.g. `13:40:12 PDT (2026-09-29)`; the evidence files
-themselves keep recording UTC.
+1. **Which converter?** One card per saved converter: model, ratings
+   (`9–36 V in, 12 V / 4 A out`), sample id, and whether it is approved for the
+   real bench. Click a card to select it. **Rename** changes the displayed
+   model name, **Edit** opens the converter fields (ratings, the label check
+   and the two real-bench approvals), **Delete** asks *Delete this saved
+   converter? Past runs keep their own copy.* **+ Add a converter** opens the
+   same fields for a new profile. The saved file name never changes.
+2. **Simulated or real bench?** Two tiles. *Simulated bench — nothing is
+   switched on* runs the synthetic plant. *Real bench — DP821A CH1 + DL3031A*
+   (models from the bench profile or the private inventory) shows the saved
+   **limit presets** as pills with plain names (*24 V converter tests*, *Wide
+   input up to 36 V*, *Pass-through wire check (12 V)*), the four protective
+   limits (supply current limit, input over-voltage, output voltage guard,
+   output current guard) always visible, **Change limits…** (saving new limits
+   clears that preset's approval) and **I reviewed these limits — required
+   once**, which is stored on the bench profile. Real versus simulated comes
+   from this tile only; a test no longer carries an execution mode, and a saved
+   test that still does is planned as the bench says, with a note in the plan.
+3. **Which test?** Cards grouped by category (default *Normal operating
+   voltage*; tests filed under a standard show its clause as a badge), each
+   with its plain name, the grid (`24 V × 0 / 0.1 A`) and `N points · ~62 s`
+   on the real bench (the backend's own time arithmetic) or `N points ·
+   simulated` (the simulated bench runs on a virtual clock). A test the planner
+   cannot run on the selected bench is greyed with the planner's first reason.
+   **Rename**, **Duplicate**, **Edit** and **Delete** per card; **+ New test**
+   opens the grid fields (input voltages and loads as comma-separated numbers,
+   dwell, measurement time, planning assumptions) plus the name, category and
+   optional standard clause. A test belongs to whichever converter is selected
+   when it is previewed; the saved copy follows.
 
-Changing any setting clears the preview and its confirmation. Preview again
-before starting. Enter a different profile name to save a reusable variant.
-Existing profile names update that saved configuration; issued run evidence
-keeps its original snapshot.
+Choose **Preview**. Nothing is switched on. The plan panel shows how many
+points will run, how many are skipped and why (identical reasons grouped), the
+estimated time on the real bench, the bench in use, and in red the **Before
+Start** list: missing converter or limit approvals, a missing inventory, or
+settings the real backend does not support. Every requested point stays in
+the saved plan and is listed in the report as not run. Then **Start simulated
+test**, or **Start test on the real bench**, which first opens the physical
+confirmation (wiring and polarity, CH1, limits reviewed, both instrument
+serials); only **Switch on and start** arms the job, and the worker verifies
+the connected identities before it enables outputs. Changing any of the three
+selections, or saving a profile, marks the plan stale and disables Start until
+you Preview again.
+
+While a job is queued, acquiring or generating its report, the header pill
+shows a spinner with a short phrase (`Acquiring… point 2 of 4`, `Generating
+report…`), the local start time and the elapsed time; the three questions are
+locked; and **Stop…** sits at the far right of the header, never where Start
+was. It asks **Confirm stop** or **Keep running**; a confirmed stop is recorded
+and the Run section shows *Stop requested: <local time>* once the worker has
+seen it. Wait for both outputs to be reported as verified OFF before changing
+wiring. The **Run** section shows measured voltage and current, progress,
+measurement age, shutdown status, recent events and the report links of the
+selected run.
+
+After acquisition the worker exits with both outputs verified OFF and the job
+shows **Measurements saved — report queued**. The page starts a separate report
+process automatically when no test is running and enough memory is free; while
+it waits, the reason (for example `MemAvailable below 150 MiB`) is shown in the
+Run section. A new test may be started while reports are queued. **Reports**
+lists every saved run in bench-local time with the run (converter · test),
+bench (Real or Simulated), status and **Open HTML**, **Open PDF**, **View run**
+and **Regenerate report**, which queues a new report from the preserved
+measurements without running the instruments again. The list refreshes itself
+from the same two-second poll and a `Report ready: <run id>` notice appears;
+**Refresh saved runs** is only needed for runs created outside this page. Every
+time the page shows is the bench computer's local clock with its zone
+abbreviation, e.g. `13:40:12 PDT (2026-09-29)`; the evidence files keep
+recording UTC. See [the process model](pi-process-model.md) for the memory
+thresholds and logs.
+
+Profiles are saved when you press Save in an editor, tick or clear a limit
+approval, rename, duplicate or delete. Deleting or renaming a profile that an
+active job was started from is refused; finished jobs keep their own plan
+snapshot, so their reports are unaffected.
 
 ## What this procedure measures
 
@@ -122,7 +158,7 @@ which is ignored by Git. Interactive reports are served in a browser sandbox
 that permits plotting and exports but prevents report scripts from accessing
 the instrument-control page. Publishing a report does not publish bench control.
 
-Test notes can describe the setup today. Adding or repositioning photographs
+Notes for the report can describe the setup today. Adding or repositioning photographs
 and schematics through the UI requires a separate report revision/asset workflow
 and is not currently available; finalized measurements are never edited by this
 page.

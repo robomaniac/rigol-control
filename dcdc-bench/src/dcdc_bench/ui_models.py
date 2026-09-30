@@ -44,9 +44,19 @@ def edited_dut(original: dict, values: dict) -> dict:
     return result
 
 
-def edited_recipe(original: dict, values: dict, *, dut_id: str, mode: str, test_id: str) -> dict:
+def edited_recipe(original: dict, values: dict, *, dut_id: str, test_id: str, mode: str | None = None) -> dict:
+    """The saved recipe with the form's grid and text applied.
+
+    ``mode`` is legacy: real vs simulated comes from the selected bench, so the
+    page passes none and the saved recipe carries ``execution_mode: null``.
+    Optional card text (``title``, ``category``, ``description``,
+    ``standard_clause``) is applied only when the form supplies it.
+    """
     result = copy.deepcopy(original)
     result.update(recipe_id=str(values['recipe_id']).strip(), dut_profile_id=dut_id, execution_mode=mode)
+    for key in ('title', 'category', 'description', 'standard_clause'):
+        if key in values:
+            result[key] = str(values[key] or '').strip() or None
     test = next((test for test in result['tests'] if test['id'] == test_id), None)
     if test is None:
         raise ValueError('Select a test from the saved recipe before editing it.')
@@ -98,7 +108,7 @@ def report_link_rows(snapshot: dict) -> list[tuple[str, str]]:
         return []
     artifacts = snapshot.get('report_artifacts') or {}
     rows = []
-    for filename, label, kind in (('report.html', 'Open interactive HTML', 'html'), ('report.pdf', 'Open PDF', 'pdf'),
+    for filename, label, kind in (('report.html', 'Open HTML', 'html'), ('report.pdf', 'Open PDF', 'pdf'),
                                   ('report_model.json', 'Report data JSON', 'model')):
         status = (artifacts.get(kind) or {}).get('status')
         if status in KEPT_ARTIFACT_STATUSES:
@@ -259,3 +269,172 @@ def saved_runs_key(snapshot: dict) -> tuple:
 def report_became_ready(previous: tuple | None, current: tuple) -> bool:
     """A kept report appeared for a job the page had already seen without one."""
     return previous is not None and not previous[1] and bool(current[1])
+
+
+# --- One-page bench: card text, bench tiles, plan panel, reports table --------
+# Everything here reads saved-profile dicts (JobService.load_profile output) and
+# preview/status dicts; nothing is written back.
+
+DEFAULT_CATEGORY = 'Normal operating voltage'
+START_LABELS = {'mock': 'Start simulated test', 'real': 'Start test on the real bench'}
+BENCH_NAMES = {'mock': 'Simulated bench', 'real': 'Real bench'}
+DELETE_PROMPTS = {'dut': 'Delete this saved converter? Past runs keep their own copy.',
+                  'recipe': 'Delete this saved test? Past runs keep their own copy.',
+                  'bench': 'Delete this saved bench preset? Past runs keep their own copy.'}
+
+
+def _unique(values) -> list[float]:
+    seen: list[float] = []
+    for value in values:
+        if value not in seen:
+            seen.append(value)
+    return seen
+
+
+def values_text(values, unit: str, *, range_join: str) -> str:
+    """'12 / 24 / 30 V' for up to four values; '15…35.8 V' or '0–1 A' (min to max) beyond that."""
+    unique = _unique(float(v) for v in values)
+    if not unique:
+        return '— ' + unit
+    if len(unique) <= 4:
+        return ' / '.join(f'{v:g}' for v in unique) + ' ' + unit
+    return f'{min(unique):g}{range_join}{max(unique):g} {unit}'
+
+
+def recipe_grid(recipe: dict) -> str:
+    """'24 V × 0 / 0.1 A': every requested input voltage against every requested load, over all tests."""
+    volts = [v for test in recipe.get('tests', []) for v in test.get('input_voltage_targets_V', [])]
+    amps = [a for test in recipe.get('tests', []) for a in test.get('output_current_targets_A', [])]
+    return values_text(volts, 'V', range_join='…') + ' × ' + values_text(amps, 'A', range_join='–')
+
+
+def recipe_title(recipe: dict) -> str:
+    """The saved plain name, else the grid ('12 / 24 / 30 V × 0–1 A') so every card has a title."""
+    return str(recipe.get('title') or '').strip() or recipe_grid(recipe)
+
+
+def recipe_category(recipe: dict) -> str:
+    return str(recipe.get('category') or '').strip() or DEFAULT_CATEGORY
+
+
+def point_count(recipe: dict) -> int:
+    return sum(len(test.get('input_voltage_targets_V', [])) * len(test.get('output_current_targets_A', []))
+               for test in recipe.get('tests', []))
+
+
+def duration_text(seconds) -> str:
+    """'~45 s' below a minute and a half, else '~N min'; '' when there is no estimate."""
+    if not isinstance(seconds, (int, float)) or isinstance(seconds, bool) or not math.isfinite(seconds) or seconds < 0:
+        return ''
+    return f'~{round(seconds)} s' if seconds < 90 else f'~{round(seconds / 60)} min'
+
+
+def card_meta(count: int, mode: str, seconds=None) -> str:
+    """'2 points · ~1 min' on the real bench; the simulated bench runs on a virtual clock and gets no time."""
+    text = f'{count} point' + ('' if count == 1 else 's')
+    estimate = duration_text(seconds) if mode == 'real' else ''
+    return text + (' · ' + estimate if estimate else ' · simulated' if mode == 'mock' else '')
+
+
+def grouped_recipes(recipes: dict[str, dict]) -> list[tuple[str, list[tuple[str, dict]]]]:
+    """[(category, [(name, recipe), …])]: the default category first, the rest alphabetically; cards by title."""
+    groups: dict[str, list[tuple[str, dict]]] = {}
+    for name, recipe in recipes.items():
+        groups.setdefault(recipe_category(recipe), []).append((name, recipe))
+    order = sorted(groups, key=lambda category: (category != DEFAULT_CATEGORY, category.lower()))
+    return [(category, sorted(groups[category], key=lambda item: recipe_title(item[1]).lower())) for category in order]
+
+
+def dut_subtitle(dut: dict) -> str:
+    """'9–36 V in, 12 V / 4 A out · sample S1'."""
+    ratings = dut.get('ratings', {})
+    low, high = ratings.get('input_voltage_min_V'), ratings.get('input_voltage_max_V')
+    span = f'{low:g} V in' if low == high else f'{low:g}–{high:g} V in'
+    text = span + f", {ratings.get('output_voltage_nominal_V'):g} V / {ratings.get('output_current_rated_A'):g} A out"
+    sample = (dut.get('identity') or {}).get('sample_id')
+    return text + (f' · sample {sample}' if sample else '')
+
+
+def dut_approved(dut: dict) -> bool:
+    approval = dut.get('execution_approval') or {}
+    return bool(approval.get('real_hardware_enabled')) and bool(approval.get('wiring_and_polarity_confirmed'))
+
+
+def bench_title(bench: dict) -> str:
+    """The saved plain name; a bench without one shows its identifier (a name like '24 V converter tests' is not derivable)."""
+    return str(bench.get('title') or '').strip() or str(bench.get('bench_id'))
+
+
+def bench_equipment(bench: dict, inventory: dict | None = None) -> str:
+    """'DP821A CH1 + DL3031A' from the bench profile, else the inventory models, else generic words."""
+    inventory = inventory or {}
+    source, load = bench.get('source') or {}, bench.get('load') or {}
+    supply = source.get('physical_model') or (inventory.get('source') or {}).get('model') or 'supply'
+    sink = load.get('physical_model') or (inventory.get('load') or {}).get('model') or 'load'
+    return f"{supply} CH{source.get('channel', 1)} + {sink}"
+
+
+LIMIT_FIELDS = (('source_current_limit_A', 'Supply current limit', 'A'),
+                ('dut_input_overvoltage_V', 'Input over-voltage', 'V'),
+                ('dut_output_overvoltage_V', 'Output voltage guard', 'V'),
+                ('output_overcurrent_A', 'Output current guard', 'A'))
+
+
+def limits_rows(bench: dict) -> list[tuple[str, str]]:
+    """The four protective limits as (label, value) rows; a missing limit shows '—', never a default."""
+    controls = bench.get('protective_controls') or {}
+    return [(label, quantity(controls.get(key), unit)) for key, label, unit in LIMIT_FIELDS]
+
+
+def limits_summary(bench: dict) -> str:
+    """'1 A supply · 26 V input · 13.2 V / 2.55 A output' for the Start confirmation."""
+    controls = bench.get('protective_controls') or {}
+    return (quantity(controls.get('source_current_limit_A'), 'A') + ' supply · ' +
+            quantity(controls.get('dut_input_overvoltage_V'), 'V') + ' input · ' +
+            quantity(controls.get('dut_output_overvoltage_V'), 'V') + ' / ' +
+            quantity(controls.get('output_overcurrent_A'), 'A') + ' output')
+
+
+def skip_reasons(preview: dict) -> list[tuple[int, str]]:
+    """(count, reason) for every point that will not run, most frequent first; identical reasons are merged."""
+    counts: dict[str, int] = {}
+    for point in preview.get('points', []):
+        if point.get('status') != 'executable':
+            reason = str(point.get('reason') or 'no reason recorded')
+            counts[reason] = counts.get(reason, 0) + 1
+    return sorted(((count, reason) for reason, count in counts.items()), key=lambda item: (-item[0], item[1]))
+
+
+def summary_text(dut: dict | None, mode: str, bench: dict | None, recipe: dict | None) -> str:
+    """'12T12-4A · Real bench (24 V converter tests) · 24 V small grid' for the header and the bottom bar."""
+    converter = (dut or {}).get('identity', {}).get('model') if dut else None
+    bench_text = BENCH_NAMES.get(mode, mode)
+    if mode == 'real' and bench:
+        bench_text += f' ({bench_title(bench)})'
+    return ' · '.join([converter or '— no converter —', bench_text, recipe_title(recipe) if recipe else '— no test —'])
+
+
+def report_rows(jobs: list[dict], *, zone: tzinfo | None = None, recipes: dict[str, dict] | None = None) -> list[dict]:
+    """One row per saved run for the Reports table: local start time, run, bench, status, kept report links.
+
+    ``recipes`` (name -> saved recipe) supplies the current plain title when the
+    job's recipe still exists; the job's own recorded title, then its recipe id,
+    are the fallbacks so renamed or deleted tests never blank a row.
+    """
+    rows = []
+    for job in jobs:
+        recipe_name = job.get('recipe_id')
+        saved = (recipes or {}).get(recipe_name) if recipe_name else None
+        test = recipe_title(saved) if saved else job.get('recipe_title') or recipe_name
+        progress = job.get('progress') or {}
+        total = progress.get('total') or 0
+        terminal = job.get('state') in ('completed', 'aborted', 'failed', 'cancelled', 'report_failed')
+        rows.append({'job_id': job['job_id'], 'when': local_time_text(job.get('created_utc'), zone=zone),
+                     'run': ' · '.join(part for part in (str(job.get('dut_model') or 'Converter test'), test) if part),
+                     'bench': 'Real' if job.get('mode') == 'real' else 'Simulated',
+                     'status': state_label(job),
+                     'points': f"{progress.get('completed', 0)} / {total} points" if total else '',
+                     'links': [(label, relative) for label, relative in report_link_rows(job) if not relative.endswith('.json')],
+                     'regenerate': bool(terminal and job.get('run_dir')),
+                     'dequeue': 'dequeue' in job_actions(job)})
+    return rows

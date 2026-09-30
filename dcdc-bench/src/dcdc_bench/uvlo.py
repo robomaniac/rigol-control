@@ -295,7 +295,7 @@ def run_uvlo_mock(plan: Plan, out: Path, *, seed: int = 1, synthetic: SyntheticU
     reading; injected samples are flagged in their acquisition settings.
     This function never creates or imports real instruments.
     """
-    if plan.bench.mode != "mock" or plan.recipe.execution_mode != "mock":
+    if plan.bench.mode != "mock":  # the bench decides; a legacy recipe mode is metadata
         raise ValueError("run_uvlo_mock accepts mock profiles only; real UVLO execution is not implemented and requires review")
     procedure = UvloInputRampProcedure(plan)
     if plan.bench.source.max_current_A is None:

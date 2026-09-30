@@ -330,6 +330,9 @@ class TemperatureSensor(Contract):
 class BenchProfile(Contract):
     schema_version: Literal["1.0"] = "1.0"
     bench_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+    # Plain operator-facing name shown on the bench page ("24 V converter tests");
+    # the page falls back to bench_id when absent. Display only.
+    title: str | None = None
     mode: Literal["mock", "real"]
     source: SourceCapabilities
     load: LoadCapabilities
@@ -546,7 +549,16 @@ class TestRecipe(Contract):
     schema_version: Literal["1.0"] = "1.0"
     recipe_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
     dut_profile_id: str
-    execution_mode: Literal["mock", "real"] = "mock"
+    # Legacy: real vs simulated now comes from the selected bench (BenchProfile.mode).
+    # A recipe may still carry a mode; the planner records a warning when it
+    # disagrees with the bench and never raises on it.
+    execution_mode: Literal["mock", "real"] | None = None
+    # Operator-facing card text. All optional and display-only; the page derives
+    # a title from the requested voltages x loads when none is saved.
+    title: str | None = None
+    category: str | None = None
+    description: str | None = None
+    standard_clause: str | None = None
     tests: list[TestDefinition] = Field(min_length=1, max_length=100)
     planning: PlanningPolicy = Field(default_factory=PlanningPolicy)
     settling: SettlingPolicy = Field(default_factory=SettlingPolicy)

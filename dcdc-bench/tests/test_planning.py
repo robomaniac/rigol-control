@@ -181,13 +181,31 @@ def test_mismatched_configuration_and_unsupported_test_fail_closed(profiles):
     with pytest.raises(ValueError, match="identity"):
         build_plan(dut, bench, recipe)
     recipe.dut_profile_id = dut.profile_id
-    bench.mode = "real"
-    with pytest.raises(ValueError, match="modes"):
-        build_plan(dut, bench, recipe)
-    bench.mode = "mock"
     recipe.tests[0].type = "unapproved_uvlo"
     plan = build_plan(dut, bench, recipe)
     assert all(p.status == "unsupported" for p in plan.points)
+
+
+def test_bench_decides_real_or_simulated_and_a_stale_recipe_mode_is_a_warning(profiles):
+    """Real vs simulated comes from the bench only. A recipe that still carries a legacy
+    execution_mode never raises; a disagreement is recorded in the plan (and its hash)."""
+    dut, bench, recipe = profiles
+    assert recipe.execution_mode == "mock"
+    bench.mode = "real"
+    plan = build_plan(dut, bench, recipe)
+    assert plan.bench.mode == "real" and verify_plan_hash(plan)
+    assert all(p.status in ("approval_blocked", "unsupported", "assumption_limited") for p in plan.points), \
+        "the real bench, not the recipe's mock label, decides that approvals gate every point"
+    assert any(p.status == "approval_blocked" and "real_hardware_enabled is false" in p.reason for p in plan.points)
+    assert "Recipe mode 'mock' ignored; the bench decides (real)" in plan.warnings
+    agreeing = build_plan(dut, bench, recipe.model_copy(update={"execution_mode": "real"}))
+    assert not any("ignored" in w for w in agreeing.warnings)
+    modeless = build_plan(dut, bench, recipe.model_copy(update={"execution_mode": None}))
+    assert not any("ignored" in w for w in modeless.warnings)
+    assert modeless.recipe.execution_mode is None
+    assert len({plan.plan_hash, agreeing.plan_hash, modeless.plan_hash}) == 3, "the recipe snapshot and warning are hashed"
+    bench.mode = "mock"
+    assert all(p.status in ("executable", "assumption_limited") for p in build_plan(dut, bench, modeless.recipe).points)
 
 
 def test_unknown_configuration_nonfinite_numbers_and_yaml_objects_rejected(profiles, tmp_path):
