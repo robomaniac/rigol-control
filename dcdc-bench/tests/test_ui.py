@@ -114,7 +114,7 @@ def test_published_aliases_resolve_only_inside_their_startup_allowlist(tmp_path)
             published_file(roots, relative)
 
 
-@pytest.mark.parametrize('host', ['0.0.0.0', '192.168.1.10', 'example.com', 'localhost.attacker.invalid'])
+@pytest.mark.parametrize('host', ['0.0.0.0', '192.0.2.10', 'example.com', 'localhost.attacker.invalid'])
 def test_control_ui_rejects_network_interfaces_before_loading_server(host, tmp_path):
     with pytest.raises(ValueError, match='loopback'):
         run_ui(tmp_path, host=host)
