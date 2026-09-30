@@ -196,8 +196,9 @@ def _evidence(run_dir):
 def test_data06_demoted_point_carries_computed_reason_and_flags_into_the_report(mock_run):
     plan, run, samples = _evidence(mock_run)
     requests = {p.point_id: p for p in plan.points}
-    target = next(p["point_id"] for p in run["points"]
-                  if p["qualification"] == "valid" and requests[p["point_id"]].iout_target_A > 0)
+    # The heaviest valid load (about 87 % on the refit plant): at 0.05 A the realistic ~50 % no longer exceeds 100 % when x1.3.
+    target = max((p for p in run["points"] if p["qualification"] == "valid" and requests[p["point_id"]].iout_target_A > 0),
+                 key=lambda p: requests[p["point_id"]].iout_target_A)["point_id"]
     worker_reason = next(p["reason"] for p in run["points"] if p["point_id"] == target)
     # Inflate the load's current readback for one loaded point so Pout > Pin.
     for sample in samples:

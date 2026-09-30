@@ -84,10 +84,16 @@ def analysed(path: Path):
     return plan, run, samples, analysis, build_report_model(plan, run, analysis, samples)
 
 
+# The shipped plant has a 600 s case time constant (first-order-case-2.0); this virtual-clock fixture passes an
+# explicit 20 s so its 2 C/min criterion is met near 50 s with the case at about 92 % of its final rise, instead
+# of being flattered by a threshold the slow plant satisfies from the first window.
+FAST_THERMAL = {"case_time_constant_s": 20.}
+
+
 @pytest.fixture(scope="module")
 def settled_run(tmp_path_factory):
     plan = thermal_plan()
-    path = run_mock(plan, tmp_path_factory.mktemp("thermal-met"))
+    path = run_mock(plan, tmp_path_factory.mktemp("thermal-met"), thermal_parameters=FAST_THERMAL)
     return plan, path
 
 
@@ -209,22 +215,46 @@ def test_mock_thermal_model_is_first_order_tracks_loss_and_is_labelled_synthetic
     assert state0.data_source == "synthetic" and state0.role == "ambient"
     assert abs(ambient0 - THERMAL_MODEL_PARAMETERS["ambient_initial_C"]) < .1
     rises = []
-    for t in (20., 40., 80., 400.):
+    # first-order-case-2.0: tau is 600 s (8 C/W x 75 J/C), so equilibrium takes about an hour of model time.
+    assert THERMAL_MODEL_PARAMETERS["case_time_constant_s"] == 600. == (
+        THERMAL_MODEL_PARAMETERS["case_rise_per_module_loss_C_per_W"] * THERMAL_MODEL_PARAMETERS["case_heat_capacity_J_per_C"])
+    for t in (200., 400., 800., 4000.):
         case, state = plant.read("Tcase_C", t)
         ambient, _ = plant.read("Tambient_C", t)
         rises.append(case - ambient)
         assert state.sensor_id == "Tcase" and state.module_loss_W > 0
     assert rises == sorted(rises) and rises[0] > 0
-    loss = plant.state(400.).module_loss_W
+    loss = plant.state(4000.).module_loss_W
     expected = THERMAL_MODEL_PARAMETERS["case_rise_per_module_loss_C_per_W"] * loss + THERMAL_MODEL_PARAMETERS["case_offset_C"]
     assert rises[-1] == pytest.approx(expected, abs=.15)
     assert rises[0] < .75 * rises[-1]
     plant.load_off()
     plant.source_off()
-    cooled, _ = plant.read("Tcase_C", 800.)
-    assert cooled - plant.read("Tambient_C", 800.)[0] < rises[-1]
+    cooled, _ = plant.read("Tcase_C", 8000.)
+    assert cooled - plant.read("Tambient_C", 8000.)[0] < rises[-1]
     # Electrical readings are unaffected by the attached provider.
     assert plant.read("Vin_V", 0.)[1].source_mode == "OFF"
+
+
+def test_slope_only_settling_is_honest_only_when_the_recipe_slope_suits_the_plant_time_constant():
+    """M4: with tau = 600 s a slope criterion is met while slope x tau of rise remains; the shipped recipe declares
+    a slope that leaves about 5 %, and the old 0.5 C/min over 60 s would have declared 'met' at half the rise."""
+    _, _, recipe = profiles()
+    policy = recipe.tests[0].thermal_settling
+    tau = THERMAL_MODEL_PARAMETERS["case_time_constant_s"]
+    plant = MockBench(12., 1., .15, seed=1)
+    plant.configure(24., .5, 0.)
+    plant.source_on(0.)
+    plant.load_on(0.)
+    final_rise = THERMAL_MODEL_PARAMETERS["case_rise_per_module_loss_C_per_W"] * plant.state(30.).module_loss_W
+    remaining_at_criterion = policy.slope_threshold_C_per_min / 60. * tau
+    assert remaining_at_criterion / final_rise < .06, (remaining_at_criterion, final_rise)
+    assert (.5 / 60. * tau) / final_rise > .45, "the previous 0.5 C/min criterion is not honest on a 600 s plant"
+    initial_slope = final_rise / tau * 60.
+    time_to_criterion = tau * math.log(initial_slope / policy.slope_threshold_C_per_min)
+    assert policy.minimum_observation_s <= time_to_criterion + policy.window_s <= policy.timeout_s
+    # The fast virtual-clock fixture is honest for its own tau: 2 C/min on a 20 s plant leaves 2/60*20 = 0.67 C.
+    assert (2. / 60. * FAST_THERMAL["case_time_constant_s"]) / final_rise < .1
 
 
 def test_thermal_window_criterion_met_versus_not_met():

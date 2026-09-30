@@ -1,11 +1,17 @@
+# SYNTHETIC mock bench that mirrors profiles/bench/rigol-dp821a-dl3031a.yaml: the same envelopes, channel
+# locations, measurement ranges, displayed resolutions and local load sensing as the physical DP821A (CH1)
+# / DL3031A pair, driven by the synthetic plant (coupled-dc-2.0, docs/simulation-plant.md). It exists so a
+# rehearsal plans and reports with the real bench's boundary and ranges. Nothing here is an instrument
+# identity or a measurement: the readback specifications copy the R1/R4 datasheet figures as SYNTHETIC
+# EXAMPLES (status synthetic_example) and the evaluator refuses them on any real bench.
 schema_version: '1.0'
-bench_id: mock-dp821-envelope
+bench_id: mock-rigol-dp821a-dl3031a-local-sense
 mode: mock
 source:
   instrument_id: synthetic-source
   adapter: mock_source
   physical_model: null
-  reported_identity: SYNTHETIC source with CH1 envelope
+  reported_identity: SYNTHETIC source with the DP821A CH1 envelope
   channel: 1
   capabilities_confirmed: true
   min_voltage_V: 0.0
@@ -18,40 +24,35 @@ load:
   instrument_id: synthetic-load
   adapter: mock_load
   physical_model: null
-  reported_identity: SYNTHETIC load; not a physical model rating
+  reported_identity: SYNTHETIC load with the DL3031A envelope; not a physical model rating
   capabilities_confirmed: true
-  min_voltage_V: 0.15
+  min_voltage_V: 1.3
   max_voltage_V: 150.0
-  max_current_A: 40.0
-  max_power_W: 300.0
+  max_current_A: 60.0
+  max_power_W: 350.0
   remote_sense_supported: true
-  # Local sense, as on the physical DP821A/DL3031A bench (no S+/S- leads are wired there). The
-  # remote-sense branch is exercised by profiles/bench/mock-remote-sense.yaml instead.
   remote_sense_required: false
   mode: CC
   min_current_A: 0.0
-# Every readback_specification below is a SYNTHETIC EXAMPLE (status synthetic_example).
-# The numbers describe no instrument; they exist so the mock path demonstrates an
-# evaluated budget end to end. The evaluator refuses them on any real bench.
 measurements:
   Vin_V:
     instrument_id: synthetic-source
     quantity: Vin_V
     unit: V
     location: source_terminals
-    measurement_range: null
-    resolution: null
+    measurement_range: 60.0
+    resolution: 0.001
     accuracy: null
     programming_accuracy: null
     readback_specification:
       role: readback
       status: synthetic_example
-      source: synthetic mock plant, not an instrument
+      source: synthetic mock plant, not an instrument; figures copied from the R1 DP800 transcription (Readback Voltage 0.1% + 25mV, 1 mV) for rehearsal only
       unit: V
-      percent_of_reading: 0.05
-      percent_of_range: 0.02
+      percent_of_reading: 0.1
+      percent_of_range: 0.0
       range_value: 60.0
-      absolute_offset: 0.0
+      absolute_offset: 0.025
       resolution: 0.001
       calibration:
         status: within_interval
@@ -65,19 +66,19 @@ measurements:
     quantity: Iin_A
     unit: A
     location: source_output
-    measurement_range: null
-    resolution: null
+    measurement_range: 1.0
+    resolution: 0.0001
     accuracy: null
     programming_accuracy: null
     readback_specification:
       role: readback
       status: synthetic_example
-      source: synthetic mock plant, not an instrument
+      source: synthetic mock plant, not an instrument; figures copied from the R1 DP800 transcription (Readback Current 0.15% + 10mA, 0.1 mA) for rehearsal only
       unit: A
-      percent_of_reading: 0.1
-      percent_of_range: 0.05
+      percent_of_reading: 0.15
+      percent_of_range: 0.0
       range_value: 1.0
-      absolute_offset: 0.0
+      absolute_offset: 0.010
       resolution: 0.0001
       calibration:
         status: within_interval
@@ -91,25 +92,25 @@ measurements:
     quantity: Vout_V
     unit: V
     location: load_input_terminals_local_sense
-    measurement_range: null
-    resolution: null
+    measurement_range: 150.0
+    resolution: 0.0001
     accuracy: null
     programming_accuracy: null
     readback_specification:
       role: readback
       status: synthetic_example
-      source: synthetic mock plant, not an instrument
+      source: synthetic mock plant, not an instrument; figures copied from the R4 DL3000 transcription (Readback Voltage 0.05% + 0.02% FS, 0.1 mV) for rehearsal only
       unit: V
       percent_of_reading: 0.05
-      percent_of_range: 0.01
+      percent_of_range: 0.02
       range_value: 150.0
       absolute_offset: 0.0
-      resolution: 0.001
+      resolution: 0.0001
       calibration:
         status: within_interval
         certificate: synthetic-none
         note: synthetic plant; no instrument or certificate exists
-      applicable_conditions: synthetic; no environmental conditions apply
+      applicable_conditions: synthetic; local sense (no S+/S- leads), so the value is the load-terminal voltage
       distribution: rectangular
       distribution_justification: synthetic error limit treated as a rectangular bound for demonstration
   Iout_A:
@@ -117,25 +118,25 @@ measurements:
     quantity: Iout_A
     unit: A
     location: load_input
-    measurement_range: null
-    resolution: null
+    measurement_range: 60.0
+    resolution: 0.0001
     accuracy: null
     programming_accuracy: null
     readback_specification:
       role: readback
       status: synthetic_example
-      source: synthetic mock plant, not an instrument
+      source: synthetic mock plant, not an instrument; figures copied from the R4 DL3000 transcription (Readback Current 0.05% + 0.05% FS, 0.1 mA) for rehearsal only
       unit: A
-      percent_of_reading: 0.1
-      percent_of_range: 0.02
-      range_value: 4.0
+      percent_of_reading: 0.05
+      percent_of_range: 0.05
+      range_value: 60.0
       absolute_offset: 0.0
       resolution: 0.0001
       calibration:
         status: within_interval
         certificate: synthetic-none
         note: synthetic plant; no instrument or certificate exists
-      applicable_conditions: synthetic; no environmental conditions apply
+      applicable_conditions: synthetic; single documented readback range, FS = 60 A (0.05 % FS = 30 mA)
       distribution: rectangular
       distribution_justification: synthetic error limit treated as a rectangular bound for demonstration
 uncertainty_policy:
@@ -146,16 +147,13 @@ uncertainty_policy:
 readback_correlations: []
 measurement_boundary: source-to-load-terminal path (input and output wiring included; load in local sense)
 notes:
-- SYNTHETIC profiles model a coupled converter and source/load. These are not observations
-  of the physical DUT. The plant (coupled-dc-2.0) is fitted to the recorded behaviour of the
-  first converter sample; see docs/simulation-plant.md for what it models and what it deliberately does not.
-- The synthetic source uses the published CH1 voltage/current envelope; the synthetic
-  load capabilities are simulation assumptions.
-- Readback specifications are SYNTHETIC EXAMPLES so the mock path demonstrates an evaluated
-  budget; they describe no instrument. Programming accuracy is not substituted for readback.
-- 'The boundary mirrors the physical bench: local load sensing at the load terminals, so input and
-  output wiring losses (0.06 ohm and 0.10 ohm in the plant) are inside path efficiency; no S+/S-
-  leads are depicted.'
-- 'Readbacks are quantised to the instruments'' displayed digits and held per channel; the load''s
-  current readback carries the recorded +11 mA offset under load and the 0 / 11 mA alternation with
-  its input OFF, so the readback cross-check and freshness paths are exercised by the plant.'
+- SYNTHETIC profile driven by the coupled-dc-2.0 plant; these are not observations of the physical DUT
+  and the instruments are not identified.
+- 'Mirrors the physical bench profile: DP821A CH1 and DL3031A envelopes, 1.3 V load minimum, local load
+  sensing, the same channel locations and measurement ranges (1 A source range, so an estimated input
+  current above 1 A is planned as unsupported exactly as on the real bench), and the displayed digits
+  (1 mV / 0.1 mA source, 0.1 mV / 0.1 mA load) to which the plant quantises its readbacks.'
+- Readback specifications are SYNTHETIC EXAMPLES that copy the datasheet figures so the rehearsal
+  evaluates a budget of the right size; they describe no instrument and are refused on a real bench.
+- 'Wiring is inside the boundary: the plant''s 0.06 ohm input lead and 0.10 ohm output path are part of
+  path efficiency, as on the physical bench.'

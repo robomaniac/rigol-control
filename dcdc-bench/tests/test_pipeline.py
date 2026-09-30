@@ -48,7 +48,11 @@ def test_DATA01_worker_raw_analysis_table_export_and_figure_reference_identical_
     analysis = json.loads((directory / "analysis.json").read_text())
     model = build_report_model(plan, run, analysis, samples)
     csv_points = {p["point_id"]: p for p in csv.DictReader(io.StringIO(points_csv(model.points)))}
-    assert sum(p["qualification"] == "valid" for p in model.points) == 19
+    # 14, not 19: the plant reproduces the recorded failed 12 V cold start, so the 12 V phase ends at the startup gate.
+    assert sum(p["qualification"] == "valid" for p in model.points) == 14
+    twelve = [p for p in model.points if p["vin_target_V"] == 12. and p["iout_target_A"] <= .5]
+    assert [p["qualification"] for p in twelve] == ["inconclusive"] + ["not-run"] * 4
+    assert twelve[0]["reason"] == "Output below startup/operating threshold; load will not be enabled or increased"
     for point in model.points:
         if point["qualification"] != "valid":
             assert point["efficiency_pct"] is None
@@ -176,6 +180,7 @@ def test_CORE07_second_output_voltage_and_alternate_source_complete_worker_to_re
     dut, bench, recipe = initial.dut, initial.bench, initial.recipe
     dut.profile_id = "synthetic-other-dut"
     dut.identity.model = "Synthetic 5 V board"
+    dut.known_behaviours = None  # the recorded failed 12 V cold start belongs to the 12T12-4A sample, not to this fixture
     dut.ratings.origin = "synthetic_regression_fixture"
     dut.ratings.output_voltage_nominal_V = 5.
     dut.ratings.output_current_rated_A = 2.

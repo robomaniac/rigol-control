@@ -25,7 +25,7 @@ load:
   max_current_A: 40.0
   max_power_W: 300.0
   remote_sense_supported: true
-  remote_sense_required: true
+  remote_sense_required: false  # local sense, as on the physical bench (see mock.yaml)
   mode: CC
   min_current_A: 0.0
 measurements:
@@ -51,7 +51,7 @@ measurements:
     instrument_id: synthetic-load
     quantity: Vout_V
     unit: V
-    location: dut_output_sense
+    location: load_input_terminals_local_sense
     measurement_range: null
     resolution: null
     accuracy: null
@@ -60,7 +60,7 @@ measurements:
     instrument_id: synthetic-load
     quantity: Iout_A
     unit: A
-    location: dut_output
+    location: load_input
     measurement_range: null
     resolution: null
     accuracy: null
@@ -110,15 +110,18 @@ temperature_sensors:
   calibration_status: not applicable (synthetic)
   surface_documentation: null
   placement: null
-measurement_boundary: source-to-DUT-output path
+measurement_boundary: source-to-load-terminal path (input and output wiring included; load in local sense)
 notes:
 - SYNTHETIC profiles model a coupled converter and source/load. These are not observations
-  of the physical DUT.
+  of the physical DUT (plant coupled-dc-2.0; docs/simulation-plant.md).
 - The synthetic source uses the published CH1 voltage/current envelope; the synthetic
   load capabilities are simulation assumptions.
 - Readback uncertainty is unquantified. Programming accuracy is not substituted.
-- Source-terminal input measurements include input wiring losses in path efficiency.
+- The boundary mirrors the physical bench (local load sensing); input and output wiring losses
+  are inside path efficiency.
 - Temperature channels come from a first-order synthetic case model driven by the plant's
-  synthetic module loss (mock_thermal adapter). They are selectable only for a mock bench;
-  a real thermal test requires real configured acquisition channels. No photograph or
-  sensor placement exists for this synthetic setup, so placement is null, not invented.
+  synthetic module loss (mock_thermal adapter, first-order-case-2.0 with a 600 s time constant).
+  They are selectable only for a mock bench; a real thermal test requires real configured
+  acquisition channels. No photograph or sensor placement exists for this synthetic setup, so
+  placement is null, not invented. A slope-only settling criterion is met while about
+  slope x 600 s of rise remains, so the recipe must declare a slope small enough for that.

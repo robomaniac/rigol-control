@@ -583,7 +583,7 @@ def test_exp01_exported_svg_png_context(viewer, tmp_path):
     encoded=svg_url.split(',',1)[1]
     svg=base64.b64decode(encoded).decode() if ';base64,' in svg_url else unquote(encoded)
     assert 'SYNTHETIC' in svg and '12T12-4A' in svg and 'fig-efficiency' in svg
-    assert 'source-to-DUT-output' in svg
+    assert 'source-to-load-terminal' in svg  # the demo mock bench mirrors the physical bench's local-sense boundary
     png=page.evaluate("dcdcReport.exportFigure('fig-efficiency','png')")
     assert png.startswith('data:image/png;base64,')
     assert len(base64.b64decode(png.split(',',1)[1])) > 10000

@@ -34,3 +34,11 @@ execution_approval:
   real_hardware_enabled: false
   wiring_and_polarity_confirmed: false
   protective_policy_id: null
+# Recorded bench behaviour of the physical sample (evidence, not a rating; see docs/cold-start-hypothesis.md).
+# The planner warns at requested inputs at or below a recorded failed cold-start level in both modes, and the
+# synthetic plant reproduces the failed start so a rehearsal on the mock shows the real startup gate's refusal.
+known_behaviours:
+  notes:
+  - 'One automated direct 12 V cold start failed (run e0fab9, 2026-09-27): output plateaued at 7.98-8.12 V with the load OFF, then the source collapsed to 2.661 V at 1.0005 A after the load was enabled at that output. The same unit cold-started at 15, 24 and 35.8 V with the load disabled.'
+  cold_start_failed_at_V:
+  - 12.0

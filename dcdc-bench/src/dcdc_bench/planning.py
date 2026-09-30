@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+from itertools import groupby
 from pathlib import Path
 from typing import TypeVar
 
@@ -19,6 +21,17 @@ REQUIRED_MEASUREMENTS = {"Vin_V": "V", "Iin_A": "A", "Vout_V": "V", "Iout_A": "A
 IMPLEMENTED_TEST_TYPES = ("steady_state_load_sweep", UVLO_TEST_TYPE, *SUPPLY_PROFILE_TEST_TYPES)
 REAL_HARDWARE_NOT_APPROVED = ("is not yet approved for real hardware: the procedure exists on the synthetic plant only "
                               "and no real execution context exists in this release")
+# --- Simulated-run budget (docs/simulation-plant.md, "Run budget") -------------------------------------
+# The mock worker fsyncs every JSONL record, so its wall time follows the record count and host I/O,
+# not model time. The bench service runs it in a transient unit with RuntimeMaxSec=2700 and
+# KillMode=control-group; a run must finish, including finalization, well inside that.
+MOCK_RUN_BUDGET_S = 2400.0                    # 2700 s minus a 300 s margin for launch, finalization and the report hand-off
+MOCK_DEADLINE_FIXED_S = 120.0                 # the runner's own hung-owner deadline: 120 s + 0.1 s per record ...
+MOCK_DEADLINE_SECONDS_PER_RECORD = 0.1        # ... sized for a loaded SD card; the plan is refused when it cannot fit
+MOCK_ESTIMATE_FIXED_S = 15.0                  # typical: spawn of the plant owner, provenance hashing, finalization
+MOCK_ESTIMATE_SECONDS_PER_RECORD = 0.005      # typical: 2-3 ms per fsync'd record measured on the bench Pi 4 (idle, 2026-09-30), rounded up
+MOCK_STARTUP_CYCLES = 5                       # source-only gate cycles per input-voltage phase, mirrored from real_backend
+MOCK_LOAD_ENABLE_CYCLES = 5                   # loaded startup cycles after the load input is enabled
 
 
 def load_profile(path: str | Path, model: type[Profile]) -> Profile:
@@ -288,6 +301,79 @@ def _point(dut: DutProfile, bench: BenchProfile, recipe: TestRecipe, test: TestD
                         physical_input_power_limit_W=physical_power, planning_output_current_limit_A=planning_limit)
 
 
+def known_behaviour_warnings(dut: DutProfile, recipe: TestRecipe) -> list[str]:
+    """One warning per recorded failed cold-start level that a requested input is at or below (both modes)."""
+    behaviours = dut.known_behaviours
+    if behaviours is None or not behaviours.cold_start_failed_at_V:
+        return []
+    failed = max(behaviours.cold_start_failed_at_V)
+    affected = sorted({vin for test in recipe.tests for vin in test.input_voltage_targets_V if vin <= failed})
+    if not affected:
+        return []
+    levels = ", ".join(f"{vin:g} V" for vin in affected)
+    return [f"Recorded behaviour of {dut.identity.model}: a direct cold start at {failed:g} V input failed on the "
+            f"physical sample; requested input {levels} {'is' if len(affected) == 1 else 'are'} at or below that level. "
+            "On the real bench the source-only startup gate refuses to enable the load unless the output is in band; "
+            "the simulated bench reproduces the recorded failed start (DUT profile known_behaviours)."]
+
+
+def mock_run_estimate(plan: Plan) -> dict:
+    """Record count and wall-time estimate of ``runner.run_mock`` for this plan, and whether it fits the budget.
+
+    Records are an upper estimate: every executable point settles to its timeout and acquires for
+    its duration at the target poll interval on the four electrical channels (plus bound temperature
+    channels and the thermal-settling polls), every input-voltage phase adds the five source-only
+    startup cycles and, when it has a loaded point, the five loaded startup cycles. ``deadline_s``
+    is the runner's own worst-case deadline for that volume; the plan is within budget only when
+    that deadline fits ``MOCK_RUN_BUDGET_S``. ``typical_s`` is what an idle bench computer needs.
+    """
+    r = plan.recipe
+    poll = max(r.acquisition.target_poll_interval_s, 1e-3)
+    executable = [p for p in plan.points if p.status == "executable"]
+    phases = [list(group) for _, group in groupby(executable, key=lambda p: (p.test_id, p.vin_target_V))]
+    loaded_phases = sum(any(p.iout_target_A > 0 for p in group) for group in phases)
+    channels = len(plan.bench.temperature_sensors)
+    polls_per_point = math.ceil((r.settling.timeout_s + r.acquisition.duration_s) / poll)
+    thermal_polls = max((math.ceil(t.thermal_settling.timeout_s / t.thermal_settling.poll_interval_s)
+                         for t in r.tests if t.thermal_settling), default=0)
+    records = (len(executable) * ((len(REQUIRED_MEASUREMENTS) + channels) * polls_per_point
+                                  + (len(REQUIRED_MEASUREMENTS) + channels) * thermal_polls)
+               + len(phases) * MOCK_STARTUP_CYCLES * len(REQUIRED_MEASUREMENTS)
+               + loaded_phases * MOCK_LOAD_ENABLE_CYCLES * len(REQUIRED_MEASUREMENTS)
+               + (len(plan.points) - len(executable)))
+    deadline = MOCK_DEADLINE_FIXED_S + MOCK_DEADLINE_SECONDS_PER_RECORD * records
+    typical = MOCK_ESTIMATE_FIXED_S + MOCK_ESTIMATE_SECONDS_PER_RECORD * records
+    within = deadline <= MOCK_RUN_BUDGET_S
+    reason = None if within else (
+        f"the simulated run would write about {records} fsync'd records; its worst-case deadline {deadline:.0f} s "
+        f"exceeds the {MOCK_RUN_BUDGET_S:.0f} s simulated-run budget (RuntimeMaxSec 2700 s minus margin); "
+        "split the recipe or shorten its settling/acquisition windows")
+    return {"records": records, "executable_points": len(executable), "phases": len(phases),
+            "typical_s": typical, "deadline_s": deadline, "budget_s": MOCK_RUN_BUDGET_S,
+            "within_budget": within, "reason": reason}
+
+
+def mock_acquisition_seconds(plan: Plan) -> float:
+    """Typical wall time of the simulated run (the counterpart of ``real_backend.acquisition_seconds``)."""
+    return mock_run_estimate(plan)["typical_s"]
+
+
+def prepare_mock_plan(plan: Plan) -> tuple[Plan, list[str], float]:
+    """Preview counterpart of ``real_backend.prepare_real_plan`` for a mock bench: the plan is returned
+    unchanged (its hash stands), ``errors`` names why the simulated worker would refuse it, and the
+    seconds are the typical wall-time estimate. Only steady-state load sweeps run through the generic
+    mock loop; the phase-scoped procedures have their own bounded volume and get no estimate here."""
+    if not verify_plan_hash(plan):
+        raise ValueError("Plan hash mismatch")
+    if plan.bench.mode != "mock":
+        raise ValueError("prepare_mock_plan accepts mock bench profiles only")
+    if any(test.type != "steady_state_load_sweep" for test in plan.recipe.tests):
+        return plan, [], 0.0
+    estimate = mock_run_estimate(plan)
+    errors = [] if estimate["within_budget"] else [f"Simulated run refused: {estimate['reason']}"]
+    return plan, errors, estimate["typical_s"]
+
+
 def build_plan(dut: DutProfile, bench: BenchProfile, recipe: TestRecipe) -> Plan:
     """Expand every requested point without opening connections or changing targets."""
     if recipe.dut_profile_id != dut.profile_id:
@@ -313,5 +399,14 @@ def build_plan(dut: DutProfile, bench: BenchProfile, recipe: TestRecipe) -> Plan
             controls.dut_output_overvoltage_V, controls.output_overcurrent_A)):
         plan.warnings.append("Explicit voltage/current guards are inclusive planning ceilings (target <= guard); "
                              "this check does not establish physical operating headroom or transient protection.")
+    plan.warnings.extend(known_behaviour_warnings(dut, recipe))
+    if bench.mode == "mock" and all(test.type == "steady_state_load_sweep" for test in recipe.tests):
+        estimate = mock_run_estimate(plan)
+        text = (f"Simulated run estimate: about {estimate['records']} fsync'd records over {estimate['phases']} "
+                f"input-voltage phase(s); roughly {estimate['typical_s']:.0f} s on an idle bench computer, "
+                f"{estimate['deadline_s']:.0f} s worst-case deadline against the {estimate['budget_s']:.0f} s simulated-run budget.")
+        if not estimate["within_budget"]:
+            text += " The simulated worker refuses this plan: " + estimate["reason"] + "."
+        plan.warnings.append(text)
     plan.plan_hash = _hash_payload(plan.model_dump(mode="json", exclude={"plan_hash"}))
     return plan

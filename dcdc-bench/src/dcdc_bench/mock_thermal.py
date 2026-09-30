@@ -14,17 +14,23 @@ from typing import Any
 
 from .domain import MOCK_THERMAL_ADAPTER, BenchProfile, TemperatureSensor
 
-THERMAL_MODEL_VERSION = "first-order-case-1.0"
+THERMAL_MODEL_VERSION = "first-order-case-2.0"
 THERMAL_MODEL_PARAMETERS: dict[str, Any] = {
     "data_source": "simulated",
     "ambient_initial_C": 23.0,
     "ambient_drift_C_per_hour": 0.3,
     "ambient_gaussian_sigma_C": 0.01,
     "case_rise_per_module_loss_C_per_W": 8.0,
-    "case_time_constant_s": 40.0,
+    # A potted module of 50-100 g of case at 8 C/W has a time constant of the order of ten minutes,
+    # not the 40 s of first-order-case-1.0, which let the slope-only settling criterion pass early.
+    # tau = R * C: 600 s = 8 C/W * 75 J/C. Both numbers are synthetic scale choices, not measurements.
+    "case_time_constant_s": 600.0,
+    "case_heat_capacity_J_per_C": 75.0,
     "case_offset_C": 0.05,
     "case_gaussian_sigma_C": 0.02,
     "loss_input": "synthetic plant module_loss_W; input lead loss is outside the modelled case",
+    "settling_caveat": ("a slope-only criterion is met while slope * tau of rise remains; at 0.5 C/min and tau = 600 s "
+                        "that is 5 C, so a recipe on this plant must declare a slope small enough for its tau"),
 }
 
 
