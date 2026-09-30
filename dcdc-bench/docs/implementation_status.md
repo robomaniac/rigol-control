@@ -202,7 +202,7 @@ hardware execution; configured real jobs use `JobService` through the UI.
 
 ### Current verification record
 
-Current test total (2026-09-30, `dcdc-bench-hardening` at the end of the simulation review round): the full run `pytest dcdc-bench/tests -m 'not browser and not pdf'` passed **874 tests** with 16 browser/PDF gates deselected (Raspberry Pi 4, 199 s). This is the one figure the README and HANDOFF quote; the run totals below are dated checkpoints.
+Current test total (2026-09-30, `dcdc-bench-hardening` at the end of the simulation review round): the full run `pytest dcdc-bench/tests -m 'not browser and not pdf'` passed **874 tests** with 16 browser/PDF gates deselected (Raspberry Pi 4, 199 s). This is the one figure the README and HANDOFF quote; the run totals below are dated checkpoints. GitHub Actions run 36745805562 on commit `af52981` (2026-09-30) passed all three jobs: fake-instrument tests on Python 3.11 and 3.13, and the informational browser/PDF gate job (demo rendered on the runner, PDF-02 check passed, browser gates 15 passed, 1 skipped), the first fully green run since the workflow was added.
 CI note: the Python 3.11 job had failed on seven `Path.read_text(newline=)`
 test sites (3.13-only), fixed on 2026-09-30; the two 390 px browser gates
 that failed on CI's Chromium were made font-tolerant the same day and have
