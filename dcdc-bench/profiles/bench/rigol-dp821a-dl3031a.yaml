@@ -1,0 +1,278 @@
+# Rigol DP821A (CH1 source) + Rigol DL3031A (CC load) bench profile.
+#
+# Every numeric accuracy term below is transcribed as printed from the manufacturer datasheets
+# cited in the brief (section 18): R1 DP800 datasheet DSH03108-1110-202505 and R4 DL3000 datasheet
+# DSJ01109-1110 2025.11, fetched 2026-09-29. Page numbers are printed page numbers. The full
+# transcription, forms and remaining unknowns are in docs/instrument-specifications.md.
+#
+# Readback (measurement) terms live in measurements.*.accuracy and readback_specification.
+# Programming (setting) terms live in programming_accuracy and are never used as readback
+# uncertainty. Calibration status of both units is UNKNOWN (no certificate seen), so the readback
+# budget stays not_evaluated. No endpoint, serial, identity string or protective policy is entered.
+schema_version: '1.0'
+bench_id: rigol-dp821a-dl3031a
+mode: real
+source:
+  instrument_id: source
+  adapter: benchctl_rigol_dp800
+  physical_model: null
+  reported_identity: null
+  firmware: null
+  modification: null
+  endpoint: null
+  channel: 1
+  # Ratings are sourced (R1 p. 4) but this unit's label has not been checked against the model
+  # (plan section 5), so the flag stays false until that bench step is recorded.
+  capabilities_confirmed: false
+  min_voltage_V: 0.0
+  max_voltage_V: 60.0
+  max_current_A: 1.0
+  max_power_W: 60.0
+  remote_sense_supported: false
+  remote_sense_required: false
+  programming_accuracy:
+    ch1_voltage:
+      applies_to: programming
+      reading_fraction: 0.001
+      full_scale_fraction: 0.0
+      offset: 0.025
+      unit: V
+      source: 'R1 DP800 datasheet DSH03108-1110-202505, printed p. 5, "Annual Accuracy[1] (25 °C ± 5 °C), ±(Output Percentage + Offset)", DP821A CH1, Programming Voltage: 0.1% + 25mV'
+      conditions: '25 °C ± 5 °C; > 30 min operation (p. 4); Note[1] p. 6: accuracy parameters acquired via calibration under 25 °C after 1-hour warm-up; annual accuracy, calibration status of this unit unknown'
+    ch1_current:
+      applies_to: programming
+      reading_fraction: 0.002
+      full_scale_fraction: 0.0
+      offset: 0.010
+      unit: A
+      source: 'R1 DP800 datasheet DSH03108-1110-202505, printed p. 5, "Annual Accuracy[1] (25 °C ± 5 °C), ±(Output Percentage + Offset)", DP821A CH1, Programming Current: 0.2% + 10mA'
+      conditions: '25 °C ± 5 °C; > 30 min operation (p. 4); Note[1] p. 6: accuracy parameters acquired via calibration under 25 °C after 1-hour warm-up; annual accuracy, calibration status of this unit unknown'
+load:
+  instrument_id: load
+  adapter: benchctl_rigol_dl3000
+  physical_model: null
+  reported_identity: null
+  firmware: null
+  modification: null
+  endpoint: null
+  # Ratings are sourced (R4 p. 3) but this unit's label has not been checked against the model
+  # (plan section 5), so the flag stays false until that bench step is recorded.
+  capabilities_confirmed: false
+  # R4 p. 3 states the minimum operating voltage only at full current: 1.3 V @ 60 A.
+  min_voltage_V: 1.3
+  max_voltage_V: 150.0
+  max_current_A: 60.0
+  max_power_W: 350.0
+  remote_sense_supported: true
+  remote_sense_required: false
+  mode: CC
+  min_current_A: 0.0
+  # R4 lists two CC programming ranges. Which one `:SOUR:CURR:RANG MIN` selects is not stated in
+  # R4, so both are recorded here and neither is bound to the Iout_A channel.
+  programming_accuracy:
+    cc_current_range_0_6A:
+      applies_to: programming
+      reading_fraction: 0.0005
+      full_scale_fraction: 0.0
+      offset: 0.003
+      unit: A
+      source: 'R4 DL3000 datasheet DSJ01109-1110 2025.11, printed p. 3, "CC Mode", DL3031A range 0~6 A, Programmable Accuracy[1]: 0.05%+0.003A (Note[1] p. 5: fixed value calculated from full scale, 0.05 % of 6 A)'
+      conditions: '25 °C ± 5 °C with 30-min warm-up (p. 3); Note[1] p. 5: measured after 30-second current sinking at the programmed value; temperature coefficient[2] 100 ppm/°C outside 20–30 °C; applies only when the 0–6 A range is selected, which R4 does not map to the RANG MIN command'
+    cc_current_range_0_60A:
+      applies_to: programming
+      reading_fraction: 0.0005
+      full_scale_fraction: 0.0
+      offset: 0.03
+      unit: A
+      source: 'R4 DL3000 datasheet DSJ01109-1110 2025.11, printed p. 3, "CC Mode", DL3031A range 0~60 A, Programmable Accuracy[1]: 0.05%+0.03A (Note[1] p. 5: fixed value calculated from full scale, 0.05 % of 60 A)'
+      conditions: '25 °C ± 5 °C with 30-min warm-up (p. 3); Note[1] p. 5: measured after 30-second current sinking at the programmed value; temperature coefficient[2] 100 ppm/°C outside 20–30 °C; applies only when the 0–60 A range is selected'
+measurements:
+  Vin_V:
+    instrument_id: source
+    quantity: Vin_V
+    unit: V
+    location: source_terminals
+    measurement_range: 60.0
+    resolution: 0.001
+    accuracy:
+      applies_to: readback
+      reading_fraction: 0.001
+      full_scale_fraction: 0.0
+      offset: 0.025
+      unit: V
+      source: 'R1 DP800 datasheet DSH03108-1110-202505, printed p. 5, "Annual Accuracy[1] (25 °C ± 5 °C), ±(Output Percentage + Offset)", DP821A CH1, Readback Voltage: 0.1% + 25mV'
+      conditions: '25 °C ± 5 °C; > 30 min operation (p. 4); Note[1] p. 6: accuracy parameters acquired via calibration under 25 °C after 1-hour warm-up; annual accuracy, calibration status of this unit unknown'
+      distribution: unspecified_bound
+    programming_accuracy:
+      applies_to: programming
+      reading_fraction: 0.001
+      full_scale_fraction: 0.0
+      offset: 0.025
+      unit: V
+      source: 'R1 DP800 datasheet DSH03108-1110-202505, printed p. 5, DP821A CH1, Programming Voltage: 0.1% + 25mV'
+      conditions: '25 °C ± 5 °C; > 30 min operation; Note[1] p. 6: 1-hour warm-up; annual accuracy'
+    readback_specification:
+      role: readback
+      status: datasheet_quoted
+      source: 'R1 DP800 datasheet DSH03108-1110-202505, printed p. 5, DP821A CH1 Readback Voltage 0.1% + 25mV, form ±(Output Percentage + Offset); resolution p. 5 (readback 1mV)'
+      unit: V
+      percent_of_reading: 0.1
+      percent_of_range: 0.0
+      range_value: 60.0
+      absolute_offset: 0.025
+      resolution: 0.001
+      temperature_coefficient: null
+      calibration:
+        status: unknown
+        note: 'No calibration certificate or date seen for the source; R1 heading "Annual Accuracy" implies a one-year interval'
+      applicable_conditions: '25 °C ± 5 °C; > 30 min operation (R1 p. 4); Note[1] p. 6: parameters acquired via calibration under 25 °C after 1-hour warm-up. R1 p. 5 temperature coefficient (0.01% + 3mV per °C) is not stated to apply to readback and is not entered.'
+      distribution: rectangular
+      distribution_justification: 'Manufacturer error limit with no stated distribution, treated as a rectangular bound of half-width a (brief 9.2, NIST TN 1297 Type B)'
+  Iin_A:
+    instrument_id: source
+    quantity: Iin_A
+    unit: A
+    location: source_output
+    measurement_range: 1.0
+    resolution: 0.0001
+    accuracy:
+      applies_to: readback
+      reading_fraction: 0.0015
+      full_scale_fraction: 0.0
+      offset: 0.010
+      unit: A
+      source: 'R1 DP800 datasheet DSH03108-1110-202505, printed p. 5, "Annual Accuracy[1] (25 °C ± 5 °C), ±(Output Percentage + Offset)", DP821A CH1, Readback Current: 0.15% + 10mA'
+      conditions: '25 °C ± 5 °C; > 30 min operation (p. 4); Note[1] p. 6: accuracy parameters acquired via calibration under 25 °C after 1-hour warm-up; annual accuracy, calibration status of this unit unknown'
+      distribution: unspecified_bound
+    programming_accuracy:
+      applies_to: programming
+      reading_fraction: 0.002
+      full_scale_fraction: 0.0
+      offset: 0.010
+      unit: A
+      source: 'R1 DP800 datasheet DSH03108-1110-202505, printed p. 5, DP821A CH1, Programming Current: 0.2% + 10mA'
+      conditions: '25 °C ± 5 °C; > 30 min operation; Note[1] p. 6: 1-hour warm-up; annual accuracy'
+    readback_specification:
+      role: readback
+      status: datasheet_quoted
+      source: 'R1 DP800 datasheet DSH03108-1110-202505, printed p. 5, DP821A CH1 Readback Current 0.15% + 10mA, form ±(Output Percentage + Offset); resolution p. 5 (readback 0.1mA)'
+      unit: A
+      percent_of_reading: 0.15
+      percent_of_range: 0.0
+      range_value: 1.0
+      absolute_offset: 0.010
+      resolution: 0.0001
+      temperature_coefficient: null
+      calibration:
+        status: unknown
+        note: 'No calibration certificate or date seen for the source; R1 heading "Annual Accuracy" implies a one-year interval'
+      applicable_conditions: '25 °C ± 5 °C; > 30 min operation (R1 p. 4); Note[1] p. 6: parameters acquired via calibration under 25 °C after 1-hour warm-up. R1 p. 5 temperature coefficient (0.02% + 3mA per °C) is not stated to apply to readback and is not entered.'
+      distribution: rectangular
+      distribution_justification: 'Manufacturer error limit with no stated distribution, treated as a rectangular bound of half-width a (brief 9.2, NIST TN 1297 Type B)'
+  Vout_V:
+    instrument_id: load
+    quantity: Vout_V
+    unit: V
+    location: load_input_terminals_local_sense
+    measurement_range: 150.0
+    resolution: 0.0001
+    accuracy:
+      applies_to: readback
+      reading_fraction: 0.0005
+      full_scale_fraction: 0.0002
+      offset: 0.0
+      full_scale: 150.0
+      unit: V
+      source: 'R4 DL3000 datasheet DSJ01109-1110 2025.11, printed p. 4, "Readback Voltage", DL3031A range 0~150 V, Accuracy ±(0.05%+0.02%FS), resolution 0.1 mV'
+      conditions: '25 °C ± 5 °C with 30-min warm-up (p. 3); temperature coefficient[2] 20 ppm/°C on gain and zero within 0–20 °C and 30–40 °C (Note[2] p. 5); single readback range, FS = 150 V; calibration status of this unit unknown'
+      distribution: unspecified_bound
+    programming_accuracy: null
+    readback_specification:
+      role: readback
+      status: datasheet_quoted
+      source: 'R4 DL3000 datasheet DSJ01109-1110 2025.11, printed p. 4, Readback Voltage, DL3031A 0~150 V, ±(0.05%+0.02%FS), resolution 0.1 mV, temperature coefficient 20 ppm/°C'
+      unit: V
+      percent_of_reading: 0.05
+      percent_of_range: 0.02
+      range_value: 150.0
+      absolute_offset: 0.0
+      resolution: 0.0001
+      temperature_coefficient:
+        percent_of_reading_per_C: 0.002
+        percent_of_range_per_C: 0.002
+        absolute_per_C: 0.0
+        reference_temperature_C: 25.0
+        reference_band_C: 5.0
+        source: 'R4 printed p. 4 Readback Voltage Temperature Coefficient[2] 20 ppm/°C; Note[2] p. 5: gain and zero coefficient within 0–20 °C and 30–40 °C'
+      calibration:
+        status: unknown
+        note: 'No calibration certificate or date seen for the load; R4 states no calibration interval'
+      applicable_conditions: '25 °C ± 5 °C with 30-min warm-up (R4 p. 3); local sense (S+/S- not wired), so the value is the load-terminal voltage'
+      distribution: rectangular
+      distribution_justification: 'Manufacturer error limit with no stated distribution, treated as a rectangular bound of half-width a (brief 9.2, NIST TN 1297 Type B)'
+  Iout_A:
+    instrument_id: load
+    quantity: Iout_A
+    unit: A
+    location: load_input
+    measurement_range: 60.0
+    resolution: 0.0001
+    accuracy:
+      applies_to: readback
+      reading_fraction: 0.0005
+      full_scale_fraction: 0.0005
+      offset: 0.0
+      full_scale: 60.0
+      unit: A
+      source: 'R4 DL3000 datasheet DSJ01109-1110 2025.11, printed p. 4, "Readback Current", DL3031A range 0~60 A, Accuracy ±(0.05%+0.05%FS), resolution 0.1 mA'
+      conditions: '25 °C ± 5 °C with 30-min warm-up (p. 3); temperature coefficient[2] 50 ppm/°C on gain and zero within 0–20 °C and 30–40 °C (Note[2] p. 5); R4 documents a single readback range with FS = 60 A and no low readback range, so the 0–6 A CC programming term is not applied here (brief 3.3); calibration status of this unit unknown'
+      distribution: unspecified_bound
+    # The CC programming range active under `:SOUR:CURR:RANG MIN` is not stated in R4; both range
+    # terms are recorded in load.programming_accuracy instead of being bound here.
+    programming_accuracy: null
+    readback_specification:
+      role: readback
+      status: datasheet_quoted
+      source: 'R4 DL3000 datasheet DSJ01109-1110 2025.11, printed p. 4, Readback Current, DL3031A 0~60 A, ±(0.05%+0.05%FS), resolution 0.1 mA, temperature coefficient 50 ppm/°C'
+      unit: A
+      percent_of_reading: 0.05
+      percent_of_range: 0.05
+      range_value: 60.0
+      absolute_offset: 0.0
+      resolution: 0.0001
+      temperature_coefficient:
+        percent_of_reading_per_C: 0.005
+        percent_of_range_per_C: 0.005
+        absolute_per_C: 0.0
+        reference_temperature_C: 25.0
+        reference_band_C: 5.0
+        source: 'R4 printed p. 4 Readback Current Temperature Coefficient[2] 50 ppm/°C; Note[2] p. 5: gain and zero coefficient within 0–20 °C and 30–40 °C'
+      calibration:
+        status: unknown
+        note: 'No calibration certificate or date seen for the load; R4 states no calibration interval'
+      applicable_conditions: '25 °C ± 5 °C with 30-min warm-up (R4 p. 3); single documented readback range, FS = 60 A (0.05 % FS = 30 mA); whether readback depends on the selected CC range is not stated in R4'
+      distribution: rectangular
+      distribution_justification: 'Manufacturer error limit with no stated distribution, treated as a rectangular bound of half-width a (brief 9.2, NIST TN 1297 Type B)'
+protective_controls:
+  policy_id: null
+  source_current_limit_A: null
+  dut_input_overvoltage_V: null
+  dut_output_overvoltage_V: null
+  output_overcurrent_A: null
+  maximum_temperature_C: null
+  approved: false
+uncertainty_policy:
+  coverage_factor: 2.0
+  linear_model_relative_uncertainty_bound: 0.1
+  include_repeatability_in_combined: true
+  policy_origin: draft default; adjust with a recorded justification
+readback_correlations: []
+measurement_boundary: source-to-load-terminal path (input and output wiring included; load in local sense)
+notes:
+- 'Provenance: all accuracy, resolution and rating terms transcribed 2026-09-29 from R1 (DP800 datasheet DSH03108-1110-202505, printed pp. 1, 4-6) and R4 (DL3000 datasheet DSJ01109-1110 2025.11, printed pp. 1, 3-6) by pdftotext extraction; see docs/instrument-specifications.md.'
+- 'Readback terms (measurements.*.accuracy, readback_specification) and programming terms (programming_accuracy) are kept separate; R1 lists them in separate columns (p. 5) and R4 in separate tables (pp. 3-4). No programming term was converted into a readback term.'
+- 'Calibration status of both instruments is unknown: no certificate, date or adjustment record has been seen. The readback budget therefore stays not_evaluated although every datasheet term is entered.'
+- 'capabilities_confirmed is false for both instruments: the ratings are sourced from the datasheets, but the label, rear panel and firmware of the physical units have not been checked against the model (plan section 5). Set true only after that bench step is recorded.'
+- 'DL3031A: R4 gives two CC programming ranges (0-6 A, 0-60 A) and does not state which one :SOUR:CURR:RANG MIN selects; both are recorded under load.programming_accuracy. Current readback has one documented range (0-60 A, FS 60 A); the 0-6 A programming term is not applied to readback (brief 3.3).'
+- 'DL3031A minimum operating voltage is stated only as 1.3 V @ 60 A (R4 p. 3); no lower-current figure is given.'
+- 'Protective controls are not approved and carry no policy; endpoint, serials, identity strings and firmware are deliberately absent. This profile documents instrument specifications and does not authorize any real run.'

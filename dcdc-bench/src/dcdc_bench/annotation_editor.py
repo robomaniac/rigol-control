@@ -19,6 +19,8 @@ from .attachments import (BYTE_LIMITS, IMAGE_TYPES, MEDIA_TYPES, AssetHashMismat
 from .ui_models import artifact_url, job_title, state_label
 
 ACTIVE = ("queued", "acquiring", "reporting")
+UPLOAD_LIMIT = max(BYTE_LIMITS.values())
+UPLOAD_CHUNK = 256 * 1024
 EDITOR_STYLE = '''
 .bench-editor-image{width:100%;max-width:900px;border:1px solid #dce5eb;border-radius:8px;overflow:hidden}
 .bench-editor-image img{max-width:100%;height:auto;display:block}
@@ -64,6 +66,38 @@ def asset_summary(asset: dict) -> str:
     origin = f'documentation revision {revision}' if revision is not None else 'the acquisition manifest'
     return (f"{asset.get('original_name', 'original')} · {asset['width']}×{asset['height']} px · "
             f"SHA-256 {asset['sha256'][:16]}… · listed in {origin}")
+
+
+async def read_upload(file, limit: int | None = None) -> bytes:
+    """Read an upload without ever holding more than ``limit`` bytes.
+
+    The browser-side ``max-file-size`` is advisory only. The reported size is
+    checked first when the upload object offers one; then the body is read in
+    chunks and the read aborts as soon as the limit is passed, so an oversized
+    body is refused before it is ever assembled in memory.
+    """
+    limit = UPLOAD_LIMIT if limit is None else int(limit)
+    size = getattr(file, 'size', None)
+    if callable(size):
+        try:
+            size = size()
+        except (OSError, ValueError, TypeError):
+            size = None
+    if isinstance(size, int) and not isinstance(size, bool) and size > limit:
+        raise AttachmentRejected('too_large', f'Upload of {size} bytes exceeds the {limit} byte attachment limit')
+    iterate = getattr(file, 'iterate', None)
+    if callable(iterate):
+        chunks, total = [], 0
+        async for chunk in iterate(chunk_size=UPLOAD_CHUNK):
+            total += len(chunk)
+            if total > limit:
+                raise AttachmentRejected('too_large', f'Upload exceeds the {limit} byte attachment limit')
+            chunks.append(chunk)
+        return b''.join(chunks)
+    data = await file.read()
+    if len(data) > limit:
+        raise AttachmentRejected('too_large', f'Upload of {len(data)} bytes exceeds the {limit} byte attachment limit')
+    return data
 
 
 def register_annotation_editor(ui, run, service, style: str) -> None:
@@ -283,7 +317,7 @@ def register_annotation_editor(ui, run, service, style: str) -> None:
                 ui.notify('Choose a finished run before uploading.', type='warning')
                 return
             try:
-                data = await e.file.read()
+                data = await read_upload(e.file)
                 entry = await run.io_bound(service.add_attachment, state['job_id'], e.file.name, data,
                                            caption=widgets['caption'].value or '')
                 if client.is_deleted or entry is None:

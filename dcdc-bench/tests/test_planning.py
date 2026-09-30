@@ -214,3 +214,37 @@ def test_missing_raw_values_require_quality_reason():
     with pytest.raises(ValidationError, match="quality reason"):
         RawSample(**values)
     assert RawSample(**values, quality_flags=["timeout"]).value is None
+
+
+def test_rigol_dp821a_dl3031a_profile_keeps_readback_and_programming_terms_apart():
+    """The R1/R4 transcription: every bound channel carries a sourced readback term; programming terms stay programming."""
+    bench = load_profile(PROFILES / "bench/rigol-dp821a-dl3031a.yaml", BenchProfile)
+    assert bench.mode == "real"
+    assert set(bench.measurements) == {"Vin_V", "Iin_A", "Vout_V", "Iout_A"}
+    for name, binding in bench.measurements.items():
+        assert binding.accuracy is not None, name
+        assert binding.accuracy.applies_to == "readback", name
+        assert binding.accuracy.source.strip() and binding.accuracy.conditions.strip(), name
+        assert binding.measurement_range and binding.resolution, name
+        assert binding.readback_specification.status == "datasheet_quoted", name
+        assert binding.readback_specification.calibration.status == "unknown", name
+        if binding.programming_accuracy is not None:
+            assert binding.programming_accuracy.applies_to == "programming", name
+    for instrument in (bench.source, bench.load):
+        assert instrument.programming_accuracy
+        assert all(spec.applies_to == "programming" and spec.source.strip() for spec in instrument.programming_accuracy.values())
+        assert instrument.endpoint is None and instrument.reported_identity is None and instrument.physical_model is None
+        assert not instrument.capabilities_confirmed
+    assert not bench.protective_controls.approved and bench.protective_controls.policy_id is None
+    # R1 printed p. 5: CH1 current readback (0.15 % + 10 mA) differs from programming (0.2 % + 10 mA).
+    assert bench.measurements["Iin_A"].accuracy.reading_fraction == pytest.approx(0.0015)
+    assert bench.measurements["Iin_A"].programming_accuracy.reading_fraction == pytest.approx(0.002)
+    # R4 printed p. 4: current readback uses the documented 60 A readback full scale, not a CC programming range.
+    assert bench.measurements["Iout_A"].accuracy.full_scale == 60.0
+    assert bench.measurements["Iout_A"].programming_accuracy is None
+    assert set(bench.load.programming_accuracy) == {"cc_current_range_0_6A", "cc_current_range_0_60A"}
+    # The schema rejects a programming term offered as readback, so the file cannot be mislabeled silently.
+    data = bench.model_dump()
+    data["measurements"]["Vin_V"]["accuracy"]["applies_to"] = "programming"
+    with pytest.raises(ValidationError, match="not a readback"):
+        BenchProfile.model_validate(data)

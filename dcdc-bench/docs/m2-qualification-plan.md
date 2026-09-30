@@ -435,6 +435,67 @@ Only after steps 1–5 does the metrology gate close; step 6 addresses item 2 of
 the bounded task and is not a prerequisite for M2 but is a prerequisite for any
 12 V condition in M3.
 
+### Status after step 3
+
+Software-only; no instrument was opened. Everything below is exercised through
+the fake-SCPI fixtures (`tests/test_real_backend.py`) and the mock bench.
+
+- **C — per-point budget record.** `uncertainty.py::evaluate_point` now
+  attaches to every point a `terms` table (one line per readback channel:
+  `value` = systematic standard uncertainty of the readback term, `half_width`,
+  `distribution`, `source`, `specification_status`,
+  `status ∈ {evaluated, unquantified}`, `programming_accuracy_consulted: false`),
+  plus `required_terms`, `required_quantities`, `missing_terms` and a two-valued
+  `budget_status`. Efficiency (percentage points) and loss (watts, its own
+  propagation) are evaluated only when all four terms are; otherwise
+  `budget_status = unquantified` names the missing terms and no
+  `*_uncertainty_label` is emitted for them. Terms are read from
+  `MeasurementBinding.readback_specification` (the structured successor of the
+  `accuracy` marker); `programming_accuracy` is never read. An enabled-no-load
+  point requires only Vin/Iin and Pin. Tests: `test_uncertainty.py::test_gap_c_*`
+  (hand-computed fixture 75.00 % ± 0.46 percentage points, loss ± 0.0115 W,
+  k = 2; a missing or calibration-overdue term → `unquantified`; N = 5 versus
+  5000 averaged cycles leave the systematic terms unchanged). The first DUT's
+  terms are still `unknown`, so every real analysis stays `unquantified` until
+  step 1 enters them.
+- **E — enabled-no-load stage and analysis path.**
+  `real_backend.py::prepare_real_plan` classifies a 0 A request as an enabled
+  no-load observation, executable only as the first request of its
+  input-voltage phase (a 0 A request after a loaded point is `unsupported`).
+  `ConfiguredProcedure.startup()` / `startup_gate()` / `enable_load()` run the
+  source-only gate before any load command; a no-load point then settles and
+  acquires with `loaded=False` cycles (the load input is verified OFF in every
+  cycle by `load_status`), with the recipe's Vout span bound and an Iin span
+  ≤ `NO_LOAD_IIN_SPAN_A` = 2 mA (software default; owner to confirm), and
+  records `observation`, `load_input_state = OFF`, `load_readback_offset_A`,
+  `iin_span_A` and `startup_gate`. `analysis.py` reports
+  `enabled_no_load_consumption_W` = V̄in·Īin with the load input OFF,
+  efficiency `None` (not applicable), Pout/loss `None` with the path-boundary
+  reason, the load readback preserved as an offset, a metric
+  `enabled-no-load-input-consumption-<point>` and a summary line; it rejects a
+  worker claim of a valid no-load point whose samples say `load_enabled: true`.
+  The mock runner records `load_enabled` per sample. Dwell and window come from
+  the recipe's settling/acquisition policies (validated 5–15 s); no separate
+  no-load dwell constant was added. Tests: no-load first request acquired with
+  the single load-enable command issued only afterwards; a no-load-only plan
+  never enables the load; unstable Iin → `inconclusive` with the load still OFF;
+  a startup-gate failure aborts after five source-only cycles with no
+  `:SOUR:INP:STAT ON`; mock no-load points carry an evaluated Pin budget.
+- **Startup gate confirmed** for the configured backend (the path real runs
+  use): five source-only `starting` cycles about 1 s apart;
+  `guard(startup=True, loaded=False)` counts them and aborts at the fifth if
+  Vout < 0.9·Vnom (10.8 V for the 12 V nominal), before `load.input_on()`;
+  outside startup, Vout < 0.9·Vnom aborts at once. The five *loaded* startup
+  cycles apply only the hard guards (no lower-Vout check): a bounded ~5 s
+  window, left unchanged. `voltage_sweep.py` carries the same 5-cycle / 10.8 V
+  gate; `startup_descent.py` requires five consecutive in-band cycles spanning
+  ≥ 4 s within 30 s; the fixed `extended.py::_guard` and the `bringup.py` pilot
+  enable the load after 5 s with only the upper guards (no Vout-in-band gate).
+- Not changed here: `docs/configured-runs.md` still states that no-load is not
+  implemented; the UI/job-service approval logic; no plan or recipe schema field
+  was added (that would change every stored `plan_hash`), so the classification
+  lives in `point.reason` and in the run's point records.
+
 ## 9. What this plan does not establish
 
 - Any specification value, calibration state, refresh rate or rating of either

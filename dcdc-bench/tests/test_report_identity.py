@@ -154,3 +154,24 @@ def test_matching_prior_formula_revision_remains_selectable(stored_run, rendered
     custom_analysis = analyze_run(run_dir, version="reviewed-formula-revision")
     report_run(run_dir, analysis_dir=custom_analysis, formats=("html",))
     assert rendered[0]["provenance"]["formula_version"] == "reviewed-formula-revision"
+
+
+def test_report_profile_paper_reaches_the_renderer_and_other_sizes_are_refused(stored_run, monkeypatch):
+    """Letter unless the profile says A4; the model carries the run span for the 'Recorded' line."""
+    import dcdc_bench.reporting
+    from pydantic import ValidationError
+    from dcdc_bench.domain import ReportProfile
+    calls = []
+    monkeypatch.setattr(dcdc_bench.reporting, "render_report",
+                        lambda model, output, **kwargs: calls.append((model, kwargs)))
+    run_dir, analysis_dir = stored_run("paper")
+    report_run(run_dir, analysis_dir=analysis_dir, formats=("pdf",))
+    report_run(run_dir, analysis_dir=analysis_dir, formats=("pdf",), profile=ReportProfile(paper="a4"))
+    assert [kwargs["paper"] for _, kwargs in calls] == ["letter", "a4"]
+    assert json.loads((run_dir / "reports/r0001/report_profile.json").read_text())["paper"] == "letter"
+    assert json.loads((run_dir / "reports/r0002/report_profile.json").read_text())["paper"] == "a4"
+    # This stored run records no timestamps: the model says so instead of inventing them.
+    assert {"created_utc", "finished_utc"} <= set(calls[0][0]["execution"])
+    assert calls[0][0]["execution"]["created_utc"] is None
+    with pytest.raises(ValidationError):
+        ReportProfile(paper="legal")

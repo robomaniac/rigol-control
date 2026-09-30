@@ -333,6 +333,9 @@ def _run_fixed_unlocked(config_path: Path, out: Path, *, arm: bool = False, proc
                         acquisition_cycle_id=cycle_id, phase=phase, acquisition_settings={
                             **({"procedure_stage": procedure.stage} if procedure is not None else {}),
                             "source_mode": mode, "load_compliance": True, "load_enabled": loaded,
+                            # load_enabled is the requested flag; load_input_readback is the load's
+                            # own :SOUR:INP:STAT? answer from this cycle's verify_running (no extra query).
+                            "load_input_readback": getattr(pilot, "load_input_readback", None),
                             "load_condition_register": condition, "load_sense": "local", "requested_load_A": point["iout_target_A"],
                             "adc_freshness": "not independently verified", "raw_SCPI_response_file": "scpi.jsonl"}))
             finally:

@@ -18,6 +18,10 @@ table{font-size:.82rem;width:100%}th{color:#29495d;background:var(--wash);font-w
 .report-table{width:100%;max-width:100%;margin:0 0 1rem;overflow-x:auto}
 .report-table table{width:100%;table-layout:fixed;margin:0}
 .report-table th,.report-table td{text-align:left;overflow-wrap:anywhere;line-height:1.5}
+/* Page-1 "About this report": plain labels first, identifiers last in small type (as in the PDF theme). */
+.table-about table{min-width:0}.table-about th{color:#13375e;background:#dce8f5}.table-about th:empty::after{content:"\00a0"}
+.table-about tr:last-child td{font-size:.8em;color:var(--muted)}
+.header-section-number{color:var(--blue);margin-right:.45rem}
 .table-key-value table{min-width:0}
 .table-key-value th,.table-key-value td{padding:.55rem .65rem}
 .table-equipment table{min-width:660px;font-size:.79rem}
@@ -26,6 +30,7 @@ table{font-size:.82rem;width:100%}th{color:#29495d;background:var(--wash);font-w
 .table-voltage-comparison table{min-width:720px}
 .table-voltage-outcomes table{min-width:580px}
 .table-startup-readings table{min-width:470px}
+.table-exclusions table{min-width:520px}
 @media(max-width:650px){.table-key-value th,.table-key-value td{padding:.45rem .4rem}.report-table{scrollbar-width:thin}}
 @media print{.report-table{overflow:visible}.report-table table{min-width:0}.report-table tr{break-inside:avoid}}
 

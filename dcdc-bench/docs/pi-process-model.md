@@ -150,7 +150,7 @@ All lines are JSON with `utc`, `monotonic_s`, `pid`, `task`, `phase`,
 Run on the Pi, before starting a task and again after it reports finished.
 
 ```sh
-cd /home/jerome/rigol-control
+cd ~/rigol-control
 # 1. Baseline
 free -m
 .venv/bin/python -m dcdc_bench.resources

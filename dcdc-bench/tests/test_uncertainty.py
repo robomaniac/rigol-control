@@ -369,3 +369,166 @@ def test_mock_profile_yields_evaluated_budget_labeled_synthetic(mock_run):
     assert model.uncertainty["status"] == budget["status"] and set(model.uncertainty["evaluated_point_ids"]) >= {p["point_id"] for p in loaded}
     assert any("synthetic example" in line and "not validated 95 %" in line for line in model.limitations)
     assert not any("Uncertainty is unquantified" in line for line in model.limitations)
+
+
+# ---------------------------------------------------------------------------
+# Plan Gap C: per-point budget record with an ``unquantified`` fall-through.
+# ---------------------------------------------------------------------------
+
+def full_terms_bench() -> BenchProfile:
+    """Every readback term declared. Fixture numbers only; not the first DUT's bench."""
+    bench = default_plan().bench.model_copy(deep=True)
+    bench.measurements["Vin_V"].readback_specification = fixture_spec(percent_of_reading=.05, absolute_offset=.005)
+    bench.measurements["Iin_A"].readback_specification = fixture_spec(percent_of_reading=.05, absolute_offset=.0001)
+    bench.measurements["Vout_V"].readback_specification = fixture_spec(percent_of_reading=.05, absolute_offset=.005)
+    bench.measurements["Iout_A"].readback_specification = fixture_spec(percent_of_reading=.10, absolute_offset=.0006)
+    return bench
+
+
+def full_terms_point(point_id="p-gapc", **overrides):
+    values = dict(Vin_V=24., Iin_A=.1, Vout_V=12., Iout_A=.15)
+    values.update(overrides)
+    return {"point_id": point_id, "qualification": "valid", **values, **dc_metrics(values, 12.)}
+
+
+def test_gap_c_full_readback_terms_yield_an_evaluated_point_budget_with_hand_computed_numbers():
+    result = evaluate_point(full_terms_point(), reviews(full_terms_bench()), policy=UncertaintyPolicy(), correlations={})
+    # Hand computation: rectangular half-width a = |x| p/100 + c, u = a / sqrt(3), independent channels.
+    x = {"Vin_V": 24., "Iin_A": .1, "Vout_V": 12., "Iout_A": .15}
+    a = {"Vin_V": 24 * .0005 + .005, "Iin_A": .1 * .0005 + .0001, "Vout_V": 12 * .0005 + .005, "Iout_A": .15 * .001 + .0006}
+    u = {q: a[q] / math.sqrt(3) for q in a}
+    eta = 100 * 12 * .15 / (24 * .1)                                             # 75 %
+    u_eta = eta * math.sqrt(sum((u[q] / x[q]) ** 2 for q in CHANNELS))          # percentage points
+    u_loss = math.hypot(.1 * u["Vin_V"], 24 * u["Iin_A"], .15 * u["Vout_V"], 12 * u["Iout_A"])  # watts
+    assert result["budget_status"] == "evaluated" and result["missing_terms"] == [] and result["observation"] == "loaded"
+    assert result["required_terms"] == list(CHANNELS) and result["required_quantities"] == list(DERIVED)
+    terms = result["terms"]
+    for q in CHANNELS:
+        assert terms[q]["status"] == "evaluated" and terms[q]["distribution"] == "rectangular"
+        assert terms[q]["source"] == "UNC calculation fixture" and terms[q]["binding_field"] == "readback_specification"
+        assert terms[q]["programming_accuracy_consulted"] is False
+        assert terms[q]["half_width"] == pytest.approx(a[q]) and terms[q]["value"] == pytest.approx(u[q])
+        assert terms[q]["combined_standard"] == pytest.approx(u[q])              # no samples: no Type A term
+    efficiency, loss = result["quantities"]["efficiency_pct"], result["quantities"]["loss_W"]
+    assert efficiency["value"] == pytest.approx(75.) and efficiency["unit"] == "percentage points" and efficiency["k"] == 2
+    assert efficiency["standard"] == pytest.approx(u_eta) and efficiency["expanded"] == pytest.approx(2 * u_eta)
+    assert efficiency["expanded"] == pytest.approx(.463077, abs=1e-6)
+    assert efficiency["label"] == "75.00% ± 0.46 percentage points" and "95" not in efficiency["label"]
+    assert loss["unit"] == "W" and loss["standard"] == pytest.approx(u_loss) and loss["expanded"] == pytest.approx(2 * u_loss)
+    assert loss["expanded"] == pytest.approx(.011522, abs=1e-6)
+    assert loss["expanded"] != pytest.approx(efficiency["expanded"] / 100 * 2.4)  # own propagation, not rescaled
+
+
+def test_gap_c_missing_term_makes_the_point_budget_unquantified_and_names_the_term():
+    bench = full_terms_bench()
+    bench.measurements["Iin_A"].readback_specification = unknown_readback_specification("Iin_A")
+    result = evaluate_point(full_terms_point(), reviews(bench), policy=UncertaintyPolicy(), correlations={})
+    assert result["budget_status"] == "unquantified"
+    term = result["terms"]["Iin_A"]
+    assert term["status"] == "unquantified" and term["value"] is None and term["source"] == "unknown"
+    assert term["distribution"] == "rectangular" and term["programming_accuracy_consulted"] is False
+    assert result["missing_terms"] and all(m.startswith("Iin_A:") for m in result["missing_terms"])
+    assert any("specification status unknown" in m for m in result["missing_terms"])
+    assert {q for q in CHANNELS if result["terms"][q]["status"] == "evaluated"} == {"Vin_V", "Vout_V", "Iout_A"}
+    for name in ("efficiency_pct", "loss_W", "Pin_W"):
+        assert result["quantities"][name]["status"] == "not_evaluated" and "label" not in result["quantities"][name]
+    # Report model: no ± text or band for efficiency, loss or input power on any point.
+    model, budget = report_model(default_plan(), bench)
+    assert all(r["budget_status"] == "unquantified" for r in budget["points"].values())
+    assert budget["summary"]["budget_status"] == {"evaluated": 0, "unquantified": len(budget["points"])}
+    assert not any(key in ("efficiency_pct_uncertainty_label", "loss_W_uncertainty_label", "Pin_W_uncertainty_label")
+                   for point in model.points for key in point)
+    for figure in model.figures:
+        if figure.y_key in ("efficiency_pct", "loss_W"):
+            assert figure.lower_key is None and figure.upper_key is None
+    # Also unquantified: a term present but blocked by an overdue calibration record.
+    bench = full_terms_bench()
+    overdue = fixture_spec(percent_of_reading=.05, absolute_offset=.0001)
+    overdue.calibration = CalibrationRecord(status="overdue")
+    bench.measurements["Iin_A"].readback_specification = overdue
+    blocked = evaluate_point(full_terms_point(), reviews(bench), policy=UncertaintyPolicy(), correlations={})
+    assert blocked["budget_status"] == "unquantified"
+    assert blocked["missing_terms"] == ["Iin_A: calibration interval exceeded; specification terms are not applicable"]
+    # The complete fixture evaluates every point of the same plan, including its no-load requests.
+    complete, complete_budget = report_model(default_plan(), full_terms_bench())
+    assert complete_budget["summary"]["budget_status"]["unquantified"] == 0
+    assert all(p["efficiency_pct_uncertainty_label"].endswith("(k = 2)") for p in complete.points if p["iout_target_A"] > 0)
+
+
+def test_gap_c_point_budget_systematic_terms_do_not_shrink_with_averaged_cycles():
+    channel_reviews = reviews(full_terms_bench())
+    point = full_terms_point()
+    few = evaluate_point(point, channel_reviews, policy=UncertaintyPolicy(), correlations={},
+                         samples={q: [point[q]] * 5 for q in CHANNELS})
+    many = evaluate_point(point, channel_reviews, policy=UncertaintyPolicy(), correlations={},
+                          samples={q: [point[q]] * 5000 for q in CHANNELS})
+    for q in CHANNELS:
+        assert few["terms"][q]["value"] == many["terms"][q]["value"] == few["channels"][q]["systematic_standard"]
+        assert few["channels"][q]["repeatability"]["n"] == 5 and many["channels"][q]["repeatability"]["n"] == 5000
+    assert few["quantities"]["efficiency_pct"]["expanded"] == many["quantities"]["efficiency_pct"]["expanded"]
+    assert few["quantities"]["loss_W"]["expanded"] == many["quantities"]["loss_W"]["expanded"]
+    # Noisy readings add only the separately recorded Type A term; the readback term itself is unchanged.
+    noisy = evaluate_point(point, channel_reviews, policy=UncertaintyPolicy(), correlations={},
+                           samples={"Iin_A": [.099, .101] * 50})
+    assert noisy["terms"]["Iin_A"]["value"] == few["terms"]["Iin_A"]["value"]
+    assert noisy["terms"]["Iin_A"]["combined_standard"] > noisy["terms"]["Iin_A"]["value"]
+    assert noisy["terms"]["Iin_A"]["repeatability_standard"] == pytest.approx(
+        noisy["channels"]["Iin_A"]["repeatability"]["standard_error_of_mean"])
+    assert noisy["channels"]["Iin_A"]["repeatability"]["n"] == 100
+
+
+def test_gap_c_no_load_point_budget_requires_only_the_input_terms():
+    bench = full_terms_bench()
+    bench.measurements["Iout_A"].readback_specification = unknown_readback_specification("Iout_A")
+    point = full_terms_point(Iout_A=.001)          # load-off readback offset, not output current
+    point.update(iout_target_A=0., observation="enabled_no_load")
+    point.update(dc_metrics(point, 12., no_load=True))
+    result = evaluate_point(point, reviews(bench), policy=UncertaintyPolicy(), correlations={})
+    assert result["observation"] == "enabled_no_load" and result["required_terms"] == ["Vin_V", "Iin_A"]
+    assert result["required_quantities"] == ["Pin_W"] and result["budget_status"] == "evaluated"
+    assert result["missing_terms"] == [] and result["terms"]["Iout_A"]["status"] == "unquantified"  # listed, not required
+    pin = result["quantities"]["Pin_W"]
+    assert pin["status"] == "evaluated" and pin["unit"] == "W" and pin["label"].endswith(" W")
+    for name in ("efficiency_pct", "Pout_W", "loss_W"):
+        assert result["quantities"][name]["status"] == "not_evaluated"
+    assert any("no external load" in reason for reason in result["quantities"]["efficiency_pct"]["reasons"])
+    bench.measurements["Iin_A"].readback_specification = unknown_readback_specification("Iin_A")
+    blocked = evaluate_point(point, reviews(bench), policy=UncertaintyPolicy(), correlations={})
+    assert blocked["budget_status"] == "unquantified" and all(m.startswith("Iin_A:") for m in blocked["missing_terms"])
+    assert blocked["quantities"]["Pin_W"]["status"] == "not_evaluated"
+    # A point that is not valid carries an unquantified record naming the qualification, never numbers.
+    unqualified = evaluate_point({**full_terms_point(), "qualification": "inconclusive"}, reviews(full_terms_bench()),
+                                 policy=UncertaintyPolicy(), correlations={})
+    assert unqualified["budget_status"] == "unquantified"
+    assert all("point qualification is inconclusive" in m for m in unqualified["missing_terms"])
+    assert all(term["value"] is None for term in unqualified["terms"].values())
+
+
+def test_mock_no_load_points_report_input_consumption_with_the_load_input_off(mock_run):
+    directory = analyze_run(mock_run)
+    budget = json.loads((directory / "uncertainty.json").read_text())
+    analysis = json.loads((directory / "analysis.json").read_text())
+    no_load = [p for p in analysis["points"] if p["qualification"] == "valid" and p["iout_target_A"] == 0]
+    assert no_load, "the quick recipe requests a 0 A point at each input voltage"
+    for point in no_load:
+        assert point["observation"] == "enabled_no_load" and point["load_input_state"] == "OFF"
+        assert point["efficiency_pct"] is None and point["Pout_W"] is None and point["loss_W"] is None
+        assert point["enabled_no_load_consumption_W"] == point["Pin_W"] == point["Vin_V"] * point["Iin_A"]
+        assert point["load_readback_offset_A"] == point["Iout_A"]
+        result = budget["points"][point["point_id"]]
+        assert result["observation"] == "enabled_no_load" and result["required_terms"] == ["Vin_V", "Iin_A"]
+        assert result["budget_status"] == "evaluated" and result["missing_terms"] == []
+        assert result["quantities"]["Pin_W"]["status"] == "evaluated"
+    loaded = [p for p in analysis["points"] if p["qualification"] == "valid" and p["iout_target_A"] > 0]
+    assert all(p["observation"] == "loaded" and p["load_input_state"] == "ON"
+               and p["enabled_no_load_consumption_W"] is None for p in loaded)
+    run = json.loads((mock_run / "run.json").read_text())
+    samples = [json.loads(line) for line in (mock_run / "raw/samples.jsonl").read_text().splitlines() if line]
+    from dcdc_bench.domain import Plan
+    model = build_report_model(Plan.model_validate_json((mock_run / "plan.json").read_text()), run, analysis, samples)
+    for point in no_load:
+        metric = next(m for m in model.metrics if m.id == f"enabled-no-load-input-consumption-{point['point_id']}")
+        assert metric.unit == "W" and metric.value == point["Pin_W"] and "load input OFF" in metric.conditions
+        assert metric.uncertainty["expanded"] is not None and metric.uncertainty["unit"] == "W"
+    assert sum(line.startswith("Enabled no-load path input consumption:") for line in model.summary) == len(no_load)
+    assert any("At qualified no-load points, input consumption is reported" in line for line in model.limitations)

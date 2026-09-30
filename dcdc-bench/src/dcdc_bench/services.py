@@ -143,7 +143,7 @@ def report_run(run_dir: Path, *, formats: tuple[str, ...] | None = None,
     # The renderer copies this verdict into build_manifest.json.
     atomic_json(directory / "memory_gate.json", {"ok": gate_ok, "reason": gate_reason,
                                                  "thresholds": gate.thresholds(), "snapshot": gate_snapshot})
-    render_report(model.model_dump(), directory, formats=formats)
+    render_report(model.model_dump(), directory, formats=formats, paper=profile.paper)
     return directory
 
 

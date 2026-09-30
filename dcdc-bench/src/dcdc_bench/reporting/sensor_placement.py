@@ -19,7 +19,8 @@ from typing import Callable
 from ..annotations import load_annotations
 from ..attachments import AssetStore
 
-FOOTER_MARKER = "**Run:** "
+# The appendix traceability line of renderer._body(); the section is inserted before it.
+FOOTER_MARKER = "**Traceability:** "
 SVG_NAME = "sensor-placement.svg"
 
 
