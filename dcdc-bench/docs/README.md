@@ -95,3 +95,14 @@ are collected in [measured-results.md](measured-results.md) (its
 | --- | --- |
 | [merge-code-review.md](merge-code-review.md) | Independent read-only code review (2026-09-28) of the nine parallel increments merged at `0ec41fd`, diff base `6630e8c`: 72 files, 15 new modules; findings ranked by severity against the brief's rules, each citing `file:line`; no blocker, seven majors; no tests, demo, render, UI or instrument run. |
 | [merge-security-review.md](merge-security-review.md) | Independent defensive review of the attachments, annotation editor, publication, doctor, PDF-check and dispatcher surfaces merged at `0ec41fd`: threat model for owner-operated loopback bench software, then findings confirmed with small standalone Python probes against the real validators and route table (no pytest, renders, UI server or instruments). |
+
+## Simulation review round (2026-09-30)
+
+| Document | What it is |
+| --- | --- |
+| [simulation-review/README.md](simulation-review/README.md) | Consolidated findings of the five reviewer roles and the fix assignments. |
+| [simulation-review/ui-ux.md](simulation-review/ui-ux.md) | UI/UX designer's heuristic review of the bench page with screenshots. |
+| [simulation-review/electrical-engineer.md](simulation-review/electrical-engineer.md) | Power-electronics engineer's review of the simulated plant, metrics and standards verdicts. |
+| [simulation-review/new-user.md](simulation-review/new-user.md) | First-time user's walkthrough with a confusion log and glossary. |
+| [simulation-review/manager.md](simulation-review/manager.md) | Engineering manager's verified-vs-claimed table, risk register and two-week plan. |
+| [simulation-review/qa.md](simulation-review/qa.md) | QA engineer's observable-state table, robustness findings and proposed tests. |
