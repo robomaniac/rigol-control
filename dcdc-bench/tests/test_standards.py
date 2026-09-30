@@ -10,9 +10,10 @@ from pathlib import Path
 
 import pytest
 
+from dcdc_bench import standard_recipes as R
 from dcdc_bench import standards as S
 from dcdc_bench.domain import BenchProfile, DutProfile
-from dcdc_bench.planning import load_profile
+from dcdc_bench.planning import REAL_HARDWARE_NOT_APPROVED, load_profile
 
 ROOT = Path(__file__).resolve().parents[1]
 # The seeded profile is gitignored; DCDC_SEEDED_BENCH_PROFILE points a checkout without it at a read-only copy.
@@ -186,9 +187,9 @@ def test_envelope_reads_numeric_bounds(real_bench, mock_bench):
 
 @pytest.mark.parametrize("number,system,status", [
     ("4.2", "12V", "runs_here"), ("4.2", "24V", "runs_here"),
-    ("4.5", "12V", "runs_here"), ("4.5", "24V", "runs_here"),
-    ("4.6.2", "12V", "runs_here"), ("4.6.2", "24V", "runs_here"),
-    ("4.3.1.1", "12V", "runs_here"), ("4.3.1.1", "24V", "outside_dut_rating"),
+    ("4.5", "12V", "mock_only"), ("4.5", "24V", "mock_only"),
+    ("4.6.2", "12V", "mock_only"), ("4.6.2", "24V", "mock_only"),
+    ("4.3.1.1", "12V", "needs_split"), ("4.3.1.1", "24V", "outside_dut_rating"),
     ("4.3.1.2", "12V", "needs_instrument"), ("4.3.1.2", "24V", "not_applicable"),
     ("4.3.2", "12V", "needs_instrument"), ("4.3.2", "24V", "needs_instrument"),
     ("4.4", "12V", "needs_instrument"), ("4.4", "24V", "needs_instrument"),
@@ -220,19 +221,25 @@ def test_missing_tokens_and_reasons_name_the_gap(real_bench, dut):
     assert reverse.missing == [S.NEGATIVE_VOLTAGE], "policy wins even though the instrument is also missing"
 
 
-def test_runs_here_verdicts_carry_their_conditions(real_bench, dut):
-    reset_12 = S.feasibility(iso("4.6.2"), real_bench, dut, "12V")
-    assert reset_12.coverage == "full"
+def test_runnable_verdicts_carry_their_conditions(real_bench, mock_bench, dut):
+    reset_12 = S.feasibility(iso("4.6.2"), mock_bench, dut, "12V")
+    assert reset_12.status == "runs_after_approval" and reset_12.coverage == "full" and reset_12.needs_approval
     assert any("UVLO" in c and "§7.5" in c for c in reset_12.conditions)
+    assert S.APPROVAL_HOW in reset_12.conditions
     assert any("1 A source" in c for c in reset_12.conditions)
+    reset_12_real = S.feasibility(iso("4.6.2"), real_bench, dut, "12V")
+    assert reset_12_real.status == "mock_only" and reset_12_real.coverage == "none"
+    assert any("UVLO" in c and "§7.5" in c for c in reset_12_real.conditions), "the conditions travel with the verdict"
     dc_12 = S.feasibility(iso("4.2"), real_bench, dut, "12V")
-    assert dc_12.coverage == "room_temperature_only"
+    assert dc_12.status == "runs_here" and dc_12.coverage == "room_temperature_only" and not dc_12.needs_approval
     assert not any("UVLO" in c for c in dc_12.conditions), "code C's 9 V minimum is not below the DUT minimum"
     assert any("9.1 V" in c for c in dc_12.conditions)
     dc_24 = S.feasibility(iso("4.2"), real_bench, dut, "24V")
     assert any("26 V" in c for c in dc_24.conditions), "32 V exceeds the approved input overvoltage guard"
+    assert not any("26 V" in c for c in S.feasibility(iso("4.2"), mock_bench, dut, "24V").conditions), \
+        "the mock profile declares no approved guard, so the condition exists on the real profile only"
     slow_24 = S.feasibility(iso("4.5"), real_bench, dut, "24V")
-    assert any("UVLO" in c for c in slow_24.conditions)
+    assert slow_24.status == "mock_only" and any("UVLO" in c for c in slow_24.conditions)
     micro = S.feasibility(iso("4.6.1.2"), real_bench, dut, "12V")
     assert micro.status == "needs_instrument" and micro.coverage == "partial"
 
@@ -337,7 +344,7 @@ def test_recipe_parameters_are_none_for_everything_else(real_bench, dut):
         assert S.recipe_parameters(item, "12V", dut) is None
     for category in S.catalog(real_bench, dut, "12V"):
         for entry in category.entries:
-            if entry.feasibility.status == "runs_here" and entry.clause.standard_id == S.ISO16750_2_ID:
+            if entry.clause.standard_id == S.ISO16750_2_ID and entry.feasibility.status in (*S.RUNNABLE_STATUSES, "mock_only", "needs_split"):
                 assert entry.recipe is not None, entry.clause.number
 
 
@@ -369,21 +376,159 @@ def test_generic_tests_map_to_existing_procedures(real_bench, dut):
     assert "efficiency" in by_title["Efficiency versus output load"].clause.procedure
     assert "load_regulation" in by_title["Load and line regulation"].clause.procedure
     dropout = by_title["Dropout and minimum-input behaviour"]
-    assert dropout.clause.procedure_status == "mock_only"
+    assert dropout.clause.procedure_status == "real_fixed", "the fixed startup/descent worker runs on the real bench"
+    assert "uvlo.py" in dropout.clause.mock_only_part
     assert "startup_descent.py" in dropout.clause.procedure and "uvlo.py" in dropout.clause.procedure
     assert any("synthetic plant only" in c for c in dropout.feasibility.conditions)
-    assert {e.clause.procedure_status for e in generic} == {"real_fixed", "mock_only"}
+    assert {e.clause.procedure_status for e in generic} == {"real_fixed"}
+    assert all(e.clause.mock_only_part is None for e in generic if e.clause.number != "1.4")
 
 
-def test_mock_bench_yields_the_same_statuses_as_the_real_bench(real_bench, mock_bench, dut):
-    """Tokens describe the class of instrument a profile declares, not whether it is simulated.
-
-    The mock emulates the same single-quadrant, LAN-polled DC supply; its wider
-    60 V envelope changes nothing for a 36 V DUT because the DUT rating is
-    checked first.
-    """
+def test_mock_and_real_verdicts_differ_only_where_procedure_deadline_or_guard_differ(real_bench, mock_bench, dut):
+    """Both profiles earn the same tokens (the same instrument class; the mock's wider 60 V envelope changes nothing for
+    a 36 V DUT because the rating is checked first), so every status difference is one of two things: the procedure
+    exists on the synthetic plant only (4.5, 4.6.2) or the real path's run deadline applies (4.3.1.1 at 12 V). The
+    approved 26 V guard of the real profile adds a condition to 4.2 at 24 V, not a status."""
+    assert S.capabilities(mock_bench) == S.capabilities(real_bench)
     for system in S.SYSTEMS:
-        assert statuses(mock_bench, dut, system) == statuses(real_bench, dut, system)
+        mock = {(sid, n): s for sid, n, s in statuses(mock_bench, dut, system)}
+        real = {(sid, n): s for sid, n, s in statuses(real_bench, dut, system)}
+        assert set(mock) == set(real)
+        differing = {key: (mock[key], real[key]) for key in mock if mock[key] != real[key]}
+        expected = {(S.ISO16750_2_ID, "4.5"): ("runs_after_approval", "mock_only"),
+                    (S.ISO16750_2_ID, "4.6.2"): ("runs_after_approval", "mock_only")}
+        if system == "12V":
+            expected[(S.ISO16750_2_ID, "4.3.1.1")] = ("runs_here", "needs_split")
+        assert differing == expected, differing
+
+
+# --- mock-only procedures, approval and the real path's deadline -----------------------
+
+def test_mock_only_procedures_are_mock_only_on_a_real_bench_and_after_approval_on_the_mock(real_bench, mock_bench, dut):
+    assert REAL_HARDWARE_NOT_APPROVED.startswith("is " + S.REAL_HARDWARE_REFUSAL), "the catalog repeats planning's refusal words"
+    for number, test_type in (("4.5", "slow_supply_ramp"), ("4.6.2", "reset_staircase")):
+        assert iso(number).procedure_status == "mock_only" and S.RECIPE_TEST_TYPES[iso(number).recipe_kind] == test_type
+        for system in S.SYSTEMS:
+            real = S.feasibility(iso(number), real_bench, dut, system)
+            assert real.status == "mock_only" and real.coverage == "none", (number, system, real.reason)
+            assert test_type in real.reason and "synthetic plant only" in real.reason and S.REAL_HARDWARE_REFUSAL in real.reason
+            assert real.needs_approval and S.APPROVAL_HOW in real.conditions
+            assert not any(c.startswith("Synthetic plant only") for c in real.conditions), "the verdict itself says so"
+            mock = S.feasibility(iso(number), mock_bench, dut, system)
+            assert mock.status == "runs_after_approval" and mock.coverage == "full", (number, system, mock.reason)
+            assert "approved" in mock.reason and "§7.5" in mock.reason and mock.needs_approval
+            assert S.APPROVAL_HOW in mock.conditions
+            assert any(c.startswith("Synthetic plant only") and test_type in c and S.REAL_HARDWARE_REFUSAL in c for c in mock.conditions)
+    assert "authorization.uvlo_approved" in S.APPROVAL_HOW and "protective_controls.policy_id" in S.APPROVAL_HOW
+    for field in ("source_current_limit_A", "dut_output_overvoltage_V", "output_overcurrent_A"):
+        assert field in S.APPROVAL_HOW, "every field planning.uvlo_approval_gaps checks is named"
+
+
+def test_approval_verdict_follows_the_dut_minimum_not_the_clause(real_bench, mock_bench, dut):
+    """4.2 needs no approval for the 12T12-4A (code C's 9 V is the DUT minimum). A converter whose minimum no supply code
+    fits inside gets the reference code and, because its Usmin is below that minimum, the approval verdict on either bench."""
+    for bench in (real_bench, mock_bench):
+        assert S.feasibility(iso("4.2"), bench, dut, "12V").status == "runs_here"
+    picky = dut.model_copy(update={"ratings": dut.ratings.model_copy(update={"input_voltage_min_V": 11.0})})
+    for bench in (real_bench, mock_bench):
+        verdict = S.feasibility(iso("4.2"), bench, picky, "12V")
+        assert verdict.status == "runs_after_approval" and verdict.needs_approval, verdict.reason
+        assert any("No 12V supply code fits" in c for c in verdict.conditions)
+        assert any("11 V minimum" in c and "UVLO" in c for c in verdict.conditions)
+
+
+def test_real_path_deadline_marks_long_recipes_needs_split(real_bench, mock_bench, dut):
+    hold_real = S.feasibility(iso("4.3.1.1"), real_bench, dut, "12V")
+    assert hold_real.status == "needs_split" and hold_real.longest_phase_s == 3600.0 and hold_real.coverage == "none"
+    assert "3600 s hold" in hold_real.reason and "660 s software deadline" in hold_real.reason and "720 s source timer" in hold_real.reason
+    hold_mock = S.feasibility(iso("4.3.1.1"), mock_bench, dut, "12V")
+    assert hold_mock.status == "runs_here" and hold_mock.longest_phase_s == 3600.0, "the virtual clock has no deadline"
+    assert any(c.startswith("On the real path the 3600 s hold exceeds the 660 s software deadline") for c in hold_mock.conditions)
+    for system, per_direction in (("12V", 1680.0), ("24V", 3360.0)):
+        ramp_real = S.feasibility(iso("4.5"), real_bench, dut, system)
+        assert ramp_real.status == "mock_only" and ramp_real.longest_phase_s == per_direction, "mock-only wins; the deadline is a condition"
+        assert any(f"Its {per_direction:g} s ramp per direction also exceeds" in c for c in ramp_real.conditions)
+        ramp_mock = S.feasibility(iso("4.5"), mock_bench, dut, system)
+        assert any(f"On the real path the {per_direction:g} s ramp per direction exceeds" in c for c in ramp_mock.conditions)
+    staircase = S.feasibility(iso("4.6.2"), real_bench, dut, "12V")
+    assert staircase.longest_phase_s == 295.0, "19 lows x 5 s + 20 recoveries x 10 s of declared holds"
+    assert not any("exceeds" in c for c in staircase.conditions)
+    dc = S.feasibility(iso("4.2"), real_bench, dut, "12V")
+    assert dc.longest_phase_s == 60.0 and not any("exceeds" in c for c in dc.conditions)
+    assert S.feasibility(iso("4.6.1.2"), real_bench, dut, "12V").longest_phase_s is None
+
+
+def test_longest_phase_s_reads_the_recipe_kind(dut):
+    assert S.longest_phase_s(None) is None
+    assert S.longest_phase_s(S.recipe_parameters(iso("4.5"), "12V", dut)) == (1680.0, "ramp per direction")
+    assert S.longest_phase_s(S.recipe_parameters(iso("4.3.1.1"), "12V", dut)) == (3600.0, "hold")
+    assert S.longest_phase_s(S.recipe_parameters(iso("4.6.2"), "24V", dut)) == (295.0, "staircase of declared holds")
+    assert S.longest_phase_s(S.recipe_parameters(iso("4.2"), "24V", dut)) == (60.0, "hold at one level")
+    assert S.longest_phase_s(S.recipe_parameters(iso("4.6.1.2"), "12V", dut)) is None
+    for number in ("4.2", "4.3.1.1", "4.5", "4.6.2", "4.6.1.2"):
+        assert S.recipe_parameters(iso(number), "12V", dut)["recipe_kind"] == iso(number).recipe_kind
+
+
+def test_real_path_constants_match_the_real_workers_without_importing_them():
+    """The catalog repeats the real workers' envelope as numbers; this pins them to the source without importing a driver module."""
+    assert (S.REAL_PLANNING_BUDGET_S, S.REAL_SOFTWARE_DEADLINE_S, S.REAL_SOURCE_TIMER_S) == (540.0, 660.0, 720.0)
+    extended = (ROOT / "src" / "dcdc_bench" / "extended.py").read_text(encoding="utf-8")
+    assert f"SOFTWARE_DEADLINE_S, HARDWARE_DEADLINE_S = {int(S.REAL_SOFTWARE_DEADLINE_S)}, {int(S.REAL_SOURCE_TIMER_S)}" in extended
+    backend = (ROOT / "src" / "dcdc_bench" / "real_backend.py").read_text(encoding="utf-8")
+    assert f"if seconds > {int(S.REAL_PLANNING_BUDGET_S)}:" in backend
+
+
+# --- bench page rows and cards (standard_recipes) ---------------------------------------
+
+def test_bench_page_rows_badge_mock_only_and_after_approval_and_never_pretick_them(real_bench, mock_bench, dut):
+    mock_rows = {row["number"]: row for row in R.clause_rows(mock_bench, dut, "12V")}
+    real_rows = {row["number"]: row for row in R.clause_rows(real_bench, dut, "12V")}
+    assert len(mock_rows) == len(real_rows) == 19
+    assert mock_rows["4.2"]["badge"] == "runs_here" and mock_rows["4.2"]["badge_label"] == "runs here"
+    assert mock_rows["4.2"]["tickable"] and mock_rows["4.2"]["ticked_by_default"] and not mock_rows["4.2"]["needs_approval"]
+    assert mock_rows["4.2"]["approval"] is None and mock_rows["4.2"]["test_type"] == "steady_state_load_sweep"
+    for number, test_type in (("4.5", "slow_supply_ramp"), ("4.6.2", "reset_staircase")):
+        row = mock_rows[number]
+        assert row["badge"] == "runs_after_approval" and row["badge_label"] == "runs here after approval"
+        assert row["tickable"] and not row["ticked_by_default"] and row["needs_approval"]
+        assert row["approval"] == S.APPROVAL_HOW == row["text"] and row["test_type"] == test_type
+        real_row = real_rows[number]
+        assert real_row["badge"] == "mock_only" and real_row["badge_label"] == "mock only" and real_row["status"] == "mock_only"
+        assert not real_row["tickable"] and not real_row["ticked_by_default"] and real_row["test_type"] is None
+        assert "synthetic plant only" in real_row["text"] and S.REAL_HARDWARE_REFUSAL in real_row["text"]
+        assert real_row["needs_approval"] and real_row["approval"] == S.APPROVAL_HOW
+    assert real_rows["4.3.1.1"]["badge"] == "procedure_pending" and real_rows["4.3.1.1"]["status"] == "needs_split"
+    assert real_rows["4.3.1.1"]["badge_label"] == "procedure not yet implemented" and "540 s" in real_rows["4.3.1.1"]["text"]
+    assert mock_rows["4.3.1.1"]["badge"] == "procedure_pending" and mock_rows["4.3.1.1"]["status"] == "runs_here"
+    assert set(R.BADGE_LABELS) >= {"runs_here", "runs_after_approval", "mock_only", "needs_split", "procedure_pending"}
+    assert R.TICKABLE_BADGES == ("runs_here", "runs_after_approval") and set(R.TICKABLE_BADGES) == S.RUNNABLE_STATUSES
+    for rows in (mock_rows, real_rows):
+        assert all(row["tickable"] or not row["ticked_by_default"] for row in rows.values())
+        assert all(row["badge"] in R.TICKABLE_BADGES or not row["tickable"] for row in rows.values())
+
+
+def test_bench_page_card_counts_now_after_approval_and_mock_only_separately(real_bench, mock_bench, dut):
+    mock_card = R.standard_cards(mock_bench, dut, "12V")[0]
+    assert (mock_card["runnable_count"], mock_card["after_approval_count"], mock_card["mock_only_count"],
+            mock_card["tickable_count"]) == (1, 2, 0, 3)
+    assert mock_card["summary"] == "1 clause runnable now, 2 after approval" and mock_card["summary"] in mock_card["subtitle"]
+    assert mock_card["runnable"] and mock_card["reason"] is None and mock_card["clause_count"] == 19
+    for system in S.SYSTEMS:
+        real_card = R.standard_cards(real_bench, dut, system)[0]
+        assert (real_card["runnable_count"], real_card["after_approval_count"], real_card["mock_only_count"],
+                real_card["tickable_count"]) == (1, 0, 2, 1), system
+        assert real_card["summary"] == "1 clause runnable now, 2 mock only (simulated bench)" and real_card["runnable"]
+    assert R.card_summary([]) == "0 clauses runnable now"
+
+
+def test_generated_mock_only_recipes_ship_unapproved_and_say_where_approval_happens(mock_bench, dut):
+    for number in ("4.5", "4.6.2"):
+        recipe = R.build_recipe(number, "12V", dut, mock_bench)
+        assert recipe["authorization"]["uvlo_approved"] is False, "approval is the owner's act (brief 7.5), never generated"
+        assert S.APPROVAL_HOW in recipe["description"] and "not yet approved for real hardware" in recipe["description"]
+    ramp = R.build_recipe("4.5", "12V", dut, mock_bench)
+    assert "1680 s ramp per direction exceeds the real path's 660 s deadline" in ramp["description"]
+    assert S.APPROVAL_HOW not in R.build_recipe("4.2", "12V", dut, mock_bench)["description"]
 
 
 @pytest.mark.skipif(not WORKSPACE_REAL_BENCH.exists(), reason="seeded workspace bench profile is not present on this checkout")
@@ -400,5 +545,12 @@ def test_documentation_cites_every_clause_without_reproducing_text():
     for number, title in EXPECTED_ISO16750_2_CLAUSES.items():
         assert f"| {number} | {title} |" in page, number
     assert "ISO 16750-2:2023, clause 4" in page
-    assert (ROOT / "docs" / "standards" / "README.md").exists()
     assert "figure value" in page, "values that exist only in a figure of the standard are flagged"
+    assert "to be verified against the owner's copy" in page, "edition history and the 24 V reversed level are not asserted"
+    assert "None of these recipes exists" not in page and "same verdicts" not in page
+    assert "mock only" in page and "runs here after approval" in page and "needs split" in page
+    readme = (ROOT / "docs" / "standards" / "README.md").read_text(encoding="utf-8")
+    assert all(status in readme for status in ("runs_after_approval", "mock_only", "needs_split")), "every verdict is defined"
+    assert "same verdicts" not in readme
+    assert "to be verified against the owner's copy" in iso("4.7").parameters["24V"]["to_verify"]
+    assert any("to be verified against the owner's copy" in note for note in S.ISO16750_2.notes)

@@ -20,6 +20,37 @@ What it contains
 * ``recipe_parameters(clause, system, dut)``: concrete levels, holds and ramp
   rates for the clauses that run here.
 
+Verdicts
+--------
+``runs_here``
+    The bench runs the clause's procedure as it is (4.2 on either bench).
+``runs_after_approval``
+    The procedure exists on this bench but the generated recipe steps below
+    the DUT's stated minimum, so it plans as ``approval_blocked`` until the
+    owner approves the saved recipe under the bench's protective policy
+    (brief §7.5). Approval is recorded in the saved recipe file, not on the
+    bench page; ``APPROVAL_HOW`` says exactly where.
+``mock_only``
+    The procedure exists on the synthetic plant only and the profile is a
+    real bench: planning refuses the test type as not yet approved for real
+    hardware (``planning.REAL_HARDWARE_NOT_APPROVED``). 4.5 and 4.6.2 today.
+``needs_split``
+    The recipe fits the bench's capability but its longest single stretch
+    (a hold, a ramp direction, a staircase) exceeds the real path's run
+    envelope: one 660 s software deadline per run and a verified 720 s
+    one-shot source timer per input-voltage phase (``extended.py``,
+    ``real_backend.prepare_real_plan``, docs/configured-runs.md). The
+    synthetic plant runs on a virtual clock and has no such bound, so the
+    same clause is a condition, not a refusal, on a mock profile.
+``needs_instrument`` / ``not_on_this_bench`` / ``excluded_by_policy`` /
+``outside_dut_rating`` / ``not_applicable``
+    As their names say; each carries the missing tokens or the rating.
+
+Mock and real profiles of the same instrument class earn the same tokens,
+but their verdicts differ where the procedure exists on the synthetic plant
+only, where the real path's deadline applies, and where an approved
+protective guard (``protective_controls.approved``) adds a condition.
+
 Capability tokens (bench profile -> tokens)
 -------------------------------------------
 Tokens describe the *class* of instrument the profile declares, not whether it
@@ -90,7 +121,7 @@ from typing import Any, Literal
 
 from pydantic import Field
 
-from .domain import BenchProfile, Contract, DutProfile
+from .domain import RESET_STAIRCASE_TEST_TYPE, SLOW_SUPPLY_RAMP_TEST_TYPE, BenchProfile, Contract, DutProfile
 
 System = Literal["12V", "24V"]
 SYSTEMS: tuple[str, ...] = ("12V", "24V")
@@ -169,6 +200,24 @@ ENDPOINT_MARGIN_V = 0.2
 ENDPOINT_REASON = "equals the DUT ceiling; endpoint method not approved"
 POLICY_CITATION = "implementation brief §2 and §7.5"
 
+# The real path's run envelope (docs/configured-runs.md): the real workers stop at one software deadline per run
+# (extended.SOFTWARE_DEADLINE_S) and every input-voltage phase carries a verified one-shot source timer
+# (extended.HARDWARE_DEADLINE_S); real_backend.prepare_real_plan refuses an acquisition estimate above the
+# planning budget. The synthetic plant runs on a virtual clock and has none of these bounds.
+REAL_PLANNING_BUDGET_S = 540.0
+REAL_SOFTWARE_DEADLINE_S = 660.0
+REAL_SOURCE_TIMER_S = 720.0
+# planning.REAL_HARDWARE_NOT_APPROVED begins with these words; the catalog repeats them rather than importing planning.
+REAL_HARDWARE_REFUSAL = "not yet approved for real hardware"
+# Where the brief §7.5 approval of a below-minimum profile is recorded (planning.uvlo_approval_gaps checks every item).
+APPROVAL_HOW = ("Approval happens in the saved recipe, not on the bench page: set authorization.uvlo_approved to true and "
+                "authorization.protective_policy_id to the bench profile's protective_controls.policy_id, and declare "
+                "source_current_limit_A, dut_output_overvoltage_V and output_overcurrent_A in that bench profile; the "
+                "recipe is written unapproved and every level below the DUT minimum plans as approval_blocked until then")
+# Recipe kind of a clause -> the saved-recipe test type its generated recipe uses.
+RECIPE_TEST_TYPES: dict[str, str] = {"steady_min_max": "steady_state_load_sweep", "slow_ramp": SLOW_SUPPLY_RAMP_TEST_TYPE,
+                                     "reset_staircase": RESET_STAIRCASE_TEST_TYPE}
+
 ISO16750_2_ID = "ISO 16750-2:2023"
 ISO7637_2_ID = "ISO 7637-2:2011"
 CISPR25_ID = "CISPR 25:2021"
@@ -184,8 +233,10 @@ CATEGORY_ISO7637_2 = "iso7637_2_transients"
 CATEGORY_EMC = "emc"
 CATEGORY_ENVIRONMENTAL = "environmental"
 
-FeasibilityStatus = Literal["runs_here", "needs_instrument", "not_on_this_bench", "excluded_by_policy",
-                            "outside_dut_rating", "not_applicable"]
+FeasibilityStatus = Literal["runs_here", "runs_after_approval", "mock_only", "needs_split", "needs_instrument",
+                            "not_on_this_bench", "excluded_by_policy", "outside_dut_rating", "not_applicable"]
+# Statuses whose clause can be ticked on the bench page (its recipe is generated and planned on this bench).
+RUNNABLE_STATUSES: frozenset[str] = frozenset({"runs_here", "runs_after_approval"})
 Coverage = Literal["full", "room_temperature_only", "partial", "none"]
 
 
@@ -216,7 +267,10 @@ class Clause(Contract):
     policy_exclusion: str | None = None
     recipe_kind: str | None = None
     procedure: str | None = None
+    # ``mock_only`` means the whole procedure exists on the synthetic plant only (a real profile gets the
+    # ``mock_only`` verdict); a procedure that runs on real hardware with a mock-only part names that part.
     procedure_status: Literal["real_fixed", "mock_only", "recipe", "planned"] | None = None
+    mock_only_part: str | None = None
     # For a clause the bench could run but has no procedure for yet: the concrete
     # requirement a procedure would have to meet (shown on the checklist row).
     procedure_gap: str | None = None
@@ -264,6 +318,10 @@ class Feasibility(Contract):
     missing: list[str] = Field(default_factory=list)
     conditions: list[str] = Field(default_factory=list)
     coverage: Coverage = "none"
+    # The generated recipe steps below the DUT's stated minimum: brief §7.5 approval before it plans as executable.
+    needs_approval: bool = False
+    # Longest single stretch (hold, ramp direction or staircase) the recipe needs; compared with the real path's deadline.
+    longest_phase_s: float | None = None
 
 
 class CatalogEntry(Contract):
@@ -361,7 +419,7 @@ def recipe_parameters(clause: Clause, system: str, dut: DutProfile) -> dict[str,
         if usmax >= dut_max:
             return None
         return {
-            "clause": clause.citation, "system": system, "supply_code": code,
+            "clause": clause.citation, "system": system, "recipe_kind": clause.recipe_kind, "supply_code": code,
             "Usmin_V": usmin, "Usmax_V": usmax, "UA_V": UA_V[system],
             "levels_V": [UA_V[system], usmin, UA_V[system], usmax, UA_V[system]],
             "t1_s": 30.0, "t2_s": 60.0, "ramp_V_per_s": 1.0,
@@ -379,7 +437,7 @@ def recipe_parameters(clause: Clause, system: str, dut: DutProfile) -> dict[str,
         if level >= dut_max:
             return None
         return {
-            "clause": clause.citation, "system": system, "level_V": level, "duration_s": 3600.0,
+            "clause": clause.citation, "system": system, "recipe_kind": clause.recipe_kind, "level_V": level, "duration_s": 3600.0,
             "operating_mode": "3.4 (bounded by the 1 A source)", "functional_status": "C minimum",
             "temperature": "(Tmax - 20) K conditioning is not provided; the hold runs at room temperature and the "
                            "report records that deviation",
@@ -393,7 +451,7 @@ def recipe_parameters(clause: Clause, system: str, dut: DutProfile) -> dict[str,
         step_v, step_s = 0.02, 2.4  # 0.5 V/min, inside the 25 mV step ceiling and representable at 10 mV resolution
         steps = int(round(start / step_v))
         return {
-            "clause": clause.citation, "system": system, "start_V": start, "floor_V": 0.0,
+            "clause": clause.citation, "system": system, "recipe_kind": clause.recipe_kind, "start_V": start, "floor_V": 0.0,
             "rate_V_per_min": 0.5, "rate_tolerance_V_per_min": 0.1, "max_step_V": 0.025,
             "step_V": step_v, "step_interval_s": step_s, "steps_per_direction": steps,
             "duration_per_direction_s": round(steps * step_s, 1), "total_duration_s": round(2 * steps * step_s, 1),
@@ -409,7 +467,7 @@ def recipe_parameters(clause: Clause, system: str, dut: DutProfile) -> dict[str,
             return None
         lows = _staircase_levels(usmin)
         return {
-            "clause": clause.citation, "system": system, "supply_code": code, "Usmin_V": usmin,
+            "clause": clause.citation, "system": system, "recipe_kind": clause.recipe_kind, "supply_code": code, "Usmin_V": usmin,
             "step_fraction_of_Usmin": 0.05, "low_levels_V": lows, "low_hold_s": 5.0, "recovery_level_V": usmin,
             "recovery_hold_s": 10.0, "functional_test": "at Usmin after every recovery hold",
             "operating_mode": "3.4 (bounded by the 1 A source)", "functional_status": "C minimum",
@@ -423,7 +481,7 @@ def recipe_parameters(clause: Clause, system: str, dut: DutProfile) -> dict[str,
         if base >= dut_max:
             return None
         return {
-            "clause": clause.citation, "system": system, "coverage": "partial", "base_V": base,
+            "clause": clause.citation, "system": system, "recipe_kind": clause.recipe_kind, "coverage": "partial", "base_V": base,
             "test_case_1": {"interruption_s": [round(1.0 + 0.1 * k, 1) for k in range(11)],
                             "recovery_s": "at least 5 s and until the DUT is fully serviceable"},
             "test_case_2": {"interruption_s": 1.0, "recovery_s": [float(k) for k in range(1, 11)]},
@@ -433,6 +491,29 @@ def recipe_parameters(clause: Clause, system: str, dut: DutProfile) -> dict[str,
             "operating_mode": "3.4 (bounded by the 1 A source)",
             "functional_status": "C minimum for interruptions longer than 100 us",
         }
+    return None
+
+
+def longest_phase_s(params: dict[str, Any] | None) -> tuple[float, str] | None:
+    """The longest single stretch a recipe needs, with its name, for the real-path deadline check.
+
+    Declared holds and ramps only: settling and acquisition come on top. A
+    slow ramp is one uninterrupted walk per direction; a staircase's lows and
+    recoveries are one continuous sequence; a 4.2 sweep restarts per level, so
+    its longest stretch is the t2 hold. None when the recipe has no stretch.
+    """
+    if not params:
+        return None
+    kind = params.get("recipe_kind")
+    if kind == "slow_ramp":
+        return float(params["duration_per_direction_s"]), "ramp per direction"
+    if kind == "overvoltage_hold":
+        return float(params["duration_s"]), "hold"
+    if kind == "reset_staircase":
+        lows = [v for v in params["low_levels_V"] if v > 0]
+        return round(len(lows) * params["low_hold_s"] + (len(lows) + 1) * params["recovery_hold_s"], 1), "staircase of declared holds"
+    if kind == "steady_min_max":
+        return float(params["t2_s"]), "hold at one level"
     return None
 
 
@@ -525,9 +606,11 @@ def feasibility(clause: Clause, bench: BenchProfile, dut: DutProfile, system: st
 
     conditions = list(code_notes)
     coverage: Coverage = "full"
-    if floor is not None and floor < ratings.input_voltage_min_V:
+    needs_approval = floor is not None and floor < ratings.input_voltage_min_V
+    if needs_approval:
         conditions.append(f"Levels below the DUT's stated {ratings.input_voltage_min_V:g} V minimum need the approved "
                           f"UVLO-style recipe with a reviewed protective policy (brief §7.5)")
+        conditions.append(APPROVAL_HOW)
     if peak is not None and env.protective_input_ceiling_V is not None and peak >= env.protective_input_ceiling_V:
         conditions.append(f"The {peak:g} V level is at or above the bench's approved DUT input overvoltage guard of "
                           f"{env.protective_input_ceiling_V:g} V; a reviewed protective policy must raise it first")
@@ -538,8 +621,36 @@ def feasibility(clause: Clause, bench: BenchProfile, dut: DutProfile, system: st
     if env.max_current_A is not None and ratings.output_power_rated_W > 0:
         conditions.append(f"Rated-load operating mode 3.4 is not reachable from a {env.max_current_A:g} A source; the run "
                           f"uses the bounded load grid the planner accepts (brief §3.2)")
-    if clause.standard_id == BENCH_ID and clause.procedure_status == "mock_only":
-        conditions.append("The below-minimum part of this test exists on the synthetic plant only today")
+    if clause.mock_only_part:
+        conditions.append(f"{clause.mock_only_part} exists on the synthetic plant only today")
+
+    # The real path's run envelope and the procedures that exist on the synthetic plant only.
+    real = bench.mode == "real"
+    test_type = RECIPE_TEST_TYPES.get(clause.recipe_kind or "", clause.recipe_kind or "this")
+    stretch = longest_phase_s(recipe_parameters(clause, system, dut))
+    longest = stretch[0] if stretch else None
+    over_deadline = longest is not None and longest > REAL_SOFTWARE_DEADLINE_S
+    if over_deadline and not real:
+        conditions.append(f"On the real path the {longest:g} s {stretch[1]} exceeds the {REAL_SOFTWARE_DEADLINE_S:g} s software "
+                          f"deadline and the {REAL_SOURCE_TIMER_S:g} s source timer per phase; a real run would need the recipe "
+                          f"split into phases that fit or a long-run procedure")
+    if clause.procedure_status == "mock_only" and not real:
+        conditions.append(f"Synthetic plant only: planning refuses {test_type} on a real bench as {REAL_HARDWARE_REFUSAL}")
+    verdict: dict[str, Any] = dict(**base, conditions=conditions, needs_approval=needs_approval, longest_phase_s=longest)
+
+    if clause.procedure_status == "mock_only" and real:
+        if over_deadline:
+            verdict["conditions"].append(f"Its {longest:g} s {stretch[1]} also exceeds the real path's {REAL_SOFTWARE_DEADLINE_S:g} s "
+                                         f"software deadline and {REAL_SOURCE_TIMER_S:g} s source timer per phase")
+        return Feasibility(**verdict, status="mock_only", coverage="none",
+                           reason=_sentence(f"The {test_type} procedure for {clause.citation} exists on the synthetic plant only; "
+                                            f"planning refuses it on a real bench as {REAL_HARDWARE_REFUSAL}"))
+    if over_deadline and real:
+        return Feasibility(**verdict, status="needs_split", coverage="none",
+                           reason=_sentence(f"The {longest:g} s {stretch[1]} of {clause.citation} exceeds the real path's "
+                                            f"{REAL_SOFTWARE_DEADLINE_S:g} s software deadline and {REAL_SOURCE_TIMER_S:g} s source "
+                                            f"timer per phase; no real run until the recipe is split into phases that fit or a "
+                                            f"long-run procedure exists"))
 
     reason = (f"The bench source can hold {level_text} of {clause.citation} as DC levels within its "
               f"{env.max_voltage_V:g} V envelope and the DUT's {ratings.input_voltage_min_V:g}-{ratings.input_voltage_max_V:g} V rating"
@@ -549,7 +660,11 @@ def feasibility(clause: Clause, bench: BenchProfile, dut: DutProfile, system: st
         reason = (f"{clause.title} is an ordinary DC supply and load measurement within the source's "
                   f"{env.max_voltage_V:g} V envelope and the DUT's {ratings.input_voltage_min_V:g}-{ratings.input_voltage_max_V:g} V rating"
                   if env.max_voltage_V is not None else f"{clause.title} is an ordinary DC supply and load measurement")
-    return Feasibility(**base, status="runs_here", reason=_sentence(reason), conditions=conditions, coverage=coverage)
+    if needs_approval:
+        reason += (f", and its levels below the DUT's {ratings.input_voltage_min_V:g} V minimum plan as executable only after "
+                   f"the saved recipe is approved under the bench's protective policy (brief §7.5)")
+        return Feasibility(**verdict, status="runs_after_approval", reason=_sentence(reason), coverage=coverage)
+    return Feasibility(**verdict, status="runs_here", reason=_sentence(reason), coverage=coverage)
 
 
 # ---------------------------------------------------------------------------
@@ -701,7 +816,9 @@ def _iso16750_2() -> Standard:
                        "test_case_2": {"Ureversed_V": -14.0, "duration_s": 60.0, "tfall_max_s": 0.01, "trise_max_s": 1.0,
                                        "from_UB_V": 12.0, "recovery_s": 120.0, "n": 1}},
                "24V": {"test_case_2": {"Ureversed_V": -26.0, "duration_s": 60.0, "tfall_max_s": 0.01, "trise_max_s": 1.0,
-                                       "from_UB_V": 24.0, "recovery_s": 120.0, "n": 1}}},
+                                       "from_UB_V": 24.0, "recovery_s": 120.0, "n": 1},
+                       "to_verify": "the -26 V level is to be verified against the owner's copy of the standard; the "
+                                    "power-electronics review recalls -28 V from an earlier edition"}},
            peak_voltage_V={"12V": 12.0, "24V": 24.0}, minimum_voltage_V={"12V": -14.0, "24V": -26.0}, requires={NEGATIVE_VOLTAGE},
            functional_status="A after replacing blown fuse-links",
            policy_exclusion="Reversed voltage is a reverse-power fault test that this release does not perform",
@@ -752,7 +869,9 @@ def _iso16750_2() -> Standard:
     return Standard(id=ISO16750_2_ID, title="Road vehicles - Environmental conditions and testing for electrical and "
                     "electronic equipment - Part 2: Electrical loads", edition="2023", clauses=clauses,
                     notes=["Owner's recollection (4.6.2 reset, 4.6.4 load dump, 4.7 reversed voltage) matches the 2023 numbering",
-                           "UA/UB and the functional status classes come from ISO 16750-1"])
+                           "UA/UB and the functional status classes come from ISO 16750-1",
+                           "Which sub-clauses are new in the 2023 edition, and the 24 V reversed-voltage level of 4.7, are to be "
+                           "verified against the owner's copy of the standard; no edition history is asserted here"])
 
 
 def _other_standards() -> list[Standard]:
@@ -808,9 +927,10 @@ def _generic_tests() -> list[Clause]:
                          "(extended.py real run; mock recipes)"),
         Clause(number="1.4", title="Dropout and minimum-input behaviour", **common,
                purpose="Operation while the input descends toward and below the stated minimum.",
-               requires={DC_STEP_1S}, procedure_status="mock_only",
+               requires={DC_STEP_1S}, procedure_status="real_fixed",
                procedure="startup_descent.py (real, fixed: 15 V start then descent to a programmed 9.1 V, observation only) "
                          "and uvlo.py uvlo_input_ramp (mock only, approval-gated below the DUT minimum)",
+               mock_only_part="The below-minimum part of this test (the uvlo.py input ramp)",
                notes=["A descent is not a dropout threshold or a UVLO measurement until the approved ramp runs on the real bench"]),
     ]
 
