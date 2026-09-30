@@ -376,8 +376,7 @@ The milestone position is stated once, in the bold paragraph under [Status](#sta
 
 The next bounded task, before any further energizing, is to finish M2
 qualification — measurement freshness, useful readback accuracy, an evaluated
-uncertainty budget and the physical load's capabilities — and to write the
-act on the written [12 V cold-start hypothesis](docs/cold-start-hypothesis.md) and [M2 qualification plan](docs/m2-qualification-plan.md), which await the owner's review.
+uncertainty budget and the physical load's capabilities — and to act on the written [12 V cold-start hypothesis](docs/cold-start-hypothesis.md) and [M2 qualification plan](docs/m2-qualification-plan.md), which await the owner's review.
 
 The NiceGUI bench workflow is implemented for the supported steady-state
 procedure, with saved-profile approvals now load-bearing and refresh/reconnect
