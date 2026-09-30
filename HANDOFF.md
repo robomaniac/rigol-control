@@ -1,9 +1,13 @@
 # Handoff: rigol-control and dcdc-bench
 
-Written 2026-09-28 for the project owner and for any future Claude Code
-session that has lost the original conversation. Everything a new session
-needs to continue safely is either in this file or linked from it. Read it
-top to bottom before changing anything; it takes ten minutes.
+**Maintainer and agent material.** Written 2026-09-28 (last reconciled
+2026-09-30) for the project owner and for any future Claude Code session that
+has lost the original conversation. Everything a new session needs to
+continue safely is either in this file or linked from it. Read it top to
+bottom before changing anything; it takes ten minutes. If you are new to the
+project and want to install it, run the simulated bench or read a report,
+start with [dcdc-bench/docs/getting-started.md](dcdc-bench/docs/getting-started.md)
+instead; this file assumes you already know what the bench is.
 
 ## 1. What this repository is
 
@@ -49,9 +53,13 @@ see [m2-qualification-plan.md](dcdc-bench/docs/m2-qualification-plan.md).
 
 ## 3. What lives where
 
-Committed and on GitHub (`https://github.com/robomaniac/rigol-control`,
-branch `dcdc-bench-hardening`; `main` is the older supply-to-load demo and
-its GitHub Pages site):
+Committed and on GitHub (`https://github.com/robomaniac/rigol-control`):
+the working branch is `dcdc-bench-hardening`. Pull request #1 merged that
+branch into `main` on 2026-09-29 (`03c4e41`), so `main` and its GitHub Pages
+site now carry the dcdc-bench subproject too, but `main` lags: on 2026-09-30
+it was 49 commits behind the branch (`git rev-list --count
+origin/main..dcdc-bench-hardening`). A new pull request is the way to bring
+`main` up to date; do not push `main` directly (section 5).
 
 - all source, tests, profiles, templates and documentation of both projects.
 
@@ -70,13 +78,19 @@ to a fresh card instead of swapping this one):
 
 ## 4. Branch state and how to verify it
 
-Last verified state (2026-09-28, commit `cc98899` on `dcdc-bench-hardening`):
+Current test total (2026-09-30, `dcdc-bench-hardening` after `9043649`):
+`pytest --collect-only -m "not browser and not pdf"` collects **812 of 828
+tests** in `dcdc-bench/tests` (16 browser/PDF gates deselected; 569 `def
+test_` functions in 44 files, the rest parametrized). Quote that figure; the
+counts in the block below are from the last full run on the Pi and are dated.
+
+Last fully verified state (2026-09-28, commit `cc98899` on `dcdc-bench-hardening`):
 
 ```sh
 cd /home/jerome/rigol-control
 git status                                   # expect: clean, on dcdc-bench-hardening
 cd Software && ../.venv/bin/python -m pytest -q          # 445 passed (10 s on the Pi 4)
-cd ../dcdc-bench && ../.venv/bin/python -m pytest -q -m "not browser and not pdf"   # 692 passed, 15 deselected (2 min 19 s on the Pi 4)
+cd ../dcdc-bench && ../.venv/bin/python -m pytest -q -m "not browser and not pdf"   # 2026-09-28: 692 passed, 15 deselected (2 min 19 s on the Pi 4)
 ../.venv/bin/python -m pytest -q -m "browser or pdf"     # 14 passed, 1 skipped on the Pi 4 (system Chromium 153 + Quarto; ~4 min, builds a demo)
 ```
 
@@ -190,8 +204,11 @@ low-sensitivity and all now public on the branch:
    [cold-start-hypothesis.md](dcdc-bench/docs/cold-start-hypothesis.md)
    ranks the likely causes and proposes discriminating tests. Nothing in it
    authorizes energizing; that decision is the owner's.
-5. **Merging** `dcdc-bench-hardening` into `main` (a pull request link is
-   printed by `git push`); GitHub Pages currently serves `main`.
+5. **Merging into `main`** — done once: pull request #1 merged
+   `dcdc-bench-hardening` into `main` on 2026-09-29 (`03c4e41`), and GitHub
+   Pages serves that merged tree. Still open: `main` was 49 commits behind
+   the branch on 2026-09-30; a new pull request (the link `git push` prints)
+   is the way to update it, never a direct push to `main`.
 
 ## 9. Next bounded tasks, in order
 
@@ -243,7 +260,9 @@ and "Add as tests" generates recipes (§4.2 steady sweep; §4.5 slow ramp and
 §4.6.2 reset staircase as **mock-only** types in `supply_profiles.py`; the real
 path refuses them until approved). Standards are cited by clause number and
 parameters only — never copy the standard's text; never invent a clause
-association to fill a field (owner's rule). Suite: 832 non-browser tests.
+association to fill a field (owner's rule). Test total: see section 4 (one
+current collected figure with its date; the "832 non-browser tests" quoted
+here on 2026-09-29 was a pytest run total that included parametrized cases).
 
 Remaining, in order:
 0. **Cross-check the owner's 34-item characterization list against IEC/ISO**

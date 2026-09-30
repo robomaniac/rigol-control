@@ -313,7 +313,7 @@ module-by-module map, with each module's entry points, forbidden dependencies
 and covering tests, is in [Architecture](docs/architecture.md); the
 acquisition/report process separation is in [the Pi process model](docs/pi-process-model.md).
 
-On 2026-09-28 the ordinary suite passed **653 tests**, with 15 browser/PDF tests deselected (Raspberry Pi, 478 s). At an earlier checkpoint it passed 378 tests with 13 deselected, and a focused UI, job and report regression passed 57; overlapping counts are not added. The configured real run passed a
+Current test total (2026-09-30, `dcdc-bench-hardening` after `9043649`): `pytest --collect-only -m 'not browser and not pdf'` collects **812 of 828 tests** in `dcdc-bench/tests` (16 browser/PDF gates deselected; 569 `def test_` functions in 44 files, the rest parametrized). This is the one figure to quote; the numbers below are dated checkpoints and are not added together. On 2026-09-28 the ordinary suite passed 653 tests with 15 browser/PDF tests deselected (Raspberry Pi, 478 s); at an earlier checkpoint it passed 378 tests with 13 deselected, and a focused UI, job and report regression passed 57. The configured real run passed a
 separate **67-check evidence audit**, and the startup/descent run passed 51 checks.
 At the earlier M1 checkpoint the ordinary suite passed **214 tests**, one
 complete mock demo command finished successfully with five visually reviewed
@@ -349,10 +349,13 @@ procedure, with saved-profile approvals now load-bearing and refresh/reconnect
 this branch: `reports/<rev>/exports/` (issued CSV plus a metadata sidecar) and
 a model-driven narrative, so no voltage, current, step, window or DUT-rating
 literal remains in the analysis or renderer prose; each sentence reads the
-recorded method, plan and DUT profile. Also on this branch, on mock or stored data only: the UVLO input-ramp procedure (RUN-09), paired-run comparison (`compare`, CMP-01/02), the automated PDF pagination check (PDF-02), a synthetic thermal channel, the attachment store with the `/annotations` sensor-placement editor, the read-only `doctor` command, the approval-gated `publish` command and a memory-safe job/report process model for the Pi. Real temperature acquisition, a real UVLO run and a rendered comparison document remain future work. For current test totals see the
-branch's final verification record. No repository push or report publication
-has been performed for this increment. The original project's license has not
-been changed or extended by this subproject.
+recorded method, plan and DUT profile. Also on this branch, on mock or stored data only: the UVLO input-ramp procedure (RUN-09), paired-run comparison (`compare`, CMP-01/02), the automated PDF pagination check (PDF-02), a synthetic thermal channel, the attachment store with the `/annotations` sensor-placement editor, the read-only `doctor` command, the approval-gated `publish` command and a memory-safe job/report process model for the Pi. Real temperature acquisition, a real UVLO run and a rendered comparison document remain future work. For the current test total see
+[Architecture and verification](#architecture-and-verification) above and the
+[implementation status](docs/implementation_status.md). The branch is on
+GitHub; pull request #1 merged it into `main` on 2026-09-29, and `main` lags
+the branch until the next pull request (see `HANDOFF.md`, sections 3 and 8).
+No report has been published. The original project's license has not been
+changed or extended by this subproject.
 
 ## Documentation
 

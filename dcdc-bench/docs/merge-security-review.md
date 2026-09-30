@@ -542,3 +542,38 @@ worktree; none imported the UI server or touched instruments or `runs/`:
   `GET /annotations`.
 * YAML probe: six small approval files through `load_approval()`; the
   alias-amplification case was terminated after 120 s.
+
+## Resolution
+
+Written 2026-09-30 by an agent role from `git show 2582508` and the current
+tree, not by the reviewer above. The fixes landed in commit `2582508`
+("Salvage the security-review fixes left uncommitted in worktree abeda9ea",
+2026-09-28), merged into `dcdc-bench-hardening` as `bcdc58f`; ten files, 938
+insertions, with new cases in `tests/test_attachments.py`,
+`tests/test_annotation_editor.py`, `tests/test_doctor.py`,
+`tests/test_publish.py` and `tests/test_ui.py`. Per finding:
+
+| Finding | Addressed in `2582508`? | What the commit did |
+| --- | --- | --- |
+| H1 publication allowlist bypass (print figure embeds the photograph) | Yes | `publish.py`: the sensor-placement print SVG and the `reports/<rev>/assets` copies follow the attachment allowlist; a withheld image is replaced by a placeholder; the allowlist universe includes documentation-revision assets. |
+| M1 text redaction corrupts the Plotly runtime | Yes | `publish.py`: the inline Plotly runtime is left byte-identical only when its SHA-256 matches `build_manifest.plotly_js_sha256`; the `LOCAL_HOSTNAME` pattern skips JavaScript member access. |
+| M2 upload size enforced only in the browser | Yes | `annotation_editor.py`: `read_upload()` checks the byte limit server-side before assembling the body; `ui.py`: `RequestBodyLimit` ASGI middleware answers 413 or disconnects above the attachment ceiling. |
+| M3 PDF validator allowlist gaps and CPU amplification under the lock | Yes | `attachments.py`: a 10 s wall-clock budget and a 4 MiB per-stream inflate cap (`pdf_too_complex`); allowlist extended to `/XFA`, `/EmbeddedFiles`, RichMedia, 3D, Movie, Sound, FileAttachment; external actions (`/GoToR`, `/GoToE`, `/URI`) refused; `job_service.py` validates before taking the service lock (also I10). |
+| M4 `/{filename}` catch-all shadows `/annotations` | Yes | `ui.py`: the `/annotations` page is registered before the catch-all. |
+| M5 SVG validator misses CSS escapes and animated style values | Yes | `attachments.py`: CSS escape and comment normalisation before the unsafe-CSS scan; animations may not retarget `style` or animate towards `url()`. |
+| M6 uploaded SVG/PDF served same-origin without a sandbox | Yes | `ui.py`: `file_headers()` gives non-HTML documents a script-less sandbox and uploaded documents `Content-Disposition: attachment`. |
+| M7 photographs published with all metadata | Yes | `publish.py`: published PNG/JPEG are re-encoded without EXIF, GPS, ICC or text chunks. |
+| L1 `OverflowError` escapes the validator | Yes | `attachments.py`: SVG dimensions must be finite. |
+| L2 `include_pdf: true` publishes an unredacted PDF under a flag that does not say so | **No** | The approval field is still `include_pdf`; the manifest warning "binary copied verbatim under include_pdf approval; not text-redacted" is the only guard. Rename or acknowledgement flag still open. |
+| L3 publication follows symlinks | Yes | `publish.py`: symlinked report files are refused. |
+| L4 approval YAML recursion and alias expansion unbounded | Yes | `publish.py`: the loader refuses anchors, aliases and deep nesting and caps attachments at 100. |
+| L5 `doctor --out` can overwrite any file | Yes | `doctor.py`: `--out` must name a new `.json` file, never overwrites, and is refused inside a publication copy. |
+| L6 captions and labels accept bidi and zero-width controls | **No** | `attachments.py` and `annotations.py` still reject only C0 controls and DEL; U+202E, U+2066 and U+200B pass. Still open. |
+| L7 PID-reuse window in the post-exit sweep | **No** | `job_service.py` still calls `_sweep_report_group(child.pid, …)` after `child.wait()`. Judged very unlikely (sequential PID allocation, same-session guard); still open. |
+| L8 documented approval example rejected (unquoted `date`) | Yes | `publish.py`: the loader accepts the documented unquoted date. |
+| I1–I10 | Informational | I10 is covered by the M3 change (validation before the lock). I1 (every client on loopback is a trusted operator; no authentication) is **not yet** stated in `bench-ui.md`, which says only that the server listens on loopback; the others recorded no change. |
+
+Focused runs recorded in the commit message: `test_attachments` 46 passed,
+`test_annotation_editor` 8, `test_doctor` 16, `test_publish` 34, `test_ui` 32.
+The three open Lows (L2, L6, L7) are policy or hardening items with no
+exploit on the loopback-only bench; they stay listed here until fixed.

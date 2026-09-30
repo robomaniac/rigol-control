@@ -94,4 +94,20 @@ are collected in [measured-results.md](measured-results.md) (its
 | Document | What it is |
 | --- | --- |
 | [merge-code-review.md](merge-code-review.md) | Independent read-only code review (2026-09-28) of the nine parallel increments merged at `0ec41fd`, diff base `6630e8c`: 72 files, 15 new modules; findings ranked by severity against the brief's rules, each citing `file:line`; no blocker, seven majors; no tests, demo, render, UI or instrument run. |
-| [merge-security-review.md](merge-security-review.md) | Independent defensive review of the attachments, annotation editor, publication, doctor, PDF-check and dispatcher surfaces merged at `0ec41fd`: threat model for owner-operated loopback bench software, then findings confirmed with small standalone Python probes against the real validators and route table (no pytest, renders, UI server or instruments). |
+| [merge-security-review.md](merge-security-review.md) | Independent defensive review of the attachments, annotation editor, publication, doctor, PDF-check and dispatcher surfaces merged at `0ec41fd`: threat model for owner-operated loopback bench software, then findings confirmed with small standalone Python probes against the real validators and route table (no pytest, renders, UI server or instruments). Its Resolution section (2026-09-30) records which findings commit `2582508` fixed and the three lows still open. |
+
+## Simulation reviews (2026-09-30)
+
+Agent-role reviews of the tree at `b38df08` from the standpoint of a
+particular reader, each performed by reading, `grep`, `--help` and read-only
+looks at served artifacts; none ran pytest, a render, the demo, the UI or an
+instrument. Five roles were planned; the files that exist are listed, the
+others are pending.
+
+| Document | What it is |
+| --- | --- |
+| [simulation-review/new-user.md](simulation-review/new-user.md) | An engineer who had never seen the repository follows the documentation in the order it sends a first-time reader, times each step, and lists what confused, contradicted or blocked (clone step, port numbers, undefined terms, bare `--help`). |
+| [simulation-review/manager.md](simulation-review/manager.md) | Engineering-manager review: 23 claims traced to artifacts with verified / partially / unverified verdicts, a risk register, an honest 15-minute demo script for the simulation, a two-week plan and the owner decisions it needs. |
+| simulation-review/ui-ux.md | Pending. |
+| simulation-review/electrical-engineer.md | Pending. |
+| simulation-review/qa.md | Pending. |
