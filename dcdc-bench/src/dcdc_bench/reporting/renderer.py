@@ -397,7 +397,7 @@ def _typst_string(value: Any) -> str:
     return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-FOOTER_LINE_CHARS = 96  # longer single lines overran the US Letter page box by a few points on CI's fonts
+FOOTER_LINE_CHARS = 150  # the 183-character line overran the US Letter page box by 3 pt on CI fonts; 124 fit
 
 
 def _footer(model: dict, figure: dict, conditions: str = "canonical conditions") -> str:
