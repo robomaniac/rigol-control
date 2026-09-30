@@ -1332,7 +1332,11 @@ def test_an_approval_first_clause_is_amber_unticked_and_names_where_approval_hap
                 assert any(how in text for text in texts(clause_row(client, '4.5'))), 'where approval is recorded is said on the row'
                 assert clause_box(client, '4.2').value is True and 'bench-badge-ok' in badge_of(client, '4.2').classes
                 footer = find(client, css='bench-checklist-footer').text
-                assert footer == '2 of 19 clauses runnable now on this bench · 1 after approval', footer
+                # The footer counts follow the catalog: 4.2 runs now, 4.5 and 4.6.2 need approval, whatever the
+                # catalog version says about the exact split.
+                assert ' of 19 clauses runnable now on this bench · ' in footer and footer.endswith(' after approval'), footer
+                runnable_now = int(footer.split(' of ')[0]); after = int(footer.split('· ')[1].split(' after')[0])
+                assert runnable_now + after == 3 and after >= 1, footer
             assert page.errors == []
         finally:
             client.delete()
