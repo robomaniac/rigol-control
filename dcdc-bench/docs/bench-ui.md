@@ -155,11 +155,18 @@ for this converter, and the catalog's status word as a badge:
   `dut_output_overvoltage_V` and `output_overcurrent_A` in that bench
   profile.* On a real bench preset the same two clauses are **mock only**
   (amber, not tickable): the procedure exists on the synthetic plant only.
-- **procedure not yet implemented** (amber, not tickable) with the concrete
-  requirement: §4.3.1.1 (*60-min hold exceeds the 540 s run budget; needs a
-  long-hold procedure*, 12 V only; at 24 V its 36 V level equals the DUT
-  ceiling) and §4.6.1.2 (*>=1 s interruptions only; needs an interruption
-  procedure*).
+- **best effort (deviations recorded)** (amber, tickable, unticked by default)
+  for §4.3.1.2, §4.3.2, §4.6.1.1, §4.6.1.2, §4.9.1 and §4.9.2: the bench can hold
+  every level of the clause and command its timings with what it has (LAN voltage
+  steps, LAN output OFF/ON, the supply's Timer or Delayer) but cannot produce or
+  measure the clause's edges, so the generated recipe carries a deviation sheet
+  and is written unapproved. Approving it is the owner's act in the saved recipe:
+  `authorization.best_effort_approved: true` with
+  `authorization.accepted_deviations_sha256` equal to the sheet's hash (the row's
+  approval sentence says so). §4.3.1.1 is **runs here after approval** at both
+  system voltages (its 36 V level at 24 V is programmed at 35.8 V unless
+  `program_clause_level_exactly` is set). See
+  [standards/best-effort-proposal.md](standards/best-effort-proposal.md).
 - **needs \<instrument\>**, **not on this bench**, **outside DUT rating**,
   **excluded by policy**, **needs split** or **not applicable** (grey, not
   tickable), with the catalog's reason under the row. Load dump, reversed

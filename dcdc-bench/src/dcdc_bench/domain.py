@@ -444,8 +444,6 @@ UVLO_TEST_TYPE = "uvlo_input_ramp"
 SLOW_SUPPLY_RAMP_TEST_TYPE = "slow_supply_ramp"
 RESET_STAIRCASE_TEST_TYPE = "reset_staircase"
 SUPPLY_PROFILE_TEST_TYPES = (SLOW_SUPPLY_RAMP_TEST_TYPE, RESET_STAIRCASE_TEST_TYPE)
-# Procedures with a phase-scoped guard: each runs alone in its recipe.
-PHASE_SCOPED_TEST_TYPES = (UVLO_TEST_TYPE, *SUPPLY_PROFILE_TEST_TYPES)
 # Best-effort ISO 16750-2 procedures (docs/standards/best-effort-proposal.md, owner decisions of 2026-10-01):
 # the bench commands the clause's levels and timings with the mechanisms it has (LAN voltage steps, LAN output
 # OFF/ON, the supply's Timer or Delayer) and records what the clause asks against what the bench did in a
@@ -456,6 +454,9 @@ MICRO_INTERRUPTION_TEST_TYPE = "micro_interruption"  # 4.6.1.2 output-OFF interv
 LINE_INTERRUPTION_TEST_TYPE = "line_interruption"    # 4.9.1 method 1 / 4.9.2: output OFF 10 +/- 1 s, positive line only
 BEST_EFFORT_TEST_TYPES = (TRANSIENT_HOLD_TEST_TYPE, MOMENTARY_DROP_TEST_TYPE, MICRO_INTERRUPTION_TEST_TYPE,
                           LINE_INTERRUPTION_TEST_TYPE)
+# Procedures with a phase-scoped guard (an expected-off window is a recorded state, not a fault, and no
+# load-regulation span is computed across their levels): each runs alone in its recipe.
+PHASE_SCOPED_TEST_TYPES = (UVLO_TEST_TYPE, *SUPPLY_PROFILE_TEST_TYPES, *BEST_EFFORT_TEST_TYPES)
 
 
 def uvlo_ramp_phases(targets: list[float]) -> list[str]:
@@ -803,6 +804,8 @@ class BestEffortPolicy(Contract):
 
     @model_validator(mode="after")
     def sheet_names_the_clause(self) -> BestEffortPolicy:
+        if self.mechanism == "none":
+            raise ValueError("A best-effort stimulus needs a mechanism; 'none' is the sheet's marker for a row nothing on the bench produces")
         if self.deviation_sheet.clause != self.clause:
             raise ValueError("The deviation sheet must be the declared clause's sheet")
         if self.deviation_sheet.variant != self.variant:

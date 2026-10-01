@@ -1,5 +1,12 @@
 # Best-effort ISO 16750-2 runs on the existing bench: a proposal for review
 
+**Status (2026-10-01):** implemented on the simulated bench as decided in §8 —
+catalog and deviation sheets (`standards.py`), generated recipes
+(`standard_recipes.py`), the planner's approval gate (`planning.py`), the four
+procedures (`best_effort_procedures.py`) and the report's deviation sheet;
+[README.md](README.md) lists the entry points. The text below is the proposal
+as reviewed; where §8 overrides it, §8 wins. Mock only: no real execution exists.
+
 Proposal, 2026-09-30, documents only: no code was changed, no instrument was
 connected, nothing was rendered. It answers the owner's brief: ISO 16750-2 is
 a reference an OEM follows, tightens or loosens; where a clause needs an edge

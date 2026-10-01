@@ -582,49 +582,20 @@ def require_phase_scoped_mock_budget(plan: Plan) -> dict:
 def best_effort_mock_estimate(plan: Plan) -> dict:
     """Budget a best-effort recipe's evidence conservatively: every second of declared stimulus is polled.
 
-    Per test: the startup interval, then ``repeats`` times the whole declared
-    stimulus (hold plus rest, drop plus recovery window, interruption plus
-    recovery window) at the acquisition poll interval, plus a settling dwell
-    and an acquisition window per declared level. Every cycle writes the four
-    electrical readings; each level adds its point events, each repeat its
-    command events, each test its lifecycle events.
+    The figure is the procedure's own (``best_effort_procedures.best_effort_mock_estimate``),
+    so Preview refuses exactly what the simulated worker would refuse: per test the
+    source-only startup gate, the settling dwell and baseline acquisition, every poll of
+    the whole declared stimulus (``repeats`` times hold plus rest, drop plus recovery
+    window, or interruption plus recovery window; instrument groups rounded up to whole
+    seconds), an observation acquisition after each repeat and, for a hold level long
+    enough to settle, an acquisition at that level; plus the command, point and lifecycle
+    events. The procedure module imports this one, so the import is deferred.
     """
-    poll = Decimal(str(plan.recipe.acquisition.target_poll_interval_s))
-
-    def polls(duration):
-        return int((Decimal(str(duration)) / poll).to_integral_value(rounding=ROUND_CEILING))
-
-    cycles, levels, repeats_total = 0, 0, 0
-    acquisition = max(polls(plan.recipe.acquisition.duration_s), plan.recipe.acquisition.minimum_complete_cycles)
     for test in plan.recipe.tests:
-        policy = test.best_effort
-        if policy is None or test.type not in BEST_EFFORT_TEST_TYPES:
+        if test.best_effort is None or test.type not in BEST_EFFORT_TEST_TYPES:
             raise ValueError("Best-effort budget requires best-effort tests with their declared block")
-        repeats = policy.repeats or 1
-        if test.type == TRANSIENT_HOLD_TEST_TYPE:
-            stimulus = (policy.hold_s or 0.0) + (policy.recovery_s or 0.0)
-        elif test.type == MOMENTARY_DROP_TEST_TYPE:
-            stimulus = (policy.drop_s or 0.0) + (policy.recovery_s or 0.0)
-        else:
-            stimulus = (policy.interruption_s or 0.0) + (policy.recovery_s or 0.0)
-        count = len(test.input_voltage_targets_V)
-        levels += count
-        repeats_total += repeats
-        startup = test.supply_profile.startup_interval_s if test.supply_profile is not None else 5.0
-        cycles += polls(startup) + repeats * polls(stimulus) + count * (acquisition + polls(plan.recipe.settling.minimum_dwell_s))
-    records = len(REQUIRED_MEASUREMENTS) * cycles + 2 * levels + 4 * repeats_total + 12 * len(plan.recipe.tests)
-    deadline = Decimal(str(MOCK_DEADLINE_FIXED_S)) + Decimal(str(MOCK_DEADLINE_SECONDS_PER_RECORD)) * records
-    typical = Decimal(str(MOCK_ESTIMATE_FIXED_S)) + Decimal(str(MOCK_ESTIMATE_SECONDS_PER_RECORD)) * records
-    if not math.isfinite(float(deadline)) or not math.isfinite(float(typical)):
-        raise ValueError("Simulated best-effort run volume exceeds the finite run budget; increase the poll interval")
-    within = deadline <= MOCK_RUN_BUDGET_S
-    reason = None if within else (
-        f"the simulated best-effort run would write about {records} fsync'd records ({repeats_total} declared repeats polled "
-        f"for their whole stimulus); its worst-case deadline {deadline:.0f} s exceeds the {MOCK_RUN_BUDGET_S:.0f} s simulated-run "
-        "budget (RuntimeMaxSec 2700 s minus margin); split the recipe or increase the poll interval")
-    return {"records": records, "declared_repeats": repeats_total, "observation_levels": levels,
-            "typical_s": float(typical), "deadline_s": float(deadline), "budget_s": MOCK_RUN_BUDGET_S,
-            "within_budget": within, "reason": reason}
+    from .best_effort_procedures import best_effort_mock_estimate as procedure_estimate
+    return procedure_estimate(plan)
 
 
 def prepare_mock_plan(plan: Plan) -> tuple[Plan, list[str], float]:

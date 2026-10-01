@@ -21,7 +21,10 @@ What is recorded (``run["method"]["best_effort"]``): the declared deviation shee
 ``achieved`` block per row (host-clock intervals the Pi timestamps itself; ``measured_by: none`` for
 every terminal-side quantity), every command's host-clock issue and acknowledgement instants, what
 the polls saw (and that anything shorter than the poll interval is invisible to them), the plant's
-hold-up model and the protective settings programmed first. Approval gate (brief 7.5, proposal 4.4):
+hold-up model and the protective settings programmed first. The planner lists a hold or drop test as two points,
+the base and the stimulus level (``input_voltage_targets_V`` as ``[base_V, level_V]`` or ``[from_V, drop_level_V]``):
+a hold level long enough for the settling dwell plus an acquisition is acquired as a measured point; a shorter hold
+or the expected-off drop level is finalized inconclusive with the reason stated. Approval gate (brief 7.5, proposal 4.4):
 ``authorization.best_effort_approved`` plus the accepted deviation sheet's hash; levels below the
 DUT minimum (0 V during an interruption, a drop level) also need the UVLO-style approval.
 
@@ -30,8 +33,6 @@ test types; no real procedure exists in this release.
 """
 from __future__ import annotations
 
-import hashlib
-import json
 import math
 from decimal import ROUND_CEILING, Decimal
 from pathlib import Path
@@ -40,20 +41,16 @@ from types import SimpleNamespace
 from typing import Any, Callable
 
 from .adapters import INSTRUMENT_TIMING_PARAMETERS, READBACK_MODEL_PARAMETERS, HoldUpModel, ReadbackModel, StartupModel
-from .domain import Plan, TestDefinition, TestRecipe
+from .domain import BestEffortPolicy, DeviationSheet, Plan, TestDefinition, TestRecipe
 from .mock_uvlo import SyntheticUvlo, UvloMockBench
 from .planning import (MOCK_DEADLINE_FIXED_S, MOCK_DEADLINE_SECONDS_PER_RECORD, MOCK_ESTIMATE_FIXED_S,
-                       MOCK_ESTIMATE_SECONDS_PER_RECORD, MOCK_RUN_BUDGET_S, REQUIRED_MEASUREMENTS, uvlo_approval_gaps,
+                       MOCK_ESTIMATE_SECONDS_PER_RECORD, MOCK_RUN_BUDGET_S, REQUIRED_MEASUREMENTS,
+                       best_effort_approval_gaps as planner_approval_gaps, recipe_deviations_sha256, uvlo_approval_gaps,
                        verify_plan_hash)
 from .runner import OUTPUT_IN_BAND_FRACTION, STARTUP_CYCLES, STARTUP_FAILURE_REASON, STARTUP_INTERVAL_S
 from .storage import atomic_json
 from .uvlo import (LOAD_CURRENT_TOLERANCE_A, ProtectiveLimitFault, ReadingOverride, RegulationRuleStop, SourceBoundaryStop,
                    UvloInputRampProcedure, absolute_limits, run_phase_scoped_mock)
-
-try:
-    from .domain import BestEffortPolicy, DeviationSheet  # the shared contract
-except ImportError:  # pragma: no cover - transitional: the contract lands in domain.py from another worktree
-    from ._best_effort_contract import BestEffortPolicy, DeviationSheet
 
 TRANSIENT_HOLD_TEST_TYPE = "transient_hold"
 MOMENTARY_DROP_TEST_TYPE = "momentary_drop"
@@ -110,52 +107,35 @@ _PARAMETER_ALIASES = {
 }
 
 
-# -- hashes and approvals -------------------------------------------------------------------------------
-def _canonical_sha256(payload: Any) -> str:
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+# -- declared repeats and windows -----------------------------------------------------------------------
+def _repeats(policy: BestEffortPolicy) -> int:
+    """Declared repeats; one when the clause declares none (a single drop)."""
+    return policy.repeats or 1
 
 
+def _recovery_s(policy: BestEffortPolicy) -> float:
+    """Declared rest or recovery window; zero when the clause declares none."""
+    return float(policy.recovery_s or 0.0)
+
+
+# -- hashes and approvals (the planner's functions: Preview and the worker apply one rule) --------------
 def deviation_sheet_sha256(sheet: DeviationSheet) -> str:
-    """Hash of one declared deviation sheet (canonical JSON); a changed parameter or bound changes it."""
-    return _canonical_sha256(sheet.model_dump(mode="json"))
+    """Hash of one declared deviation sheet (canonical JSON, ``DeviationSheet.sha256``); any changed parameter or bound changes it."""
+    return sheet.sha256()
 
 
 def declared_deviations_sha256(recipe: TestRecipe) -> str:
-    """The hash an approval must carry: the single test's sheet hash, or the hash of the ordered list of sheets."""
-    sheets = [test.best_effort.deviation_sheet for test in recipe.tests if getattr(test, "best_effort", None) is not None]
-    if not sheets:
+    """The hash an approval must carry: the single sheet's hash, or ``planning.recipe_deviations_sha256`` over several tests."""
+    digest = recipe_deviations_sha256(recipe)
+    if digest is None:
         raise ValueError("The recipe declares no best_effort block")
-    if len(sheets) == 1:
-        return deviation_sheet_sha256(sheets[0])
-    return _canonical_sha256([sheet.model_dump(mode="json") for sheet in sheets])
+    return digest
 
 
 def best_effort_approval_gaps(bench: Any, recipe: TestRecipe) -> list[str]:
-    """Why a best-effort recipe is refused: the approval flag, the accepted sheet hash and the protective policy."""
-    gaps = []
-    authorization, controls = recipe.authorization, bench.protective_controls
-    if not getattr(authorization, "best_effort_approved", False):
-        gaps.append("recipe authorization.best_effort_approved is false")
-    accepted = getattr(authorization, "accepted_deviations_sha256", None)
-    try:
-        declared = declared_deviations_sha256(recipe)
-    except ValueError as exc:
-        gaps.append(str(exc))
-        declared = None
-    if accepted is None:
-        gaps.append("recipe authorization.accepted_deviations_sha256 is not declared")
-    elif declared is not None and accepted != declared:
-        gaps.append("accepted deviation sheet hash does not match the declared sheet (the clause parameters or the bench "
-                    "bounds changed since approval; review and accept the sheet again)")
-    if authorization.protective_policy_id is None:
-        gaps.append("recipe authorization.protective_policy_id is not declared")
-    elif controls.policy_id != authorization.protective_policy_id:
-        gaps.append("bench protective_controls.policy_id does not name the recipe's protective policy")
-    for field in ("source_current_limit_A", "dut_output_overvoltage_V", "output_overcurrent_A"):
-        if getattr(controls, field) is None:
-            gaps.append(f"bench protective_controls.{field} must be declared for the absolute guard")
-    return gaps
+    """Why a best-effort recipe is refused (``planning.best_effort_approval_gaps``): the approval flag, the accepted sheet
+    hash, the protective policy with its declared limits, and the per-phase bound where a phase exceeds the source timer."""
+    return planner_approval_gaps(bench, recipe)
 
 
 def stimulus_levels_V(test: TestDefinition) -> list[float]:
@@ -189,21 +169,21 @@ def stimulus_plan(test: TestDefinition, recipe: TestRecipe) -> dict[str, Any]:
     """Durations of one test's stimulus sequence: per repeat and in total, LAN-timed or as instrument groups."""
     policy, spec = test.best_effort, STIMULUS[test.type]
     active_s = float(getattr(policy, spec["active"]))
-    rest_s = float(policy.recovery_s)
+    rest_s = float(_recovery_s(policy))
     observation_s = observation_window_s(recipe)
     instrument = policy.mechanism in INSTRUMENT_MECHANISMS
     if instrument:
         active_group = int(math.ceil(active_s))
         rest_group = int(math.ceil(rest_s + 2 * INSTRUMENT_SCHEDULE_TOLERANCE_S + observation_s))
         per_repeat = active_group + rest_group
-        total = PRE_GROUP_S + policy.repeats * per_repeat
+        total = PRE_GROUP_S + _repeats(policy) * per_repeat
         groups = {"pre_group_s": PRE_GROUP_S, "active_group_s": active_group, "rest_group_s": rest_group}
     else:
         per_repeat = active_s + rest_s + observation_s
-        total = policy.repeats * per_repeat
+        total = _repeats(policy) * per_repeat
         groups = {}
     return {"mechanism": policy.mechanism, "instrument_timed": instrument, "active_s": active_s, "rest_s": rest_s,
-            "observation_window_s": observation_s, "repeats": policy.repeats, "per_repeat_s": per_repeat,
+            "observation_window_s": observation_s, "repeats": _repeats(policy), "per_repeat_s": per_repeat,
             "stimulus_total_s": total, **groups}
 
 
@@ -217,22 +197,28 @@ def best_effort_mock_estimate(plan: Plan) -> dict[str, Any]:
     recipe = plan.recipe
     poll = recipe.acquisition.target_poll_interval_s
     acquisition = max(_ceil_polls(recipe.acquisition.duration_s, poll), recipe.acquisition.minimum_complete_cycles)
-    cycles = commands = 0
+    cycles = commands = levels = repeats_total = 0
     for test in recipe.tests:
         plan_ = stimulus_plan(test, recipe)
+        repeats, spec = plan_["repeats"], STIMULUS[test.type]
+        levels += len(test.input_voltage_targets_V)
+        repeats_total += repeats
         cycles += STARTUP_CYCLES + _ceil_polls(recipe.settling.minimum_dwell_s, poll) + acquisition
-        cycles += _ceil_polls(plan_["stimulus_total_s"] + 2 * INSTRUMENT_SCHEDULE_TOLERANCE_S, poll) + plan_["repeats"] * acquisition + 2
-        commands += 2 * plan_["repeats"] + 4
-    records = len(REQUIRED_MEASUREMENTS) * cycles + commands + 2 * len(recipe.tests) + 12 * len(recipe.tests)
+        cycles += _ceil_polls(plan_["stimulus_total_s"] + 2 * INSTRUMENT_SCHEDULE_TOLERANCE_S, poll) + repeats * acquisition + 2
+        if (len(test.input_voltage_targets_V) == 2 and not spec["off_expected"]
+                and plan_["active_s"] >= recipe.settling.minimum_dwell_s + observation_window_s(recipe)):
+            cycles += repeats * acquisition  # the settled acquisition at the hold level, once per repeat
+        commands += 2 * repeats + 4
+    records = len(REQUIRED_MEASUREMENTS) * cycles + commands + 2 * levels + 12 * len(recipe.tests)
     deadline = MOCK_DEADLINE_FIXED_S + MOCK_DEADLINE_SECONDS_PER_RECORD * records
     typical = MOCK_ESTIMATE_FIXED_S + MOCK_ESTIMATE_SECONDS_PER_RECORD * records
     within = deadline <= MOCK_RUN_BUDGET_S
     reason = None if within else (
         f"the simulated best-effort run would write about {records} fsync'd records; its worst-case deadline {deadline:.0f} s "
-        f"exceeds the {MOCK_RUN_BUDGET_S:.0f} s simulated-run budget (RuntimeMaxSec 2700 s minus margin); shorten the holds, "
-        "the recovery windows or the poll cadence, or reduce the repeats")
-    return {"records": records, "cycles": cycles, "typical_s": typical, "deadline_s": deadline, "budget_s": MOCK_RUN_BUDGET_S,
-            "within_budget": within, "reason": reason}
+        f"exceeds the {MOCK_RUN_BUDGET_S:.0f} s simulated-run budget (RuntimeMaxSec 2700 s minus margin); increase the poll "
+        "interval, shorten the holds or the recovery windows, or reduce the repeats")
+    return {"records": records, "cycles": cycles, "declared_repeats": repeats_total, "observation_levels": levels,
+            "typical_s": typical, "deadline_s": deadline, "budget_s": MOCK_RUN_BUDGET_S, "within_budget": within, "reason": reason}
 
 
 def host_interval(first: dict[str, Any], second: dict[str, Any]) -> float:
@@ -249,9 +235,21 @@ def _parameter_key(name: str, kind: str) -> str | None:
             break
     if normalised in ("hold_s", "interruption_s", "drop_s", "recovery_s", "repeats"):
         return normalised
-    if normalised in ("duration", "duration_s", "time", "t", "t_active", "active_time"):
-        return STIMULUS[kind]["active"]
+    if normalised in ("duration", "duration_s", "time", "t", "t_active", "active_time", "pulse", "pulse_width", "pulse_duration"):
+        return STIMULUS[kind]["active"]  # a 4.3.2 pulse is the hold of a transient_hold, a 4.6.1.1 pulse the drop
     return _PARAMETER_ALIASES.get(normalised)
+
+
+def _voltage_key(name: str) -> str | None:
+    """Map a sheet row's parameter onto the level the supply readback observes: ``level`` (hold or drop) or ``base``."""
+    normalised = name.strip().lower().replace("-", "_").replace(" ", "_")
+    if normalised.endswith("_v"):
+        normalised = normalised[:-2]
+    if normalised in ("level", "hold_level", "drop_level", "overvoltage_level", "jump_start_level", "stimulus_level", "pulse_level"):
+        return "level"
+    if normalised in ("base", "start", "from", "base_level", "start_level", "supply", "nominal"):
+        return "base"
+    return None
 
 
 class BestEffortProcedure(UvloInputRampProcedure):
@@ -309,8 +307,11 @@ class BestEffortProcedure(UvloInputRampProcedure):
     # -- construction-time checks ---------------------------------------------------------------------
     def _validate_stimulus(self, plan: Plan, test: TestDefinition) -> None:
         policy, spec, kind = test.best_effort, STIMULUS[test.type], test.type
-        if len(test.input_voltage_targets_V) != 1 or len(test.output_current_targets_A) != 1:
-            raise ValueError(f"{kind} declares exactly one base input level and one load; the stimulus levels live in best_effort")
+        expected = 2 if kind in (TRANSIENT_HOLD_TEST_TYPE, MOMENTARY_DROP_TEST_TYPE) else 1
+        if len(test.input_voltage_targets_V) != expected or len(test.output_current_targets_A) != 1:
+            shape = ("[base_V, level_V]" if kind == TRANSIENT_HOLD_TEST_TYPE else "[from_V, drop_level_V]"
+                     if kind == MOMENTARY_DROP_TEST_TYPE else "[base_V]")
+            raise ValueError(f"{kind} declares input_voltage_targets_V as {shape} and one load; the timings live in best_effort")
         if policy.mechanism not in spec["mechanisms"]:
             if policy.mechanism == "switch_box":
                 raise ValueError(f"{kind} by switch_box needs the series switch box, which this bench does not have (design pending); "
@@ -508,6 +509,25 @@ class BestEffortProcedure(UvloInputRampProcedure):
         note = TERMINAL_NOTE if measured_by != "scope" else "no scope or DAQ channel is bound in this bench profile; " + TERMINAL_NOTE
         return {"value": None, "measured_by": "none", "note": note}
 
+    @staticmethod
+    def _readback_level(detail: dict[str, Any], which: str) -> dict[str, Any]:
+        """Source-terminal readback of a level the sheet marks ``supply_readback``: the stimulus level from the polls inside
+        the window(s), the base from the baseline and the observations; never the DUT-pin voltage."""
+        if which == "level":
+            means = [r["polls_during_stimulus"]["Vin_mean_V"] for r in detail["repeats"] if r["polls_during_stimulus"]["cycles"]]
+            where = "inside the stimulus window(s)"
+        else:
+            means = [r["observation"]["means"]["Vin_V"] for r in detail["repeats"]]
+            if detail.get("baseline"):
+                means.insert(0, detail["baseline"]["means"]["Vin_V"])
+            where = "at the base level (the baseline and the observation after each window)"
+        if not means:
+            return {"value": None, "measured_by": "none",
+                    "note": "no poll fell inside the stimulus window at the poll interval; the level is commanded, not observed"}
+        return {"value": mean(means), "min": min(means), "max": max(means), "measured_by": "supply_readback",
+                "note": f"source-terminal readback mean of the polls {where} (about 1 s refresh); lead drop not subtracted, "
+                        "not the DUT-pin voltage"}
+
     def _refresh_deviations(self, method: dict[str, Any]) -> None:
         combined, statements = [], []
         for test in self.snapshot.recipe.tests:
@@ -523,14 +543,16 @@ class BestEffortProcedure(UvloInputRampProcedure):
                 key = _parameter_key(entry["parameter"], test.type)
                 if key == "repeats" and detail["repeats"]:
                     achieved = {"value": len(detail["repeats"]), "measured_by": "host_clock",
-                                "note": f"repeats completed, counted by the host ({policy.repeats} declared)"}
+                                "note": f"repeats completed, counted by the host ({_repeats(policy)} declared)"}
                 elif key is not None and instrument and detail["repeats"]:
-                    programmed = detail["sequence"]["active_group_s"] if key == STIMULUS[test.type]["active"] else policy.recovery_s
+                    programmed = detail["sequence"]["active_group_s"] if key == STIMULUS[test.type]["active"] else _recovery_s(policy)
                     achieved = {"value": None, "measured_by": "none", "programmed": programmed, "note": INSTRUMENT_NOTE}
                 elif key is not None and intervals.get(key):
                     values = intervals[key]
                     achieved = {"value": mean(values), "min": min(values), "max": max(values), "values": list(values),
                                 "measured_by": "host_clock", "note": HOST_INTERVAL_NOTE}
+                elif key is None and entry.get("measured_by") == "supply_readback" and _voltage_key(entry["parameter"]) is not None:
+                    achieved = self._readback_level(detail, _voltage_key(entry["parameter"]))
                 else:
                     achieved = self._achieved_default(entry)
                 entry["achieved"] = achieved
@@ -539,6 +561,62 @@ class BestEffortProcedure(UvloInputRampProcedure):
                               else f"{policy.variant or test.id}: {detail['statement']}")
         method["deviations"] = combined
         method["statement"] = " ".join(statements)
+
+    def _finalize_level_point(self, ctx: Any, test: TestDefinition, level_point: dict[str, Any], detail: dict[str, Any],
+                              spec: dict[str, Any], load: float) -> None:
+        """Finalize the planner's second point of a hold or drop test: the stimulus level itself.
+
+        A hold level that lasted the settling dwell plus an acquisition window in at least
+        one repeat is a valid point with the accepted means of those acquisitions. A shorter
+        hold, or the expected-off drop level, is inconclusive with the reason stated (its
+        polls live in the stimulus record); it is never left as "not reached".
+        """
+        policy, recipe = test.best_effort, self.snapshot.recipe
+        level = policy.level_V if test.type == TRANSIENT_HOLD_TEST_TYPE else policy.drop_level_V
+        active_s = float(getattr(policy, spec["active"]))
+        repeats = detail["repeats"]
+        acquisitions = [r["level_acquisition"] for r in repeats if r.get("level_acquisition")]
+        settled = [a for a in acquisitions if a["settled"]]
+        common = {"output_off_expected": spec["off_expected"], "minimum_vout_rule_applied": not spec["off_expected"],
+                  "procedure_stage": self.stage, "repeats_completed": len(repeats), "stimulus_level_V": level,
+                  "settling_elapsed_s": recipe.settling.minimum_dwell_s if settled else None}
+        if settled:
+            cycle_ids = [cid for a in settled for cid in a["cycle_ids"]]
+            means = {key: mean(a["means"][key] for a in settled) for key in settled[0]["means"]}
+            state = self.classify_output(means["Vout_V"])
+            level_point.update(
+                qualification="valid", output_state=state,
+                reason=(f"output {state} at the {level:g} V {spec['level_kind']} level: {len(settled)} settled acquisition(s) after the "
+                        f"{recipe.settling.minimum_dwell_s:g} s dwell inside the {active_s:g} s window(s) ({policy.mechanism}); "
+                        "minimum-output rule applied; the level is the source readback, terminal-side edges not measured; "
+                        "uncertainty unquantified"),
+                load_current_established=abs(means["Iout_A"] - load) <= LOAD_CURRENT_TOLERANCE_A,
+                acquisition_cycle_ids=cycle_ids, settling_cycle_ids=[cid for a in settled for cid in a["settling_cycle_ids"]],
+                settled=True, acquisition_elapsed_s=sum(a["ended_s"] - a["started_s"] for a in settled),
+                acquisition_start_monotonic_s=settled[0]["started_s"] - ctx.began,
+                acquisition_end_monotonic_s=settled[-1]["ended_s"] - ctx.began,
+                maximum_interchannel_skew_s=max(a["skew_max_s"] for a in settled), accepted_means=means,
+                acquisitions_at_level=len(settled), **common)
+            ended = settled[-1]["ended_s"]
+        else:
+            polls = sum(r["polls_during_stimulus"]["cycles"] for r in repeats)
+            if acquisitions:
+                reason = (f"output unsettled at the {level:g} V {spec['level_kind']} level (span up to "
+                          f"{max(a['span_V'] for a in acquisitions):.3f} V in {len(acquisitions)} acquisition(s) inside the window); "
+                          "state not classified")
+            elif spec["off_expected"]:
+                reason = (f"{level:g} V {spec['level_kind']} level commanded for {len(repeats)} x {active_s:g} s with the converter expected "
+                          f"off: no settled acquisition is taken there; {polls} poll(s) inside the window are in the stimulus record "
+                          "(method.best_effort); the level is commanded, not measured")
+            else:
+                reason = (f"{level:g} V {spec['level_kind']} level commanded for {len(repeats)} x {active_s:g} s: shorter than the "
+                          f"{recipe.settling.minimum_dwell_s:g} s settling dwell plus the {observation_window_s(recipe):g} s acquisition "
+                          f"window, so no settled acquisition at the level; {polls} poll(s) inside the window are in the stimulus record "
+                          "(method.best_effort); the level is commanded, not measured")
+            level_point.update(qualification="inconclusive", output_state=None, reason=reason, acquisition_cycle_ids=[],
+                               settling_cycle_ids=[], settled=False, **common)
+            ended = ctx.clock.monotonic()
+        ctx.store.append("points", {**level_point, "event": "point_finalized", "monotonic_s": ended - ctx.began})
 
     # -- execution against a context ---------------------------------------------------------------
     def execute(self, ctx: Any) -> None:
@@ -580,20 +658,44 @@ class BestEffortProcedure(UvloInputRampProcedure):
             ctx.event("command", test_id=detail["test_id"], **record)
             return record
 
-        def acquire(point: dict[str, Any], phase: str = "acquiring") -> dict[str, Any]:
+        def acquire(point: dict[str, Any], phase: str = "acquiring", *, with_readings: bool = False) -> dict[str, Any]:
             started, accepted, readings, skew_max = now(), [], [], 0.
             self.acquiring = True
             while (now() - started < recipe.acquisition.duration_s or len(accepted) < recipe.acquisition.minimum_complete_cycles):
                 cycle_id, values, skew = ctx.cycle(point, phase)
                 accepted.append(cycle_id)
-                readings.append(values)
+                readings.append((now(), values))
                 skew_max = max(skew_max, skew)
                 clock.sleep(poll)
             self.acquiring = False
-            means = {key: mean(row[key] for row in readings) for key in readings[0]}
-            span = max(row["Vout_V"] for row in readings) - min(row["Vout_V"] for row in readings)
-            return {"cycle_ids": accepted, "means": means, "span_V": span, "started_s": started, "ended_s": now(),
-                    "skew_max_s": skew_max, "state": self.classify_output(means["Vout_V"])}
+            means = {key: mean(values[key] for _, values in readings) for key in readings[0][1]}
+            span = max(values["Vout_V"] for _, values in readings) - min(values["Vout_V"] for _, values in readings)
+            result = {"cycle_ids": accepted, "means": means, "span_V": span, "started_s": started, "ended_s": now(),
+                      "skew_max_s": skew_max, "state": self.classify_output(means["Vout_V"])}
+            if with_readings:
+                result["readings"] = readings
+            return result
+
+        def active_window(deadline: float, phase: str, point: dict[str, Any], level_point: dict[str, Any] | None):
+            """Poll a stimulus window at the recipe cadence, attributing the polls to the level point when the planner lists
+            one. A hold level that lasts the settling dwell plus an acquisition window is also acquired there as a settled
+            point; an expected-off level (a drop) is recorded by its polls only."""
+            target = level_point if level_point is not None else point
+            off_expected = bool((self.step or {}).get("output_off_expected"))
+            if (level_point is None or off_expected
+                    or deadline - now() < recipe.settling.minimum_dwell_s + observation_window_s(recipe)):
+                ids, readings = poll_until(deadline, target, phase)
+                return ids, readings, None
+            settling_ids, settling_readings = poll_until(now() + recipe.settling.minimum_dwell_s, target, phase)
+            acquisition = acquire(target, with_readings=True)
+            acquired = acquisition.pop("readings")
+            ids, readings = poll_until(deadline, target, phase)
+            settled = acquisition["span_V"] <= recipe.settling.maximum_vout_span_V
+            acquisition.update(settling_cycle_ids=settling_ids, settled=settled,
+                               note=("settled acquisition at the stimulus level after the settling dwell" if settled else
+                                     f"output span {acquisition['span_V']:.3f} V exceeded the settling bound at the stimulus level; "
+                                     "not accepted"))
+            return settling_ids + acquisition["cycle_ids"] + ids, settling_readings + acquired + readings, acquisition
 
         def recovered_after(readings: list[tuple[float, dict[str, float]]], since: float) -> float | None:
             for at, values in readings:
@@ -608,16 +710,21 @@ class BestEffortProcedure(UvloInputRampProcedure):
                     "label": "what the synthetic plant did; no instrument on this bench observes it"}
 
         helpers = SimpleNamespace(poll_until=poll_until, command=command, acquire=acquire, recovered_after=recovered_after,
-                                  plant_truth=plant_truth, checkpoint=checkpoint)
+                                  plant_truth=plant_truth, checkpoint=checkpoint, active_window=active_window, level_point=None)
         for test in recipe.tests:
             self.begin_test(test)
             policy, spec = test.best_effort, STIMULUS[test.type]
             load, base = test.output_current_targets_A[0], test.input_voltage_targets_V[0]
-            point = next(p for p in run["points"] if p["test_id"] == test.id)
+            points = [p for p in run["points"] if p["test_id"] == test.id]
+            point, level_point = points[0], (points[1] if len(points) > 1 else None)
             detail = method["tests"][test.id]
             detail.update(startup=None, baseline=None, repeats=[], commands=[], completed=False)
             point["level_kind"], point["ramp_phase"] = "base", None
             self.record_attempt(run, point)
+            if level_point is not None:  # the hold or drop level the planner lists as the test's second point
+                level_point["level_kind"], level_point["ramp_phase"] = spec["level_kind"], None
+                self.record_attempt(run, level_point)
+            helpers.level_point = level_point
             ctx.set_active(point)
             self.begin_step(base, "startup")
             self.stage = "protective-settings"
@@ -625,7 +732,7 @@ class BestEffortProcedure(UvloInputRampProcedure):
             if policy.mechanism in INSTRUMENT_MECHANISMS:
                 # The program's groups are written and read back before anything is energised; only its start needs the output ON.
                 sequence = detail["sequence"]
-                groups = 1 + 2 * policy.repeats
+                groups = 1 + 2 * _repeats(policy)
                 for _ in range(groups * 2):
                     clock.sleep(bench.query_round_trip_s())
                 ctx.event("program_written", test_id=test.id, mechanism=policy.mechanism, groups=groups, end_state="OFF",
@@ -682,6 +789,8 @@ class BestEffortProcedure(UvloInputRampProcedure):
                          accepted_means=observation["means"], baseline_means=baseline["means"], repeats_completed=repeats,
                          plant_tripped_any_repeat=any(r["plant_truth"]["tripped"] for r in detail["repeats"]))
             ctx.store.append("points", {**point, "event": "point_finalized", "monotonic_s": observation["ended_s"] - ctx.began})
+            if level_point is not None:
+                self._finalize_level_point(ctx, test, level_point, detail, spec, load)
             self.stage = "de-energize"
             ctx.de_energize()
             ctx.event("de_energized", test_id=test.id, source_output="OFF", load_input="OFF")
@@ -700,7 +809,7 @@ class BestEffortProcedure(UvloInputRampProcedure):
                                                                                  h.plant_truth, h.checkpoint)
         base = test.input_voltage_targets_V[0]
         kind = test.type
-        for index in range(policy.repeats):
+        for index in range(_repeats(policy)):
             transitions_before = len(bench.uvlo.transitions)
             if kind == TRANSIENT_HOLD_TEST_TYPE:
                 level = policy.level_V
@@ -708,12 +817,12 @@ class BestEffortProcedure(UvloInputRampProcedure):
                 self.begin_step(level, "hold")
                 step = command(detail, "set_voltage_live", lambda c, e: bench.set_live_voltage(level, c, effective_at=e),
                                round_trips=LAN_ROUND_TRIPS["set_voltage_live"], to_V=level, repeat=index + 1)
-                active_ids, active_readings = poll_until(step["commanded_at_s"] + policy.hold_s, point, "hold")
+                active_ids, active_readings, level_acquisition = h.active_window(step["commanded_at_s"] + policy.hold_s, "hold", point, h.level_point)
                 back = command(detail, "set_voltage_live", lambda c, e: bench.set_live_voltage(base, c, effective_at=e),
                                round_trips=LAN_ROUND_TRIPS["set_voltage_live"], to_V=base, repeat=index + 1)
                 self.stage = "rest"
                 self.begin_step(base, "rest")
-                window_ids, window_readings = poll_until(back["commanded_at_s"] + policy.recovery_s, point, "rest")
+                window_ids, window_readings = poll_until(back["commanded_at_s"] + _recovery_s(policy), point, "rest")
                 intervals = {"hold_s": host_interval(step, back)}
                 first, second = step, back
             elif kind == MOMENTARY_DROP_TEST_TYPE:
@@ -722,12 +831,12 @@ class BestEffortProcedure(UvloInputRampProcedure):
                 self.begin_step(level, "drop", off_expected=True)
                 down = command(detail, "set_voltage_live", lambda c, e: bench.set_live_voltage(level, c, effective_at=e),
                                round_trips=LAN_ROUND_TRIPS["set_voltage_live"], to_V=level, repeat=index + 1)
-                active_ids, active_readings = poll_until(down["commanded_at_s"] + policy.drop_s, point, "drop")
+                active_ids, active_readings, level_acquisition = h.active_window(down["commanded_at_s"] + policy.drop_s, "drop", point, h.level_point)
                 up = command(detail, "set_voltage_live", lambda c, e: bench.set_live_voltage(base, c, effective_at=e),
                              round_trips=LAN_ROUND_TRIPS["set_voltage_live"], to_V=base, repeat=index + 1)
                 self.stage = "recovery"
                 self.begin_step(base, "recovery", off_expected=True)
-                window_ids, window_readings = poll_until(up["commanded_at_s"] + policy.recovery_s, point, "recovery")
+                window_ids, window_readings = poll_until(up["commanded_at_s"] + _recovery_s(policy), point, "recovery")
                 intervals = {"drop_s": host_interval(down, up)}
                 first, second = down, up
             else:
@@ -735,12 +844,12 @@ class BestEffortProcedure(UvloInputRampProcedure):
                 self.begin_step(0.0, "interruption", off_expected=True, interruption_commanded=True)
                 off = command(detail, "output_off", lambda c, e: bench.set_output(False, c, effective_at=e),
                               round_trips=LAN_ROUND_TRIPS["output_off"], repeat=index + 1)
-                active_ids, active_readings = poll_until(off["commanded_at_s"] + policy.interruption_s, point, "interruption")
+                active_ids, active_readings, level_acquisition = h.active_window(off["commanded_at_s"] + policy.interruption_s, "interruption", point, None)
                 on = command(detail, "output_on", lambda c, e: bench.set_output(True, c, effective_at=e),
                              round_trips=LAN_ROUND_TRIPS["output_on"], repeat=index + 1)
                 self.stage = "recovery"
                 self.begin_step(base, "recovery", off_expected=True)
-                window_ids, window_readings = poll_until(on["commanded_at_s"] + policy.recovery_s, point, "recovery")
+                window_ids, window_readings = poll_until(on["commanded_at_s"] + _recovery_s(policy), point, "recovery")
                 intervals = {"interruption_s": host_interval(off, on)}
                 first, second = off, on
             self.stage = "observation"
@@ -753,7 +862,8 @@ class BestEffortProcedure(UvloInputRampProcedure):
             record = self._repeat_record(index, policy, spec, intervals, active_readings, active_ids, window_readings, window_ids,
                                          observation, recovered_after(window_readings, second["commanded_at_s"]) if spec["off_expected"] else None,
                                          plant_truth(transitions_before), commands=[first["command"], second["command"]],
-                                         commanded_window_s=(first["commanded_at_s"], second["commanded_at_s"]))
+                                         commanded_window_s=(first["commanded_at_s"], second["commanded_at_s"]),
+                                         level_acquisition=level_acquisition)
             detail["repeats"].append(record)
             ctx.event("repeat_completed", test_id=test.id, repeat=index + 1, intervals_host_s=intervals, observation=record["observation_text"])
             self._refresh_deviations(ctx.run["method"][METHOD_KEY])
@@ -770,35 +880,35 @@ class BestEffortProcedure(UvloInputRampProcedure):
         limit = self.programmed[test.id]["source_current_limit_A"]
         delayer = policy.mechanism == "supply_delayer"
         if delayer:
-            groups = [("ON", pre)] + [("OFF", active), ("ON", rest)] * policy.repeats
+            groups = [("ON", pre)] + [("OFF", active), ("ON", rest)] * _repeats(policy)
             start = command(detail, "program_start", lambda c, e: bench.program_delayer(groups, c, start_latency_s=e - c, end_state="OFF"),
                             round_trips=LAN_ROUND_TRIPS["program_start"], mechanism="supply_delayer", groups=len(groups), end_state="OFF")
         else:
             level = policy.level_V if test.type == TRANSIENT_HOLD_TEST_TYPE else policy.drop_level_V
-            groups = [(base, limit, pre)] + [(level, limit, active), (base, limit, rest)] * policy.repeats
+            groups = [(base, limit, pre)] + [(level, limit, active), (base, limit, rest)] * _repeats(policy)
             start = command(detail, "program_start", lambda c, e: bench.program_timer(groups, c, start_latency_s=e - c, end_state="OFF"),
                             round_trips=LAN_ROUND_TRIPS["program_start"], mechanism="supply_timer", groups=len(groups), end_state="OFF")
         t0 = start["commanded_at_s"]
         detail["program"] = {"mechanism": policy.mechanism, "groups": [list(group) for group in groups], "end_state": "OFF",
                              "predicted_from_host_s": t0, "schedule_tolerance_s": tolerance,
                              "predicted_boundaries_s": [t0 + pre + k * (active + rest) + offset
-                                                        for k in range(policy.repeats) for offset in (0, active)] + [t0 + sequence["stimulus_total_s"]],
+                                                        for k in range(_repeats(policy)) for offset in (0, active)] + [t0 + sequence["stimulus_total_s"]],
                              "note": "the host predicts every boundary from its own program-start instant and the programmed whole seconds; "
                                      "an output OFF outside a predicted window stops the run"}
         self.stage = "programmed-base"
         self.begin_step(base, "base")
         poll_until(t0 + pre - tolerance, point, "programmed")
         stimulus_level = 0.0 if delayer else (policy.level_V if test.type == TRANSIENT_HOLD_TEST_TYPE else policy.drop_level_V)
-        for index in range(policy.repeats):
+        for index in range(_repeats(policy)):
             transitions_before = len(bench.uvlo.transitions)
             t_active = t0 + pre + index * (active + rest)
             t_rest, t_next = t_active + active, t_active + active + rest
             self.stage = spec["level_kind"]
             self.begin_step(stimulus_level, spec["level_kind"], off_expected=spec["off_expected"], interruption_commanded=delayer)
-            active_ids, active_readings = poll_until(t_rest + tolerance, point, spec["level_kind"])
+            active_ids, active_readings, level_acquisition = h.active_window(t_rest + tolerance, spec["level_kind"], point, h.level_point)
             self.stage = "recovery" if spec["off_expected"] else "rest"
             self.begin_step(base, "recovery" if spec["off_expected"] else "rest", off_expected=spec["off_expected"])
-            window_ids, window_readings = poll_until(t_rest + tolerance + policy.recovery_s, point, "recovery" if spec["off_expected"] else "rest")
+            window_ids, window_readings = poll_until(t_rest + tolerance + _recovery_s(policy), point, "recovery" if spec["off_expected"] else "rest")
             self.stage = "observation"
             self.begin_step(base, "recovery")
             observation = acquire(point)
@@ -809,7 +919,7 @@ class BestEffortProcedure(UvloInputRampProcedure):
             record = self._repeat_record(index, policy, spec, intervals, active_readings, active_ids, window_readings, window_ids,
                                          observation, recovered_after(window_readings, t_rest) if spec["off_expected"] else None,
                                          plant_truth(transitions_before), commands=["program_start"],
-                                         commanded_window_s=(t_active, t_rest), predicted=True)
+                                         commanded_window_s=(t_active, t_rest), predicted=True, level_acquisition=level_acquisition)
             detail["repeats"].append(record)
             ctx.event("repeat_completed", test_id=test.id, repeat=index + 1, predicted_window_s=[t_active, t_rest],
                       observation=record["observation_text"])
@@ -831,7 +941,8 @@ class BestEffortProcedure(UvloInputRampProcedure):
                                              "Vout_V": state.output_voltage_V, "Iout_A": state.output_current_A})
 
     def _repeat_record(self, index, policy, spec, intervals, active_readings, active_ids, window_readings, window_ids, observation,
-                       recovered_after_s, truth, *, commands, commanded_window_s, predicted=False) -> dict[str, Any]:
+                       recovered_after_s, truth, *, commands, commanded_window_s, predicted=False,
+                       level_acquisition=None) -> dict[str, Any]:
         poll = self.snapshot.recipe.acquisition.target_poll_interval_s
         during, window = summary_of(active_readings, self), summary_of(window_readings, self)
         active_s = float(getattr(policy, spec["active"]))
@@ -849,14 +960,14 @@ class BestEffortProcedure(UvloInputRampProcedure):
             elif window["cycles"] == 0:
                 recovery = "; no poll fell inside the recovery window"
             else:
-                recovery = f"; not back in band within the {policy.recovery_s:g} s recovery window polls"
+                recovery = f"; not back in band within the {_recovery_s(policy):g} s recovery window polls"
         else:
             recovery = ""
         text = f"repeat {index + 1}: {seen}{recovery}; output {observation['state']} at the observation after the window"
         return {"index": index + 1, "commands": commands, "commanded_window_host_s": list(commanded_window_s), "predicted_window": predicted,
                 "intervals_host_s": intervals, "polls_during_stimulus": {**during, "cycle_ids": active_ids},
                 "polls_during_window": {**window, "cycle_ids": window_ids}, "recovered_after_host_s": recovered_after_s,
-                "observation": observation, "observation_text": text, "plant_truth": truth}
+                "level_acquisition": level_acquisition, "observation": observation, "observation_text": text, "plant_truth": truth}
 
 
 def summary_of(readings: list[tuple[float, dict[str, float]]], procedure: BestEffortProcedure) -> dict[str, Any]:

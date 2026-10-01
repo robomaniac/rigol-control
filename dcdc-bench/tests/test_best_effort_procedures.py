@@ -13,71 +13,56 @@ from pathlib import Path
 
 import pytest
 
-from dcdc_bench import domain
+from dcdc_bench import domain, standards
 from dcdc_bench.adapters import HoldUpModel, ReadbackModel, StartupModel
 from dcdc_bench.best_effort_procedures import (BEST_EFFORT_TEST_TYPES, LINE_INTERRUPTION_TEST_TYPE, METHOD_KEY,
                                                MICRO_INTERRUPTION_TEST_TYPE, MOMENTARY_DROP_TEST_TYPE, TRANSIENT_HOLD_TEST_TYPE,
                                                BestEffortProcedure, best_effort_approval_gaps, best_effort_mock_estimate,
                                                declared_deviations_sha256, deviation_sheet_sha256, run_best_effort_mock)
+from dcdc_bench.domain import BestEffortPolicy, DeviationSheet
 from dcdc_bench.mock_uvlo import SyntheticUvlo, UvloMockBench
 from dcdc_bench.planning import build_plan
 from dcdc_bench.runner import run_mock
 from dcdc_bench.services import acquire_mock, default_plan
 from dcdc_bench.storage import verify_integrity
 
-try:
-    from dcdc_bench.domain import BestEffortPolicy, DeviationSheet
-except ImportError:  # transitional: the shared contract is not in this checkout yet
-    from dcdc_bench._best_effort_contract import BestEffortPolicy, DeviationSheet
-
 POLICY_ID = "synthetic-best-effort-v1"
 LOAD_A = .1
 LAN_ROUND_TRIP_MAX_S = .055
 EPS = 1e-6  # virtual-clock float accumulation
+SYSTEM = "12V"
+# Declared stimuli per test type. Each names the catalog clause and variant whose deviation sheet it carries
+# (standards.deviation_sheet builds it, as the generated recipes do). The hold lasts the settling dwell plus an
+# acquisition window at the level (1 s + 1.25 s at the 0.25 s poll); the drop and the interruptions do not.
 DEFAULTS = {
-    TRANSIENT_HOLD_TEST_TYPE: dict(clause="4.3.1.2", variant="jump-start", level_V=26., hold_s=2., repeats=2, recovery_s=1., mechanism="lan_voltage_step"),
+    TRANSIENT_HOLD_TEST_TYPE: dict(clause="4.3.1.2", variant=None, level_V=26., hold_s=3., repeats=2, recovery_s=1., mechanism="lan_voltage_step"),
     MOMENTARY_DROP_TEST_TYPE: dict(clause="4.6.1.1", variant="A", drop_level_V=4.5, drop_s=.1, repeats=1, recovery_s=2., mechanism="lan_voltage_step"),
-    MICRO_INTERRUPTION_TEST_TYPE: dict(clause="4.6.1.2", variant="1 s", interruption_s=1., repeats=2, recovery_s=2., mechanism="lan_output_off"),
-    LINE_INTERRUPTION_TEST_TYPE: dict(clause="4.9.2", variant="method 1, positive line", interruption_s=10., repeats=1, recovery_s=2.,
-                                      mechanism="lan_output_off"),
+    MICRO_INTERRUPTION_TEST_TYPE: dict(clause="4.6.1.2", variant="case2-1s", interruption_s=1., repeats=2, recovery_s=2., mechanism="lan_output_off"),
+    LINE_INTERRUPTION_TEST_TYPE: dict(clause="4.9.2", variant=None, interruption_s=10., repeats=1, recovery_s=2., mechanism="lan_output_off"),
 }
 BASES = {TRANSIENT_HOLD_TEST_TYPE: 10.8, MOMENTARY_DROP_TEST_TYPE: 12., MICRO_INTERRUPTION_TEST_TYPE: 12., LINE_INTERRUPTION_TEST_TYPE: 12.}
 
 
-def entry(parameter, unit, required, achievable, mechanism, measured_by, classification, note=None):
-    return {"parameter": parameter, "unit": unit, "required": required, "achievable": achievable, "mechanism": mechanism,
-            "measured_by": measured_by, "classification": classification, "note": note}
+def make_sheet(values, dut, *, exact=False) -> DeviationSheet:
+    """The catalog's declared sheet for the clause and variant a stimulus names (``system`` picks the 12 V or 24 V figures)."""
+    return standards.deviation_sheet(values["clause"], values.get("system", SYSTEM), dut, variant=values.get("variant"),
+                                     program_clause_level_exactly=exact)
 
 
-def make_sheet(kind, values) -> DeviationSheet:
-    """A plausible declared sheet per test type (the standards work builds the real ones; the procedure takes any)."""
-    mech = values["mechanism"]
-    rows = []
-    if kind == TRANSIENT_HOLD_TEST_TYPE:
-        rows = [entry("level_V", "V", {"value": values["level_V"], "tolerance": .2, "basis": "ISO"}, {"value": values["level_V"], "bound": "0.1 % + 25 mV", "basis": "DS5"}, mech, "none", "met"),
-                entry("hold_s", "s", {"value": values["hold_s"], "tolerance": .1 * values["hold_s"], "basis": "ISO"}, {"value": values["hold_s"], "bound": "+173 ms worst", "basis": "LAN"}, mech, "host_clock", "met"),
-                entry("edge_max_s", "s", {"value": .01, "tolerance": None, "basis": "ISO"}, {"value": None, "bound": "< 110 ms loaded", "basis": "DS5"}, mech, "none", "not_met_but_documented", "supply slew, not an edge generator"),
-                entry("repeats", "1", {"value": values["repeats"], "tolerance": None, "basis": "ISO"}, {"value": values["repeats"], "bound": None, "basis": "derived"}, mech, "host_clock", "met"),
-                entry("rest_s", "s", {"value": values["recovery_s"], "tolerance": .05 * values["recovery_s"], "basis": "ISO"}, {"value": values["recovery_s"], "bound": "+173 ms worst", "basis": "LAN"}, mech, "host_clock", "met")]
-    elif kind == MOMENTARY_DROP_TEST_TYPE:
-        rows = [entry("drop_level_V", "V", {"value": values["drop_level_V"], "tolerance": .2, "basis": "ISO-fig"}, {"value": values["drop_level_V"], "bound": "fall < 800 ms unloaded", "basis": "DS5"}, mech, "none", "unknown_until_measured", "depth may not be reached before the restore"),
-                entry("drop_s", "s", {"value": values["drop_s"], "tolerance": .005, "basis": "ISO-fig"}, {"value": values["drop_s"], "bound": "0-270 ms terminal side", "basis": "derived"}, mech, "host_clock", "unknown_until_measured"),
-                entry("edge_max_s", "s", {"value": .01, "tolerance": None, "basis": "ISO"}, {"value": None, "bound": "< 110 ms loaded", "basis": "DS5"}, mech, "none", "not_met_but_documented"),
-                entry("recovery_s", "s", {"value": values["recovery_s"], "tolerance": None, "basis": "ISO"}, {"value": values["recovery_s"], "bound": None, "basis": "LAN"}, mech, "host_clock", "met")]
-    else:
-        rows = [entry("interruption_s", "s", {"value": values["interruption_s"], "tolerance": .05 * values["interruption_s"], "basis": "ISO"}, {"value": values["interruption_s"], "bound": "+173 ms worst over LAN; exact by Delayer", "basis": "LAN"}, mech, "host_clock", "unknown_until_measured" if mech == "lan_output_off" else "met"),
-                entry("recovery_s", "s", {"value": values["recovery_s"], "tolerance": None, "basis": "ISO"}, {"value": values["recovery_s"], "bound": None, "basis": "LAN"}, mech, "host_clock", "met"),
-                entry("open_impedance_ohm", "ohm", {"value": 1e7, "tolerance": None, "basis": "ISO"}, {"value": None, "bound": "source output OFF; OFF-state impedance unverified", "basis": "UNV"}, mech, "none", "approximated"),
-                entry("transition_s", "s", {"value": 1e-5, "tolerance": None, "basis": "ISO"}, {"value": None, "bound": "command acts within < 118 ms", "basis": "DS5"}, mech, "none", "unknown_until_measured"),
-                entry("repeats", "1", {"value": values["repeats"], "tolerance": None, "basis": "ISO"}, {"value": values["repeats"], "bound": None, "basis": "derived"}, mech, "host_clock", "met")]
-    return DeviationSheet.model_validate({"schema_version": "1.0", "standard": "ISO 16750-2:2023", "clause": values["clause"],
-                                          "variant": values["variant"], "entries": rows,
-                                          "statement": f"ISO 16750-2 clause {values['clause']} realised by {mech} on this bench; deviations recorded"})
-
-
-def policy(kind, **overrides) -> BestEffortPolicy:
+def policy(kind, dut, *, exact=False, **overrides) -> BestEffortPolicy:
     values = {**DEFAULTS[kind], **overrides}
-    return BestEffortPolicy(**values, deviation_sheet=make_sheet(kind, values))
+    sheet = make_sheet(values, dut, exact=exact)
+    values.pop("system", None)
+    return BestEffortPolicy(**values, deviation_sheet=sheet)
+
+
+def targets(kind, base_V, stimulus) -> list[float]:
+    """The planner's shape: the base and the stimulus level for a hold or a drop, the base alone for an interruption."""
+    if kind == TRANSIENT_HOLD_TEST_TYPE:
+        return [base_V, stimulus.level_V]
+    if kind == MOMENTARY_DROP_TEST_TYPE:
+        return [base_V, stimulus.drop_level_V]
+    return [base_V]
 
 
 def profiles(kind, *, approved=True, mode="mock", accepted="declared", uvlo_approved=True, base_V=None, bound_s=60., exact=False,
@@ -93,13 +78,17 @@ def profiles(kind, *, approved=True, mode="mock", accepted="declared", uvlo_appr
     bench.mode, recipe.execution_mode = mode, None
     bench.protective_controls.policy_id = POLICY_ID
     bench.protective_controls.source_current_limit_A = .5
+    bench.protective_controls.dut_input_overvoltage_V = 38.
     bench.protective_controls.dut_output_overvoltage_V = 13.2
     bench.protective_controls.output_overcurrent_A = .15
     if tests is None:
         tests = [("stimulus", kind, overrides)]
-    recipe.tests = [domain.TestDefinition(id=test_id, type=test_kind, input_voltage_targets_V=[base_V or BASES[test_kind]],
-                                          output_current_targets_A=[LOAD_A], best_effort=policy(test_kind, **test_overrides))
-                    for test_id, test_kind, test_overrides in tests]
+    definitions = []
+    for test_id, test_kind, test_overrides in tests:
+        stimulus = policy(test_kind, dut, exact=exact, **test_overrides)
+        definitions.append(domain.TestDefinition(id=test_id, type=test_kind, output_current_targets_A=[LOAD_A], best_effort=stimulus,
+                                                 input_voltage_targets_V=targets(test_kind, base_V or BASES[test_kind], stimulus)))
+    recipe.tests = definitions
     recipe.standard_clause = f"ISO 16750-2:2023 §{recipe.tests[0].best_effort.clause}"
     recipe.authorization.protective_policy_id = POLICY_ID
     recipe.authorization.best_effort_approved = approved
@@ -135,12 +124,15 @@ def achieved(run, parameter, test_id="stimulus"):
 # --- contracts, hashes and the approval gate -----------------------------------------------------------------
 
 def test_sheet_hash_is_canonical_and_changes_with_any_parameter():
-    first, again = make_sheet(TRANSIENT_HOLD_TEST_TYPE, DEFAULTS[TRANSIENT_HOLD_TEST_TYPE]), make_sheet(TRANSIENT_HOLD_TEST_TYPE, DEFAULTS[TRANSIENT_HOLD_TEST_TYPE])
-    assert deviation_sheet_sha256(first) == deviation_sheet_sha256(again) and len(deviation_sheet_sha256(first)) == 64
-    changed = make_sheet(TRANSIENT_HOLD_TEST_TYPE, {**DEFAULTS[TRANSIENT_HOLD_TEST_TYPE], "hold_s": 60.})
-    assert deviation_sheet_sha256(changed) != deviation_sheet_sha256(first)
+    dut = default_plan().dut
+    first, again = make_sheet(DEFAULTS[TRANSIENT_HOLD_TEST_TYPE], dut), make_sheet(DEFAULTS[TRANSIENT_HOLD_TEST_TYPE], dut)
+    assert deviation_sheet_sha256(first) == deviation_sheet_sha256(again) == first.sha256() and len(deviation_sheet_sha256(first)) == 64
+    other_variant = make_sheet({"clause": "4.3.2", "variant": "B"}, dut)
+    assert deviation_sheet_sha256(other_variant) != deviation_sheet_sha256(first)
+    edited = DeviationSheet.model_validate({**first.model_dump(mode="json"), "statement": first.statement + " (edited)"})
+    assert deviation_sheet_sha256(edited) != deviation_sheet_sha256(first), "any edit to the declared sheet invalidates its hash"
     with pytest.raises(ValueError, match="needs a mechanism"):
-        policy(TRANSIENT_HOLD_TEST_TYPE, mechanism="none")
+        policy(TRANSIENT_HOLD_TEST_TYPE, dut, mechanism="none")
 
 
 def test_approval_gate_refuses_until_the_sheet_is_accepted_and_grants_an_approved_recipe(tmp_path):
@@ -149,7 +141,7 @@ def test_approval_gate_refuses_until_the_sheet_is_accepted_and_grants_an_approve
     assert "recipe authorization.best_effort_approved is false" in gaps and any("accepted_deviations_sha256 is not declared" in gap for gap in gaps)
     with pytest.raises(ValueError, match="approval gate.*best_effort_approved is false"):
         BestEffortProcedure(build_plan(dut, bench, recipe))
-    with pytest.raises(ValueError, match="accepted deviation sheet hash does not match"):
+    with pytest.raises(ValueError, match="accepted_deviations_sha256 does not match the declared deviation sheet"):
         BestEffortProcedure(build_plan(*profiles(MICRO_INTERRUPTION_TEST_TYPE, accepted="wrong")))
     # Levels below the DUT minimum (0 V during an interruption, the 4.5 V drop) need the UVLO-style approval as well.
     with pytest.raises(ValueError, match="approved UVLO-style path.*uvlo_approved is false"):
@@ -173,23 +165,23 @@ def test_approval_gate_refuses_until_the_sheet_is_accepted_and_grants_an_approve
         BestEffortProcedure(build_plan(*profiles(TRANSIENT_HOLD_TEST_TYPE, hold_s=3000., repeats=1, bound_s=5000., recovery_s=1.)))
     # Owner decision 6: the clause level at the DUT ceiling only with program_clause_level_exactly.
     with pytest.raises(ValueError, match="endpoint margin.*program_clause_level_exactly"):
-        BestEffortProcedure(build_plan(*profiles(TRANSIENT_HOLD_TEST_TYPE, level_V=36., base_V=24.)))
-    exact = BestEffortProcedure(build_plan(*profiles(TRANSIENT_HOLD_TEST_TYPE, level_V=36., base_V=24., exact=True)))
+        BestEffortProcedure(build_plan(*profiles(TRANSIENT_HOLD_TEST_TYPE, clause="4.3.1.1", system="24V", level_V=36., base_V=24.)))
+    exact = BestEffortProcedure(build_plan(*profiles(TRANSIENT_HOLD_TEST_TYPE, clause="4.3.1.1", system="24V", level_V=36., base_V=24., exact=True)))
     assert exact.programmed["stimulus"]["program_clause_level_exactly"] is True and exact.programmed["stimulus"]["source_ovp_V"] == 38.
     with pytest.raises(ValueError, match="exceeds the DUT maximum"):
-        BestEffortProcedure(build_plan(*profiles(TRANSIENT_HOLD_TEST_TYPE, level_V=37., exact=True)))
+        BestEffortProcedure(build_plan(*profiles(TRANSIENT_HOLD_TEST_TYPE, clause="4.3.1.1", system="24V", level_V=37., base_V=24., exact=True)))
     # Granted: the procedure is a TestProcedure with a populated method block and no global safety switch.
     procedure = BestEffortProcedure(build_plan(*profiles(TRANSIENT_HOLD_TEST_TYPE)))
     assert isinstance(procedure, domain.TestProcedure) and procedure.adapter is UvloMockBench
     method = procedure.metadata()["method"][METHOD_KEY]
-    assert method["test_type"] == TRANSIENT_HOLD_TEST_TYPE and method["clause"] == "4.3.1.2" and method["variant"] == "jump-start"
+    assert method["test_type"] == TRANSIENT_HOLD_TEST_TYPE and method["clause"] == "4.3.1.2" and method["variant"] is None
     assert method["approval"]["best_effort_approved"] and method["approval"]["accepted_deviations_sha256"] == method["approval"]["declared_deviations_sha256"]
-    assert [e["parameter"] for e in method["deviations"]] == ["level_V", "hold_s", "edge_max_s", "repeats", "rest_s"]
+    assert [e["parameter"] for e in method["deviations"]] == ["level_V", "hold_s", "edge_rise_s", "edge_fall_s", "rest_s", "repetitions"], "the catalog sheet, verbatim"
     assert all(e["achieved"] == {"value": None, "measured_by": "none", "note": e["achieved"]["note"]} for e in method["deviations"]), "nothing achieved before the run"
     assert method["tests"]["stimulus"]["programmed"]["source_ovp_V"] == 28. and method["tests"]["stimulus"]["programmed"]["source_ocp_A"] == .55
     assert "ignore_safety" not in json.dumps(procedure.metadata())
     assert any("not approved for real hardware" in note for note in procedure.metadata()["metrology_limitations"])
-    assert any(note.startswith("Deviation sheet, ISO 16750-2 clause 4.3.1.2, edge_max_s: not met but documented") for note in procedure.metadata()["metrology_limitations"])
+    assert any(note.startswith("Deviation sheet, ISO 16750-2 clause 4.3.1.2, edge_rise_s: not met but documented") for note in procedure.metadata()["metrology_limitations"])
     estimate = best_effort_mock_estimate(procedure.plan())
     assert estimate["within_budget"] and estimate["records"] == method["run_budget"]["records"]
 
@@ -221,11 +213,13 @@ def test_transient_hold_completes_with_host_clock_intervals_and_the_converter_on
     assert sum(e["event"] == "command" for e in events) == 4
     # Achieved: the hold interval is host-timed (write to write, the driver's two pre-checks included) within the LAN spread.
     hold = achieved(run, "hold_s")
-    assert hold["measured_by"] == "host_clock" and 2. - EPS <= hold["min"] <= hold["max"] <= 2. + 2 * LAN_ROUND_TRIP_MAX_S + EPS and len(hold["values"]) == 2
+    assert hold["measured_by"] == "host_clock" and 3. - EPS <= hold["min"] <= hold["max"] <= 3. + 2 * LAN_ROUND_TRIP_MAX_S + EPS and len(hold["values"]) == 2
     rest = achieved(run, "rest_s")
     assert rest["measured_by"] == "host_clock" and 1. - EPS <= rest["min"] and rest["max"] < 1.1
-    assert achieved(run, "repeats") == {"value": 2, "measured_by": "host_clock", "note": "repeats completed, counted by the host (2 declared)"}
-    assert achieved(run, "level_V")["measured_by"] == "none" and achieved(run, "edge_max_s")["value"] is None
+    assert achieved(run, "repetitions") == {"value": 2, "measured_by": "host_clock", "note": "repeats completed, counted by the host (2 declared)"}
+    level = achieved(run, "level_V")
+    assert level["measured_by"] == "supply_readback" and level["value"] == pytest.approx(26., abs=.05), "the source readback saw the hold level"
+    assert achieved(run, "edge_rise_s") == {"value": None, "measured_by": "none", "note": achieved(run, "edge_rise_s")["note"]}
     assert all(e["test_id"] == "stimulus" for e in method["deviations"]) and method["statement"] == detail["statement"]
     # The converter stayed on at 26 V: every poll inside the hold saw the output in band and nothing tripped.
     for repeat in detail["repeats"]:
@@ -236,6 +230,13 @@ def test_transient_hold_completes_with_host_clock_intervals_and_the_converter_on
     point = run["points"][0]
     assert point["qualification"] == "valid" and point["output_state"] == "on" and point["repeats_completed"] == 2 and not point["plant_tripped_any_repeat"]
     assert point["acquisition_cycle_ids"] == detail["repeats"][-1]["observation"]["cycle_ids"] and point["accepted_means"]["Vin_V"] == pytest.approx(10.8, abs=.01)
+    # The planner's second point, the 26 V hold level, is a measured point: a settled acquisition inside each 3 s hold.
+    level_point = run["points"][1]
+    assert level_point["vin_target_V"] == 26. and level_point["qualification"] == "valid" and level_point["output_state"] == "on"
+    assert level_point["acquisitions_at_level"] == 2 and level_point["accepted_means"]["Vin_V"] == pytest.approx(26., abs=.05)
+    assert len(level_point["acquisition_cycle_ids"]) >= 6 and all(r["level_acquisition"]["settled"] for r in detail["repeats"])
+    assert all(s["point_id"] == "p0002" for s in samples if s["acquisition_cycle_id"] in level_point["acquisition_cycle_ids"])
+    assert {s["phase"] for s in samples if s["point_id"] == "p0002"} == {"hold", "acquiring"}, "the level point owns the polls inside the hold"
     hold_samples = [s for s in samples if s["phase"] == "hold"]
     assert hold_samples and {s["acquisition_settings"]["procedure_stage"] for s in hold_samples} == {"hold"}
     assert all(s["acquisition_settings"]["output_off_expected"] is False for s in hold_samples), "no expected-off phase in a hold"
@@ -243,11 +244,13 @@ def test_transient_hold_completes_with_host_clock_intervals_and_the_converter_on
     other, _ = evidence(run_best_effort_mock(plan, tmp_path))
     assert other["method"][METHOD_KEY]["tests"]["stimulus"]["commands"] == commands and other["duration_s"] == run["duration_s"]
     # The 4.3.2 shape: five short holds at 18 V from 16 V, one second apart (owner decision 7).
-    transient = build_plan(*profiles(TRANSIENT_HOLD_TEST_TYPE, clause="4.3.2", variant="400 ms plateau", level_V=18., hold_s=.4, repeats=5, recovery_s=1., base_V=16.))
+    transient = build_plan(*profiles(TRANSIENT_HOLD_TEST_TYPE, clause="4.3.2", variant="A", level_V=18., hold_s=.4, repeats=5, recovery_s=1., base_V=16.))
     run2, _ = evidence(run_best_effort_mock(transient, tmp_path))
     assert run2["execution_status"] == "completed" and len(run2["method"][METHOD_KEY]["tests"]["stimulus"]["repeats"]) == 5
     assert all(r["polls_during_stimulus"]["cycles"] == 1 for r in run2["method"][METHOD_KEY]["tests"]["stimulus"]["repeats"]), "one 0.25 s poll fits a 0.4 s hold"
-    assert achieved(run2, "hold_s")["min"] >= .4 - EPS and achieved(run2, "repeats")["value"] == 5
+    assert achieved(run2, "pulse_s")["min"] >= .4 - EPS and achieved(run2, "repetitions")["value"] == 5, "the clause's pulse row is the hold"
+    short_level = run2["points"][1]
+    assert short_level["qualification"] == "inconclusive" and "shorter than the 1 s settling dwell" in short_level["reason"], "0.4 s cannot settle"
 
 
 def test_momentary_drop_variant_a_over_lan_and_variant_b_by_the_supply_timer(tmp_path):
@@ -260,9 +263,13 @@ def test_momentary_drop_variant_a_over_lan_and_variant_b_by_the_supply_timer(tmp
     assert repeat["plant_truth"]["tripped"] and repeat["plant_truth"]["restarted"], "4.5 V is below the synthetic UVLO: trip and restart through the soft start"
     assert repeat["recovered_after_host_s"] is not None and .5 < repeat["recovered_after_host_s"] < 1.5, "soft start (0.3 s) reaches 90 % within about 0.7 s, seen at the poll cadence"
     assert repeat["observation"]["state"] == "on" and run["points"][0]["qualification"] == "valid" and run["points"][0]["plant_tripped_any_repeat"]
-    drop = achieved(run, "drop_s")
+    drop = achieved(run, "drop_duration_s")
     assert drop["measured_by"] == "host_clock" and .1 - EPS <= drop["value"] <= .1 + 5 * LAN_ROUND_TRIP_MAX_S + EPS
-    assert achieved(run, "drop_level_V")["measured_by"] == "none" and achieved(run, "recovery_s")["value"] >= 2. - EPS
+    assert achieved(run, "drop_level_V")["measured_by"] == "none", "no poll fell inside the 100 ms drop: the level is commanded, not observed"
+    assert repeat["intervals_host_s"]["recovery_s"] >= 2. - EPS
+    drop_point = run["points"][1]
+    assert drop_point["vin_target_V"] == 4.5 and drop_point["qualification"] == "inconclusive" and "expected off" in drop_point["reason"]
+    assert drop_point["output_off_expected"] is True and drop_point["acquisition_cycle_ids"] == []
     recovery = [s for s in samples if s["phase"] == "recovery"]
     assert recovery and all(s["acquisition_settings"]["output_off_expected"] is True for s in recovery), "output-off is expected during the recovery window"
     assert any(s["quantity"] == "Vout_V" and s["value"] < 10.8 for s in recovery), "the first recovery poll saw the output still below band (soft start under way)"
@@ -280,7 +287,8 @@ def test_momentary_drop_variant_a_over_lan_and_variant_b_by_the_supply_timer(tmp
     repeat_b = detail_b["repeats"][0]
     assert repeat_b["predicted_window"] and repeat_b["polls_during_stimulus"]["cycles"] >= 3 and repeat_b["polls_during_stimulus"]["off"] >= 1
     assert repeat_b["plant_truth"]["tripped"] and repeat_b["observation"]["state"] == "on"
-    drop_b = achieved(run_b, "drop_s")
+    drop_b = achieved(run_b, "drop_duration_s")
+    assert achieved(run_b, "drop_level_V")["measured_by"] == "none", "the sheet declares the drop level unobserved by the ~1 s readback; the polls inside the window stay in the stimulus record"
     assert drop_b["value"] is None and drop_b["measured_by"] == "none" and drop_b["programmed"] == 1 and "instrument-timed" in drop_b["note"]
     assert {s["phase"] for s in samples_b} >= {"programmed", "drop", "recovery", "acquiring", "program-end"}
     events = [json.loads(line) for line in (path_b / "raw/events.jsonl").read_text().splitlines() if line]
@@ -302,7 +310,8 @@ def test_one_second_interruption_restarts_through_soft_start_and_a_short_one_wit
         assert .5 < repeat["recovered_after_host_s"] < 1.5 and repeat["observation"]["state"] == "on"
     interruption = achieved(run, "interruption_s")
     assert interruption["measured_by"] == "host_clock" and 1. - EPS <= interruption["min"] <= interruption["max"] <= 1. + 3 * LAN_ROUND_TRIP_MAX_S + EPS
-    assert achieved(run, "open_impedance_ohm")["measured_by"] == "none" and achieved(run, "transition_s")["value"] is None
+    assert achieved(run, "open_resistance_ohm")["measured_by"] == "none" and achieved(run, "switch_reaction_s")["value"] is None
+    assert achieved(run, "base_V")["measured_by"] == "supply_readback" and achieved(run, "base_V")["value"] == pytest.approx(12., abs=.05)
     interrupted = [s for s in samples if s["phase"] == "interruption"]
     assert interrupted and all(s["acquisition_settings"]["source_mode"] == "OFF" and s["acquisition_settings"]["output_off_expected"] for s in interrupted)
     assert all(abs(s["value"]) < .01 for s in interrupted if s["quantity"] in ("Vin_V", "Iin_A")), "the supply reports its disabled output as 0 V / 0 A (plus the synthetic readback offset)"
@@ -319,7 +328,7 @@ def test_one_second_interruption_restarts_through_soft_start_and_a_short_one_wit
     assert len(offs) == 2 and all(abs((on - off) - 1.) <= .001 for off, on in zip(offs, ons)), "Delayer OFF groups last 1 s within 1 ms"
     assert achieved(run_d, "interruption_s") == {"value": None, "measured_by": "none", "programmed": 1, "note": achieved(run_d, "interruption_s")["note"]}
     # 100 ms over LAN: with the default 470 uF the converter trips; with 10 mF it rides through and nothing on the bench sees the event.
-    short = build_plan(*profiles(MICRO_INTERRUPTION_TEST_TYPE, variant="100 ms", interruption_s=.1, repeats=1))
+    short = build_plan(*profiles(MICRO_INTERRUPTION_TEST_TYPE, variant="case1-100ms", interruption_s=.1, repeats=1))
     tripped, _ = evidence(run_best_effort_mock(short, tmp_path))
     repeat = tripped["method"][METHOD_KEY]["tests"]["stimulus"]["repeats"][0]
     assert tripped["execution_status"] == "completed" and repeat["plant_truth"]["tripped"] and repeat["polls_during_stimulus"]["cycles"] == 0
@@ -360,7 +369,7 @@ def test_stop_signals_preserve_the_completed_test_and_the_partial_cycle(tmp_path
     sent = []
 
     def interrupt_second_test(quantity, value, point, phase):
-        if point["point_id"] == "p0002" and phase == "acquiring" and quantity == "Iin_A":
+        if point["point_id"] == "p0003" and phase == "acquiring" and quantity == "Iin_A":
             sent.append(stop_signal)
             signal.raise_signal(stop_signal)
         return value
@@ -369,9 +378,11 @@ def test_stop_signals_preserve_the_completed_test_and_the_partial_cycle(tmp_path
     run, samples = evidence(path)
     assert sent == [stop_signal] and run["execution_status"] == expected_status and run["errors"]
     assert run["points"][0]["qualification"] == "valid" and run["points"][0]["acquisition_cycle_ids"]
-    assert run["points"][1]["qualification"] == "inconclusive" and run["points"][1]["acquisition_cycle_ids"] == []
+    assert run["points"][1]["qualification"] == "valid", "the completed hold's level point survives the stop"
+    assert run["points"][2]["qualification"] == "inconclusive" and run["points"][2]["acquisition_cycle_ids"] == []
+    assert run["points"][3]["qualification"] != "valid" and run["points"][3]["acquisition_cycle_ids"] == []
     assert run["method"][METHOD_KEY]["tests"]["hold-1"]["completed"] and not run["method"][METHOD_KEY]["tests"]["hold-2"]["completed"]
-    partial = [row for row in samples if row["point_id"] == "p0002" and row["phase"] == "acquiring"]
+    partial = [row for row in samples if row["point_id"] == "p0003" and row["phase"] == "acquiring"]
     assert [row["quantity"] for row in partial] == ["Vin_V"]
     assert verified_off(run)
     assert {number: signal.getsignal(number) for number in previous} == previous
@@ -503,7 +514,7 @@ def test_mock_best_effort_path_imports_no_real_driver_modules():
     forbidden = {"benchctl", "pyvisa", "dcdc_bench.bringup", "dcdc_bench.extended", "dcdc_bench.real_backend",
                  "dcdc_bench.source_limit", "dcdc_bench.startup_descent", "dcdc_bench.voltage_sweep"}
     source_dir = Path(domain.__file__).parent
-    for name in ("best_effort_procedures.py", "_best_effort_contract.py", "mock_uvlo.py", "adapters.py"):
+    for name in ("best_effort_procedures.py", "mock_uvlo.py", "adapters.py"):
         if not (source_dir / name).exists():
             continue
         tree = ast.parse((source_dir / name).read_text())

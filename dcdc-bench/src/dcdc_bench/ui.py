@@ -1270,7 +1270,7 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                         # The catalog's status word is shown as it comes; "runs here" is the only green badge.
                         # An approval-first or mock-only clause is amber, never green.
                         style = ('bench-badge-ok' if row['badge'] == 'runs_here' else
-                                 'bench-badge-partial' if row['badge'] in ('procedure_pending', 'runs_after_approval', 'mock_only', 'needs_split')
+                                 'bench-badge-partial' if row['badge'] in ('procedure_pending', 'runs_after_approval', 'best_effort', 'mock_only', 'needs_split')
                                  or row['tickable'] else 'bench-badge-grey')
                         badge = ui.label(row['badge_label']).classes('bench-badge ' + style)
                         ui.label(row['levels']).classes('bench-muted')

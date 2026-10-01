@@ -205,6 +205,16 @@ low-sensitivity and all now public on the branch:
    Pages serves that merged tree. Still open: `main` was 49 commits behind
    the branch on 2026-09-30; a new pull request (the link `git push` prints)
    is the way to update it, never a direct push to `main`.
+6. **Best-effort ISO 16750-2, three open questions** from
+   [best-effort-proposal.md §7](dcdc-bench/docs/standards/best-effort-proposal.md):
+   whether §4.6.3 stays grey or gets a one-second-segment approximation; whether
+   §4.7 reversal through a DPDT switch box is an owner-approved policy exception
+   or stays excluded; and whether the DP821A's digital I/O (trigger) terminal is
+   fitted, which decides Pi-GPIO versus instrument trigger lines for the switch
+   box ([switch-box-design.md](dcdc-bench/docs/standards/switch-box-design.md)).
+   Approving any generated best-effort recipe is also the owner's act: set
+   `authorization.best_effort_approved` and `accepted_deviations_sha256` in the
+   saved recipe (the catalog row says so); nothing on the page does it.
 
 ## 9. Next bounded tasks, in order
 
@@ -259,6 +269,22 @@ parameters only — never copy the standard's text; never invent a clause
 association to fill a field (owner's rule). Test total: see section 4 (one
 current collected figure with its date; the "832 non-browser tests" quoted
 here on 2026-09-29 was a pytest run total that included parametrized cases).
+
+On 2026-10-01 the owner reviewed the **best-effort ISO 16750-2 proposal**
+(`docs/standards/best-effort-proposal.md`, decisions in its §8) and it was
+implemented, mock only: `standards.py` declares a deviation sheet per clause
+(what the clause asks against what this bench commands, classified by one rule
+in `domain.classify_deviation`), `standard_recipes.py` writes §4.3.1.2, §4.3.2,
+§4.6.1.1, §4.6.1.2, §4.9.1 and §4.9.2 as unapproved recipes carrying the sheet,
+`planning.py` gates them (`best_effort_approved` plus the accepted sheet hash,
+the UVLO approval below the converter's minimum, a declared bound for phases
+over 720 s), `best_effort_procedures.py` runs the four types on the synthetic
+plant with host-clock command timestamps or the supply's Timer/Delayer, and the
+report prints the sheet with an achieved column. "Commanded, not measured" is
+the standing caveat for every terminal-side timing until a scope or DAQ exists;
+the real path refuses the types. The merged tree carried a temporary contract
+shim (`_best_effort_contract.py`) for one commit; it is deleted and must not
+come back — the contract lives in `domain.py`.
 
 Remaining, in order:
 0. **Cross-check the owner's 34-item characterization list against IEC/ISO**
