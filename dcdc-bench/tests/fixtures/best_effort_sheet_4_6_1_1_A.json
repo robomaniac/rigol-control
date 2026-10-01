@@ -1,0 +1,63 @@
+{
+  "clause": "4.6.1.1",
+  "variant": "A",
+  "test_type": "momentary_drop",
+  "deviations": [
+    {
+      "parameter": "drop_level_V",
+      "unit": "V",
+      "required": {"value": 4.5, "tolerance": 0.2, "basis": "ISO"},
+      "achievable": {"value": 4.5, "bound": "may not be reached before the restore command; unloaded fall < 800 ms", "basis": "DS5"},
+      "mechanism": "lan_voltage_step",
+      "measured_by": "none",
+      "classification": "unknown_until_measured",
+      "note": "The converter drops out below 9 V and draws standby current, so the fall approaches the unloaded case.",
+      "achieved": {"value": null, "measured_by": "none", "note": "depth at the converter not measured"}
+    },
+    {
+      "parameter": "drop_duration_s",
+      "unit": "s",
+      "required": {"value": 0.1, "tolerance": 0.005, "basis": "ISO"},
+      "achievable": {"value": 0.1, "bound": [0.0, 0.27], "basis": "derived"},
+      "mechanism": "lan_voltage_step",
+      "measured_by": "host_clock",
+      "classification": "unknown_until_measured",
+      "note": "Two LAN writes, each 4–55 ms transport (LAN) and up to 118 ms processing (DS5).",
+      "achieved": {"value": 0.103, "measured_by": "host_clock", "note": "interval between the two write timestamps on the Pi"}
+    },
+    {
+      "parameter": "edge_max_s",
+      "unit": "s",
+      "required": {"value": 0.01, "tolerance": "max", "basis": "ISO"},
+      "achievable": {"value": null, "bound": "< 110 ms loaded", "basis": "DS5"},
+      "mechanism": "supply_slew",
+      "measured_by": "none",
+      "classification": "not_met_but_documented",
+      "note": "The supply's loaded fall and rise bound exceeds the clause edge.",
+      "achieved": {"value": null, "measured_by": "none", "note": null}
+    },
+    {
+      "parameter": "recovery_s",
+      "unit": "s",
+      "required": {"value": 10.0, "tolerance": 0.5, "basis": "ISO"},
+      "achievable": {"value": 10.0, "bound": [10.0, 10.173], "basis": "derived"},
+      "mechanism": "lan_voltage_step",
+      "measured_by": "host_clock",
+      "classification": "met",
+      "note": "LAN worst case +173 ms lies inside ± 0.5 s.",
+      "achieved": {"value": 10.021, "measured_by": "host_clock", "note": null}
+    },
+    {
+      "parameter": "operating_mode",
+      "unit": null,
+      "required": {"value": "3.4", "tolerance": null, "basis": "ISO"},
+      "achievable": {"value": "bounded light load", "bound": null, "basis": "SEED"},
+      "mechanism": "steady_level",
+      "measured_by": "none",
+      "classification": "approximated",
+      "note": "Operating mode 3.4 realised as a fixed light load within the bench envelope.",
+      "achieved": null
+    }
+  ],
+  "statement": "Variant A commanded over LAN; nothing at the converter terminals is measured."
+}

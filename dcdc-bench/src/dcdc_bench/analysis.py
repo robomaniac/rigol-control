@@ -173,6 +173,10 @@ class ReportModel(Contract):
         "status": "not_evaluated", "metrology": "unquantified", "evaluated_point_ids": [],
         "note": "No readback uncertainty budget was evaluated for this analysis; no bands or resolved-difference verdicts are shown."})
     thermal: dict[str, Any] | None = None
+    # Best-effort ISO 16750-2 run: the deviation sheet as built by build_best_effort_sheet
+    # (entries verbatim plus display cells, counts, basis legend, summary sentence and
+    # the mandatory no-compliance statement). Absent for every other run.
+    best_effort: dict[str, Any] | None = None
 
     @model_validator(mode="after")
     def references_exist(self) -> ReportModel:
@@ -771,6 +775,9 @@ def analyze_evidence(plan: Plan, run: dict, samples: list[dict], *, version: str
                                  observed_conditions={"ambient_temperature_C": run.get("ambient_temperature_C")})
     for p in points:
         p["metrology"] = budget["points"][p["point_id"]]["metrology"]
+    # A best-effort ISO 16750-2 run records its deviation sheet in the method block;
+    # the analysis carries it verbatim so the report and the export read one copy.
+    best_effort = (run.get("method") or {}).get("best_effort")
     return {"schema_version": "1.0", "formula_version": version,
             "aggregation": "Metrics from qualified channel means over accepted complete acquisition cycles",
             "sign_convention": "Positive power enters input boundary and leaves output boundary; no absolute-value correction",
@@ -779,7 +786,8 @@ def analyze_evidence(plan: Plan, run: dict, samples: list[dict], *, version: str
             "points": points, "coverage": coverage_by_test(points),
             "uncertainty": budget,
             **({"uvlo_input_ramp": uvlo} if uvlo else {}),
-            **({"supply_profiles": profiles} if profiles else {})}
+            **({"supply_profiles": profiles} if profiles else {}),
+            **({"best_effort": copy.deepcopy(best_effort)} if best_effort else {})}
 
 
 def _finite_number(value: Any) -> float | None:
@@ -1352,6 +1360,322 @@ def _flag_figure_captions(figures: list[FigureSpec], points: list[dict]) -> None
                                   if phase["skipped"] else "."))
 
 
+# --- Best-effort ISO 16750-2 runs: the deviation sheet in the report -----------------------------------
+# docs/standards/best-effort-proposal.md §2.2–2.3 and §8. The procedure records
+# run["method"]["best_effort"] (clause, variant, one entry per clause parameter);
+# the analysis carries it verbatim and derives every sentence here from the
+# entries by template, never from free text. "Commanded, not measured" is the
+# accepted wording (§8, decision 3): host write timestamps are "host-timed" and
+# nothing at the converter terminals is called measured until a scope or DAQ exists.
+BEST_EFFORT_STANDARD = "ISO 16750-2"
+BEST_EFFORT_CLASSIFICATIONS = ("met", "approximated", "not_met_but_documented", "unknown_until_measured")
+BEST_EFFORT_CLASSIFICATION_LABELS = {"met": "met", "approximated": "approximated",
+                                     "not_met_but_documented": "not met, documented",
+                                     "unknown_until_measured": "unknown until measured"}
+BEST_EFFORT_COUNT_WORDS = {"met": "met", "approximated": "approximated",
+                           "not_met_but_documented": "not met", "unknown_until_measured": "not measured"}
+# Mandatory wherever a sheet exists: the first-page summary, the sheet section, the appendix and the export.
+BEST_EFFORT_STATEMENT = "No clause-compliance result is claimed; the sheet records deviations."
+BEST_EFFORT_POLL_NOTE = ("Observed output states come from about 1 s polling; states shorter than the poll "
+                         "interval are not visible to this bench.")
+# Basis tags (§2.2) with their legend; a tag outside this list is shown as recorded.
+BEST_EFFORT_BASES = {
+    "ISO": "ISO 16750-2 clause text or figure",
+    "DS5": "supply datasheet bound",
+    "PG": "instrument timer or delayer clock",
+    "LAN": "measured LAN command transport",
+    "DRV": "driver round-trip count",
+    "RB": "supply readback (about 1 s refresh)",
+    "SEED": "seeded bench profile or protective policy",
+    "DUT": "DUT profile rating",
+    "ENV": "bench envelope or duration policy",
+    "MOCK": "synthetic plant parameter",
+    "derived": "derived from the tagged bounds",
+    "UNV": "unverified; stated by no document read",
+}
+# Mechanism vocabulary (§2.2): the sentence phrase and the table label.
+BEST_EFFORT_MECHANISMS = {
+    "lan_voltage_step": ("a voltage step over LAN", "LAN voltage step"),
+    "lan_output_off_on": ("an output OFF/ON interruption over LAN", "LAN output OFF/ON"),
+    "timer_group": ("an instrument-timed Timer program", "Timer group"),
+    "delayer_group": ("an instrument-timed Delayer program", "Delayer group"),
+    "steady_level": ("a steady level", "steady level"),
+    "supply_slew": ("the supply's own slew", "supply slew"),
+}
+BEST_EFFORT_MEASURED_BY = {"host_clock": "host clock (write timestamps)", "none": "not measured"}
+DEVIATION_COLUMNS = ("parameter", "clause_asks", "this_bench", "mechanism", "measured_by", "classification", "note")
+DEVIATION_HEADERS = ("Parameter", "Clause asks", "This bench", "Mechanism", "Measured by", "Classification", "Note")
+_DEVIATION_UNIT_SUFFIXES = ("V", "s", "ms", "A", "W", "Hz", "ohm", "Ohm", "MOhm", "pct", "K", "C")
+
+
+def _deviation_number(value: float, unit: str) -> tuple[str, str]:
+    """('103', 'ms') from 0.103 s: seconds below one are shown in milliseconds; other units are kept."""
+    if unit == "s" and 0 < abs(value) < 1:
+        return f"{round(value * 1000, 9):g}", "ms"
+    return f"{value:g}", unit
+
+
+def _deviation_quantity(value: Any, unit: str) -> str:
+    """A recorded value as text: numbers with their unit, strings as recorded, nothing for None."""
+    number = _finite_number(value)
+    if number is not None:
+        text, shown = _deviation_number(number, unit)
+        return f"{text} {shown}".strip()
+    return str(value).strip() if isinstance(value, str) else ""
+
+
+def _deviation_bound(bound: Any, unit: str) -> str:
+    """A recorded bound as text: a string verbatim, a number as an upper bound, a pair as a range."""
+    if isinstance(bound, str):
+        return bound.strip()
+    if _finite_number(bound) is not None:
+        return "≤ " + _deviation_quantity(bound, unit)
+    pair = None
+    if isinstance(bound, (list, tuple)) and len(bound) == 2:
+        pair = bound
+    elif isinstance(bound, dict) and {"lower", "upper"} <= set(bound):
+        pair = (bound["lower"], bound["upper"])
+    if pair is not None and all(_finite_number(item) is not None for item in pair):
+        low, low_unit = _deviation_number(float(pair[0]), unit)
+        high, high_unit = _deviation_number(float(pair[1]), unit)
+        if low_unit == high_unit or float(pair[0]) == 0:
+            return f"{low}–{high} {high_unit}".strip()
+        return f"{low} {low_unit}–{high} {high_unit}".strip()
+    return ""
+
+
+def _deviation_requirement(required: dict | None, unit: str) -> str:
+    """'100 ± 5 ms', 'at most 10 ms', '3.4' from a recorded clause value and tolerance."""
+    if not isinstance(required, dict):
+        return ""
+    value, tolerance = required.get("value"), required.get("tolerance")
+    number = _finite_number(value)
+    tolerance_number = _finite_number(tolerance)
+    if number is not None and tolerance_number is not None:
+        # The tolerance follows the value's unit: '100 ± 5 ms', '10 ± 0.5 s'.
+        text, shown = _deviation_number(number, unit)
+        scale = 1000 if shown == "ms" and unit == "s" else 1
+        return f"{text} ± {round(tolerance_number * scale, 9):g} {shown}".strip()
+    quantity = _deviation_quantity(value, unit)
+    if isinstance(tolerance, str) and tolerance.strip():
+        word = tolerance.strip()
+        if word.lower() in ("max", "maximum", "<=", "≤", "at most"):
+            return f"at most {quantity}".strip()
+        if word.lower() in ("min", "minimum", ">=", "≥", "at least"):
+            return f"at least {quantity}".strip()
+        return f"{quantity} {word}".strip()
+    return quantity
+
+
+def _deviation_label(parameter: str) -> str:
+    """'drop duration' from 'drop_duration_s': the unit suffix is dropped, underscores become spaces."""
+    tokens = str(parameter).split("_")
+    if len(tokens) > 1 and tokens[-1] in _DEVIATION_UNIT_SUFFIXES:
+        tokens = tokens[:-1]
+    return " ".join(tokens).strip() or str(parameter)
+
+
+def _deviation_basis(record: dict | None) -> str:
+    basis = record.get("basis") if isinstance(record, dict) else None
+    return str(basis).strip() if isinstance(basis, str) and basis.strip() else ""
+
+
+def _with_basis(text: str, record: dict | None) -> str:
+    basis = _deviation_basis(record)
+    return f"{text} ({basis})" if text and basis else text
+
+
+def _deviation_record(entry: dict, block: str) -> dict:
+    record = entry.get(block)
+    return record if isinstance(record, dict) else {}
+
+
+def _deviation_host_timed(entry: dict) -> str:
+    """'host-timed 103 ms' when the Pi timestamped the interval; '' otherwise (never 'measured')."""
+    achieved = _deviation_record(entry, "achieved")
+    if achieved.get("measured_by") == "host_clock" and _finite_number(achieved.get("value")) is not None:
+        return "host-timed " + _deviation_quantity(achieved["value"], str(entry.get("unit") or ""))
+    return ""
+
+
+def _deviation_not_measured(entry: dict) -> bool:
+    recorded = _deviation_record(entry, "achieved").get("measured_by", entry.get("measured_by"))
+    return recorded in (None, "none", False)
+
+
+def deviation_display(entry: dict) -> dict[str, str]:
+    """The seven table cells of one sheet entry (§2.3 item 1), derived from the record alone.
+
+    The verb "achieved" never appears: the bench commands a value, the host
+    clock times an interval, and anything at the converter is "not measured".
+    """
+    unit = str(entry.get("unit") or "")
+    label = _deviation_label(entry["parameter"])
+    achievable, achieved = _deviation_record(entry, "achievable"), _deviation_record(entry, "achieved")
+    bench: list[str] = []
+    commanded = _deviation_quantity(achievable.get("value"), unit)
+    if commanded:
+        bench.append(f"commanded {commanded}" if _finite_number(achievable.get("value")) is not None else commanded)
+    if host_timed := _deviation_host_timed(entry):
+        bench.append(host_timed)
+    if bound := _deviation_bound(achievable.get("bound"), unit):
+        bench.append(_with_basis(bound if isinstance(achievable.get("bound"), str) else "bounded " + bound, achievable))
+    if _deviation_not_measured(entry):
+        bench.append("not measured at the converter")
+    measured_by = achieved.get("measured_by", entry.get("measured_by"))
+    measured_text = (BEST_EFFORT_MEASURED_BY.get(measured_by, measured_by.replace("_", " "))
+                     if isinstance(measured_by, str) and measured_by else "not measured")
+    mechanism = entry.get("mechanism")
+    mechanism_text = (BEST_EFFORT_MECHANISMS[mechanism][1] if mechanism in BEST_EFFORT_MECHANISMS
+                      else mechanism.replace("_", " ") if isinstance(mechanism, str) and mechanism else "not recorded")
+    notes = [text.strip().rstrip(".") for text in (entry.get("note"), achieved.get("note"))
+             if isinstance(text, str) and text.strip()]
+    return {"parameter": f"{label} ({unit})" if unit else label,
+            "clause_asks": _with_basis(_deviation_requirement(entry.get("required"), unit), entry.get("required")) or "not recorded",
+            "this_bench": "; ".join(bench) or "not recorded",
+            "mechanism": mechanism_text, "measured_by": measured_text,
+            "classification": BEST_EFFORT_CLASSIFICATION_LABELS[entry["classification"]],
+            "note": "; ".join(notes) or "—"}
+
+
+def deviation_sheet_rows(sheet: dict) -> list[list[str]]:
+    """Table rows in the sheet's column order; stored display cells are used, missing ones are derived."""
+    rows = []
+    for entry in sheet.get("deviations", []):
+        display = entry.get("display") if isinstance(entry.get("display"), dict) else deviation_display(entry)
+        rows.append([str(display.get(column, "")) for column in DEVIATION_COLUMNS])
+    return rows
+
+
+def _best_effort_counts(entries: list[dict]) -> dict[str, int]:
+    return {name: sum(1 for entry in entries if entry["classification"] == name) for name in BEST_EFFORT_CLASSIFICATIONS}
+
+
+def _best_effort_clause_phrase(sheet: dict) -> str:
+    return f"{BEST_EFFORT_STANDARD} clause {sheet['clause']}"
+
+
+def best_effort_summary_sentence(sheet: dict) -> str:
+    """One deterministic first-page sentence (§2.3 item 2) built from the entries by template.
+
+    "ISO 16750-2 clause N asks for {each parameter with its clause value}; this
+    bench commanded {each commanded value, grouped by mechanism} ({variant};
+    {one status phrase per entry}; {counts}; see the deviation sheet)."
+    """
+    entries = sheet["deviations"]
+    asks = []
+    for entry in entries:
+        requirement = _deviation_requirement(entry.get("required"), str(entry.get("unit") or ""))
+        if requirement:
+            asks.append(f"{_deviation_label(entry['parameter'])} {requirement}")
+    commanded: dict[str, list[str]] = {}
+    for entry in entries:
+        value = _deviation_quantity(_deviation_record(entry, "achievable").get("value"), str(entry.get("unit") or ""))
+        if not value:
+            continue
+        mechanism = entry.get("mechanism")
+        phrase = (BEST_EFFORT_MECHANISMS[mechanism][0] if mechanism in BEST_EFFORT_MECHANISMS
+                  else mechanism.replace("_", " ") if isinstance(mechanism, str) and mechanism else "an unrecorded mechanism")
+        commanded.setdefault(phrase, []).append(f"{_deviation_label(entry['parameter'])} {value}")
+    produced = _join_phrases([f"{_join_phrases(values)} as {phrase}" for phrase, values in commanded.items()])
+    details = [f"variant {sheet['variant']}"] if sheet.get("variant") else []
+    for entry in entries:
+        label = _deviation_label(entry["parameter"])
+        unit = str(entry.get("unit") or "")
+        achievable = _deviation_record(entry, "achievable")
+        classification = entry["classification"]
+        host_timed = _deviation_host_timed(entry)
+        if classification == "met":
+            details.append(f"{label} met" + (f", {host_timed}" if host_timed else ""))
+        elif classification == "approximated":
+            details.append(f"{label} approximated")
+        elif classification == "not_met_but_documented":
+            bound = _deviation_bound(achievable.get("bound"), unit) or _deviation_quantity(achievable.get("value"), unit)
+            details.append(f"{label} not met" + (f", {_with_basis(bound, achievable)}" if bound else ""))
+        else:
+            details.append(f"{label} " + (f"{host_timed}, " if host_timed else "") + "not measured at the converter")
+    counts = _best_effort_counts(entries)
+    details.append(", ".join(f"{counts[name]} {BEST_EFFORT_COUNT_WORDS[name]}" for name in BEST_EFFORT_CLASSIFICATIONS))
+    details.append("see the deviation sheet")
+    return (f"{_best_effort_clause_phrase(sheet)} asks for {_join_phrases(asks) or 'no recorded parameter'}; "
+            f"this bench commanded {produced or 'no recorded value'} ({'; '.join(details)}).")
+
+
+def best_effort_limitations(sheet: dict) -> list[str]:
+    """Appendix bullets (§2.3 item 3): every not-met and not-measured row, then the mandatory statement."""
+    phrases = [f"variant {sheet['variant']}"] if sheet.get("variant") else []
+    for entry in sheet["deviations"]:
+        if entry["classification"] not in ("not_met_but_documented", "unknown_until_measured"):
+            continue
+        label = _deviation_label(entry["parameter"])
+        unit = str(entry.get("unit") or "")
+        achievable = _deviation_record(entry, "achievable")
+        if entry["classification"] == "unknown_until_measured":
+            value = _deviation_quantity(achievable.get("value"), unit)
+            recorded = [text for text in (
+                f"commanded {value}" if value and _finite_number(achievable.get("value")) is not None else value,
+                _deviation_host_timed(entry)) if text]
+            phrases.append(f"{label} not measured at the converter" + (f" ({', '.join(recorded)})" if recorded else ""))
+        else:
+            bound = _deviation_bound(achievable.get("bound"), unit) or _deviation_quantity(achievable.get("value"), unit)
+            requirement = _deviation_requirement(entry.get("required"), unit)
+            phrases.append(f"{label} not met, documented" + (f": {_with_basis(bound, achievable)}" if bound else "")
+                           + (f" against {requirement}" if requirement else ""))
+    if len(phrases) == (1 if sheet.get("variant") else 0):
+        phrases.append("every recorded parameter is met or approximated; see the deviation sheet")
+    return [f"{_best_effort_clause_phrase(sheet)}: " + "; ".join(phrases) + ".", BEST_EFFORT_STATEMENT]
+
+
+def build_best_effort_sheet(raw: dict) -> dict[str, Any]:
+    """Validate the recorded sheet and add what the report needs: display cells, counts, legend, sentence, statement.
+
+    Entries are kept verbatim (the export holds the sheet as recorded) and gain a
+    ``display`` block. Malformed entries are refused rather than guessed at.
+    """
+    if not isinstance(raw, dict):
+        raise ValueError("A best-effort sheet must be a mapping")
+    clause = raw.get("clause")
+    if not isinstance(clause, str) or not clause.strip():
+        raise ValueError("A best-effort sheet must name its clause")
+    entries = raw.get("deviations")
+    if not isinstance(entries, list) or not entries:
+        raise ValueError("A best-effort sheet needs at least one deviation entry")
+    variant = raw.get("variant")
+    if variant is not None and not isinstance(variant, str):
+        raise ValueError("A best-effort variant must be text or null")
+    normalised = []
+    used_bases: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, dict) or not isinstance(entry.get("parameter"), str) or not entry["parameter"].strip():
+            raise ValueError("Each deviation entry must name its parameter")
+        if entry.get("classification") not in BEST_EFFORT_CLASSIFICATIONS:
+            raise ValueError(f"Deviation {entry['parameter']!r} has no classification among {BEST_EFFORT_CLASSIFICATIONS}")
+        for block in ("required", "achievable", "achieved"):
+            record = entry.get(block)
+            if record is not None and not isinstance(record, dict):
+                raise ValueError(f"Deviation {entry['parameter']!r}: {block} must be a mapping or null")
+            for key, value in (record or {}).items():
+                if isinstance(value, float) and not math.isfinite(value):
+                    raise ValueError(f"Deviation {entry['parameter']!r}: {block}.{key} is not finite")
+            basis = _deviation_basis(record)
+            if basis and basis not in used_bases:
+                used_bases.append(basis)
+        if entry["classification"] == "met" and not (_deviation_basis(entry.get("achievable")) or _deviation_host_timed(entry)):
+            raise ValueError(f"Deviation {entry['parameter']!r} is met without a bound or host-timed value that justifies it")
+        normalised.append({**copy.deepcopy(entry), "display": deviation_display(entry)})
+    clause = clause.strip()
+    sheet = {"standard": BEST_EFFORT_STANDARD, "clause": clause, "variant": variant,
+             "test_type": raw.get("test_type"),
+             "title": f"Deviations from {BEST_EFFORT_STANDARD} clause {clause}" + (f", variant {variant}" if variant else ""),
+             "columns": list(DEVIATION_HEADERS),
+             "deviations": normalised, "counts": _best_effort_counts(normalised),
+             "bases": {tag: BEST_EFFORT_BASES.get(tag, "as recorded") for tag in used_bases},
+             "poll_note": BEST_EFFORT_POLL_NOTE, "statement": BEST_EFFORT_STATEMENT,
+             "procedure_statement": raw.get("statement") if isinstance(raw.get("statement"), str) else None}
+    sheet["summary_sentence"] = best_effort_summary_sentence(sheet)
+    return sheet
+
+
 def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[dict],
                        revision: str = "r0001") -> ReportModel:
     evidence_label = _evidence_label(plan, run)
@@ -1372,6 +1696,10 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
     startup_descent = run.get("method", {}).get("startup_descent")
     uvlo = analysis.get("uvlo_input_ramp")
     profiles = analysis.get("supply_profiles")
+    # The deviation sheet (best-effort proposal §2.3): the analysis copy first, the
+    # method block for analyses issued before it was carried; nothing is inferred.
+    recorded_sheet = analysis.get("best_effort") or run.get("method", {}).get("best_effort")
+    best_effort = build_best_effort_sheet(recorded_sheet) if recorded_sheet else None
     comparison = _voltage_comparison(points, voltage_sweep) if voltage_sweep else []
     if voltage_sweep or startup_descent:
         _accepted_point_times(points, raw_samples)
@@ -1630,6 +1958,10 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
                           if on else "No return to band is bracketed on the increase.")]
                 parts.append("These are observation-grid intervals; no threshold value is claimed.")
                 summary.append(" ".join(parts))
+    if best_effort:
+        # One templated sentence per best-effort clause and the mandatory statement (§2.3 item 2).
+        summary.append(best_effort["summary_sentence"])
+        summary.append(best_effort["statement"])
     if startup_descent:
         summary.append(f"This run checks continued operation after starting at {start_text}: the source is kept on while "
                        f"input voltage decreases in steps, with a {load_phrase}. It does not test cold start at the lower input voltages.")
@@ -1797,6 +2129,11 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
     for note in run.get("metrology_limitations", []):
         limitations.append(str(note))
     limitations.extend(thermal_section["limitations"])
+    if best_effort:
+        # Every not-met and not-measured row reaches the appendix (§2.3 item 3), then the statement.
+        for note in best_effort_limitations(best_effort):
+            if note not in limitations:
+                limitations.append(note)
     return ReportModel(run_id=run["run_id"], analysis_id=analysis["analysis_id"], report_revision=revision,
         title=f"{plan.dut.identity.model} · DC–DC characterization", boundary=boundary,
         evidence_label=evidence_label,
@@ -1820,7 +2157,7 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
         method=_report_method(plan, run, analysis, raw_samples),
         prose=[analysis["aggregation"], analysis["sign_convention"]],
         limitations=limitations, raw_samples=dict(grouped), provenance=provenance, uncertainty=uncertainty,
-        thermal=thermal_section["model"])
+        thermal=thermal_section["model"], best_effort=best_effort)
 
 
 def analyze_run(run_dir: Path, *, version: str = FORMULA_VERSION) -> Path:
