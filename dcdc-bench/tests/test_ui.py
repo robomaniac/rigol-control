@@ -22,7 +22,7 @@ from dcdc_bench.ui_models import (PLAN_STATUS_LEGEND, REAL_CAN, REAL_CANNOT, SIM
                                   limits_rows, limits_summary, local_time_text, number, plan_rows, point_count, quantity,
                                   recipe_category, recipe_grid, recipe_title, report_became_ready, report_link_rows,
                                   report_rows, run_option_text, saved_runs_key, sequence_step, shutdown_label, skip_reasons,
-                                  state_label, summary_text, target_values, time_legend)
+                                  state_label, summary_text, target_values, time_legend, time_lines)
 
 LOS_ANGELES = ZoneInfo('America/Los_Angeles')
 DOCS = Path(__file__).resolve().parents[1] / 'docs'
@@ -801,7 +801,8 @@ def test_reports_follow_the_job_without_pressing_refresh(tmp_path, monkeypatch):
             with client:
                 reports = find(client, css='bench-reports')
                 assert 'Acquiring measurements' in texts(reports)
-                assert local_time_text('2026-09-29T20:40:12+00:00') in texts(reports), 'rows show the local start time'
+                clock, date = time_lines(local_time_text('2026-09-29T20:40:12+00:00'))
+                assert clock in texts(reports) and date in texts(reports), 'rows show the local start time, clock above date'
                 assert '12T12-4A' in texts(reports) and 'Simulation · synthetic data' in texts(reports)
                 listed = service.list_jobs_calls
                 snapshots['job-1']['progress'] = {'completed': 3, 'total': 4, 'current': 'p4'}
@@ -857,9 +858,7 @@ def test_page_asks_three_questions_then_preview_and_start(tmp_path, monkeypatch)
                 assert find(client, css='bench-summary-text').text == f'12T12-4A · Simulation · {QUICK_TITLE}'
                 titles = [name for name, _ in cards(client)]
                 assert titles[:3] == ['12T12-4A', SMALL_GRID_TITLE, QUICK_TITLE], 'converter first, then tests by title'
-                assert titles[3:] == ['ISO 16750-2:2023 — electrical loads', 'ISO 7637-2:2011 — conducted transients', 'CISPR 25:2021 — emissions',
-                                      'ISO 11452 — radiated immunity', 'ISO 10605:2023 — electrostatic discharge',
-                                      'ISO 16750-3:2023 — mechanical loads', 'ISO 16750-4:2023 — climatic loads'], 'then the standards catalog'
+                assert titles[3:] == ['ISO 16750-2:2023 — electrical loads'], 'then the one standard this bench can test'
                 converter = card_named(client, '12T12-4A')
                 assert 'selected' in converter.classes and '9–36 V in, 12 V / 4 A out' in texts(converter)
                 assert 'Not yet approved for the real bench' in texts(converter)
@@ -1149,7 +1148,11 @@ def badge_of(client, number):
     return next(child for child in descendants(clause_row(client, number)) if 'bench-badge' in child.classes)
 
 
-def test_standards_group_lists_every_standard_and_greys_those_not_on_this_bench(tmp_path, monkeypatch):
+def test_standards_group_shows_only_iso16750_2_and_names_the_other_laboratories_in_a_footnote(tmp_path, monkeypatch):
+    """Owner: conducted transients, CISPR emissions, radiated immunity, ESD, mechanical and climatic loads 'can't
+    possibly be tested on this setup', so they are no longer cards; one footnote names them and links the catalog."""
+    from dcdc_bench.standard_recipes import OTHER_LABORATORIES_NOTE
+
     async def scenario():
         page = await open_bench_page(monkeypatch, tmp_path, {})
         client = page.client
@@ -1158,21 +1161,24 @@ def test_standards_group_lists_every_standard_and_greys_those_not_on_this_bench(
                 assert 'Automotive supply standards' in texts(client.layout)
                 titles = [name for name, _ in cards(client)]
                 assert titles.index(ISO_TITLE) > titles.index(QUICK_TITLE), 'the standards group follows the saved tests'
+                assert [title for title in titles if title.startswith(('ISO ', 'CISPR '))] == [ISO_TITLE], 'the only standards card'
                 for title in ('ISO 7637-2:2011 — conducted transients', 'CISPR 25:2021 — emissions', 'ISO 11452 — radiated immunity',
                               'ISO 10605:2023 — electrostatic discharge', 'ISO 16750-3:2023 — mechanical loads', 'ISO 16750-4:2023 — climatic loads'):
-                    other = card_named(client, title)
-                    assert 'greyed' in other.classes and 'selected' not in other.classes
-                    assert any(text.startswith('Not on this bench: ') for text in texts(other))
-                transients = card_named(client, 'ISO 7637-2:2011 — conducted transients')
-                assert any(text.startswith('Not on this bench: ') and 'transient' in text for text in texts(transients)), \
-                    'UX M6: another laboratory is a grey fact, not a red operator error'
-                assert not any('bench-card-reason' in child.classes for child in descendants(transients))
+                    assert title not in titles and title not in texts(client.layout), title
+                assert not any(text.startswith('Not on this bench: ') for text in texts(client.layout)), 'no greyed laboratory cards'
+                note = find(client, css='bench-standards-note')
+                head, catalog, tail = OTHER_LABORATORIES_NOTE.partition('the standards catalog')
+                assert note.content == f'{head}[{catalog}](/standards){tail}', 'the footnote links the catalog page'
+                assert OTHER_LABORATORIES_NOTE.startswith('Other automotive standards (ISO 7637-2, CISPR 25, ISO 11452, ISO 10605, ISO 16750-3/-4) '
+                                                          'need other laboratories; see the standards catalog.')
+                shown = texts(client.layout)
+                assert shown.index('+ New test') < shown.index('Automotive supply standards'), 'the footnote closes the group'
                 iso = card_named(client, ISO_TITLE)
                 rows = iso_rows(page.service)
                 now = sum(1 for row in rows if row['badge'] == 'runs_here')
-                assert 'greyed' not in iso.classes and '12 V system' in texts(iso)
+                assert 'greyed' not in iso.classes and 'selected' not in iso.classes and 'editor' in iso.classes and '12 V system' in texts(iso)
                 assert any(str(now) in text and 'available' in text for text in texts(iso)), texts(iso)
-                assert not find_all(client, tag='q-checkbox', text='§4.2 Direct current (DC) supply voltage'), 'folded until selected'
+                assert not find_all(client, tag='q-checkbox', text='§4.2 Direct current (DC) supply voltage'), 'folded until opened'
             assert page.errors == []
         finally:
             client.delete()
@@ -1186,7 +1192,7 @@ def test_iso_card_expands_into_a_clause_checklist_with_one_badge_per_status(tmp_
         try:
             with client:
                 await click(card_named(client, ISO_TITLE))
-                assert 'selected' in card_named(client, ISO_TITLE).classes
+                assert 'open' in card_named(client, ISO_TITLE).classes and 'selected' not in card_named(client, ISO_TITLE).classes
                 shown = texts(client.layout)
                 rows = {row['number']: row for row in iso_rows(page.service)}
                 now = sum(1 for row in rows.values() if row['badge'] == 'runs_here')
@@ -1296,8 +1302,13 @@ def test_add_as_tests_saves_one_recipe_per_ticked_runnable_clause_with_the_catal
                     'below the stated minimum the profile waits for the recipe approval, as the UVLO example does'
                 assert '27 points · simulated' in texts(ramp_card)
                 assert any(n.startswith('Added 2 tests') for n in page.notices)
-                assert not button(client, 'Add as tests').enabled, 'ticks are consumed'
+                assert not find_all(client, css='bench-clause-row') and 'open' not in card_named(client, ISO_TITLE).classes, \
+                    'the editor folds once its tests exist; the selection is the last test it made'
+                await click(card_named(client, ISO_TITLE))
+                assert clause_box(client, '4.2').value is True and clause_box(client, '4.5').value is False, 'reopened: default ticks only'
+                sweep_card = card_named(client, 'ISO 16750-2 §4.2 — DC level subset (12 V system)')  # re-rendered with the checklist
                 await click(sweep_card)
+                assert not find_all(client, css='bench-clause-row'), 'choosing a test folds the editor'
                 await click(button(client, 'Preview'))
                 shown = texts(find(client, css='bench-plan'))
                 assert '9 / 9' in shown and button(client, 'Start simulation').enabled
@@ -1962,6 +1973,85 @@ def test_profile_save_invalidates_before_io_and_does_not_replace_newer_selection
     asyncio.run(scenario())
 
 
+def test_standards_catalog_page_renders_docs_standards_readme_with_its_sibling_links(tmp_path, monkeypatch):
+    """The footnote under the ISO 16750-2 card links /standards: docs/standards/README.md read-only, its sibling
+    documents under /standards/<file>, and links into the wider docs tree reduced to text (nothing links a file
+    the page does not serve)."""
+    from dcdc_bench.ui import standards_document
+    readme = DOCS / 'standards' / 'README.md'
+    assert readme.is_file()
+    for name in ('ISO 7637-2', 'CISPR 25', 'ISO 11452', 'ISO 10605', 'ISO 16750-3', 'ISO 16750-4'):
+        assert name in readme.read_text(encoding='utf-8'), f'{name} stays in the catalog document'
+
+    async def scenario():
+        page = await open_bench_page(monkeypatch, tmp_path, {})
+        catalog = await open_page(monkeypatch, tmp_path, '/standards')
+        try:
+            with catalog:
+                from nicegui import ui
+                rendered = [child for child in catalog.elements.values() if isinstance(child, ui.markdown)]
+                assert rendered and 'ISO 7637-2' in rendered[0].content and 'CISPR 25' in rendered[0].content
+                assert '](/standards/iso16750-2.md)' in rendered[0].content and '](iso16750-2.md)' not in rendered[0].content
+                assert '](../' not in rendered[0].content, 'links into the wider docs tree are plain text here'
+                assert any(link._props.get('href') == '/' for link in catalog.elements.values() if link.tag == 'nicegui-link')
+            sibling = standards_document('iso16750-2.md')
+            assert sibling and 'ISO 16750-2' in sibling and '](../' not in sibling
+            assert standards_document('../glossary.md') is None and standards_document('missing.md') is None
+            assert page.errors == []
+        finally:
+            catalog.delete()
+            page.client.delete()
+    asyncio.run(scenario())
+
+
+def test_time_lines_split_the_local_time_for_a_narrow_column():
+    assert time_lines('13:37:14 PDT (2026-09-29)') == ('13:37:14 PDT', '2026-09-29')
+    assert time_lines('unknown') == ('unknown', '')
+    assert time_lines(local_time_text('2026-09-29T20:37:14+00:00', zone=LOS_ANGELES)) == ('13:37:14 PDT', '2026-09-29')
+
+
+def test_exactly_one_test_is_selected_and_the_iso_card_is_an_editor_not_a_second_selection(tmp_path, monkeypatch):
+    """Owner: 'Is it normal I can select Normal operating voltage and Automotive supply standards at the same time?!'
+    What they saw: a selected test card in one group while the open ISO 16750-2 card in the standards group was drawn
+    exactly like a second selected card (green, solid, check mark), because selecting a test never folded it. Now the
+    ISO card is an editor (blue, dashed, expand arrow) that leaves the selection alone, and choosing any test folds it."""
+    async def scenario():
+        page = await open_bench_page(monkeypatch, tmp_path, {})
+        client = page.client
+
+        def selected_tests():
+            return [name for name, card in cards(client) if 'selected' in card.classes and name != '12T12-4A']
+
+        try:
+            with client:
+                assert selected_tests() == [QUICK_TITLE]
+                await click(card_named(client, ISO_TITLE))
+                iso = card_named(client, ISO_TITLE)
+                assert find_all(client, css='bench-clause-row'), 'the checklist is open'
+                assert 'open' in iso.classes and 'editor' in iso.classes and 'selected' not in iso.classes
+                assert not any('bench-card-check' in child.classes for child in descendants(iso)), 'no check mark: it is not a selection'
+                assert any('bench-card-expand' in child.classes for child in descendants(iso)), 'an expand arrow instead'
+                face = next(child for child in descendants(iso) if 'bench-card-select' in child.classes)
+                assert face._props.get('aria-expanded') == 'true' and 'aria-pressed' not in face._props
+                assert selected_tests() == [QUICK_TITLE], 'opening the editor changes no selection'
+                assert find(client, css='bench-summary-text').text == f'12T12-4A · Simulation · {QUICK_TITLE}'
+                assert find(client, css='bench-bar-summary').text == f'12T12-4A · Simulation · {QUICK_TITLE}'
+                await click(card_named(client, SMALL_GRID_TITLE))
+                assert selected_tests() == [SMALL_GRID_TITLE], 'exactly one test is selected'
+                assert not find_all(client, css='bench-clause-row'), 'choosing a test folds the editor'
+                iso = card_named(client, ISO_TITLE)
+                assert 'open' not in iso.classes and 'selected' not in iso.classes
+                face = next(child for child in descendants(iso) if 'bench-card-select' in child.classes)
+                assert face._props.get('aria-expanded') == 'false'
+                assert find(client, css='bench-summary-text').text == f'12T12-4A · Simulation · {SMALL_GRID_TITLE}'
+                assert find(client, css='bench-bar-summary').text == f'12T12-4A · Simulation · {SMALL_GRID_TITLE}'
+                assert len([card for _, card in cards(client) if 'selected' in card.classes]) == 2, 'one converter and one test, nothing else'
+            assert page.errors == []
+        finally:
+            client.delete()
+    asyncio.run(scenario())
+
+
 def test_save_rename_delete_notifications_survive_deleted_event_slots(tmp_path, monkeypatch):
     """Exercise NiceGUI's real notify/context resolution, which a recorder stub misses.
 
@@ -1996,6 +2086,51 @@ def test_save_rename_delete_notifications_survive_deleted_event_slots(tmp_path, 
             assert any(message.startswith('Limits saved') for message in notifications)
             assert 'Renamed.' in notifications
             assert any(message.startswith(f'Deleted “{QUICK}”') for message in notifications)
+        finally:
+            client.delete()
+    asyncio.run(scenario())
+
+
+def test_reports_list_is_one_grid_whose_header_and_rows_share_the_columns(tmp_path, monkeypatch):
+    """Owner: 'The Reports section table is not well aligned.' Each row used to be its own grid, so its max-content
+    columns resolved differently from the header's and from its neighbours'. Now the header and every row are
+    subgrids of one grid: five shared tracks, Run the only flexible one, the shell widened to 1280 px."""
+    from dcdc_bench.ui import STYLE
+    snapshots = {'job-2': snapshot('job-2', **REPORT_DONE),
+                 'job-1': snapshot('job-1', 'report-queued', run_dir='/w/r', deferred_reason='MemAvailable below 150 MiB',
+                                   deferred_memory={'available_mib': 96.})}
+
+    def labels(cell):
+        """Visible texts of a cell's direct children (labels, links, buttons); a button's tooltip is not a column entry."""
+        return [getattr(child, 'text', None) or child._props.get('label') for child in cell.default_slot.children if child.tag != 'q-tooltip']
+
+    async def scenario():
+        page = await open_bench_page(monkeypatch, tmp_path, snapshots)
+        client = page.client
+        try:
+            with client:
+                reports = find(client, css='bench-reports')
+                grids = [child for child in descendants(reports) if 'bench-report-grid' in child.classes]
+                assert len(grids) == 1, 'one grid for the whole list'
+                rows = [child for child in grids[0].default_slot.children if 'bench-report-row' in child.classes]
+                assert len(rows) == 3 and 'bench-report-head' in rows[0].classes, 'the header is a row of the same grid'
+                assert labels(rows[0]) == ['When', 'Run', 'Bench', 'Status', 'Report']
+                assert all(len(row.default_slot.children) == 5 for row in rows), 'every row fills the same five columns'
+                when, run, bench, status, actions = rows[1].default_slot.children
+                assert 'bench-report-when' in when.classes and labels(when) == list(time_lines(local_time_text('2026-09-29T20:40:12+00:00')))
+                assert 'bench-report-run' in run.classes and run.text == '12T12-4A'
+                assert 'bench-badge' in bench.classes and bench.text == 'Simulation · synthetic data'
+                assert 'bench-report-status' in status.classes and labels(status) == ['Complete', '1 / 4 points'], 'badge above the points line'
+                assert 'bench-report-actions' in actions.classes and labels(actions) == ['Open HTML', 'Open PDF', 'View run', 'Regenerate report']
+                queued = rows[2]
+                assert 'Waiting for free memory: 96 MiB available, 150 MiB needed' in labels(queued.default_slot.children[3])
+                assert 'Remove from report queue' in labels(queued.default_slot.children[4])
+                # The sheet: the header and the rows share one template through subgrid; the phone layout stacks the cells.
+                assert '.bench-report-grid{display:grid;grid-template-columns:max-content minmax(0,2fr) max-content max-content max-content' in STYLE
+                assert '.bench-report-row{display:grid;grid-template-columns:subgrid;grid-column:1 / -1' in STYLE
+                assert '.bench-shell{max-width:1280px' in STYLE and '.bench-header-inner{max-width:1280px' in STYLE and '.bench-bar-inner{max-width:1280px' in STYLE
+                assert '.bench-report-grid,.bench-report-row{grid-template-columns:minmax(0,1fr)}' in STYLE.split('@media(max-width:650px)')[1]
+            assert page.errors == []
         finally:
             client.delete()
     asyncio.run(scenario())

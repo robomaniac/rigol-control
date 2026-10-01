@@ -118,17 +118,23 @@ a bar fixed to the bottom of the window. There are no tabs.
 ### Automotive standards in Which test?
 
 Below the saved tests, the group **Automotive supply standards** shows one
-card per standard from the catalog in `docs/standards/`: ISO 16750-2:2023,
-ISO 7637-2, CISPR 25, ISO 11452, ISO 10605, ISO 16750-3 and ISO 16750-4. A
-standard this bench cannot run is greyed with a plain grey note *Not on this
-bench: …* and the catalog's one-sentence reason (a transient generator, an EMC
-chamber, a shaker, a climatic chamber); red is reserved for a test you chose
-that cannot run now. The ISO 16750-2 card carries a **12 V system** / **24 V
-system** badge and prints the catalog's count for the selected converter and
-bench, for example *19 clauses: 1 DC level subset available, 2 after approval*.
+card, ISO 16750-2:2023: the other automotive standards of the catalog in
+`docs/standards/` (ISO 7637-2, CISPR 25, ISO 11452, ISO 10605, ISO 16750-3 and
+ISO 16750-4) need other laboratories, so they are not offered as cards; one
+footnote under the card says so and links the catalog, served read-only at
+`/standards` from `docs/standards/README.md`. The ISO 16750-2 card carries a
+**12 V system** / **24 V system** badge and prints the catalog's count for the
+selected converter and bench, for example *19 clauses: 1 DC level subset
+available, 2 after approval*.
 
 Selecting the ISO 16750-2 card expands it into a **clause checklist** and
-ticks the available DC level subset; selecting it again folds it. The
+ticks the available DC level subset; selecting it again folds it. Exactly
+one test is selected for Start at any time: selecting a test card in any group
+deselects the previous one and folds the ISO 16750-2 checklist, and the header
+and the bottom bar name that one test. The ISO 16750-2 card is an editor, not
+a test: open, it is blue and dashed with an expand arrow (never green with a
+check), it leaves the selection alone, and **Add as tests** folds it and
+selects the last test it generated. The
 **12 V / 24 V** toggle switches every row to the other system's parameters
 (supply codes, UA, levels) and is remembered on the converter profile
 (`system_voltage_class`, default 12 V). Each row shows the clause, its levels

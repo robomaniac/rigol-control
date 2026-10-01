@@ -45,15 +45,13 @@ from .domain import RESET_STAIRCASE_TEST_TYPE, SLOW_SUPPLY_RAMP_TEST_TYPE, Bench
 
 STANDARDS_GROUP = "Automotive supply standards"
 ISO16750_2_CATEGORY = "ISO 16750-2 supply profiles"
-STANDARD_CARD_TITLES = {
-    S.ISO16750_2_ID: "ISO 16750-2:2023 — electrical loads",
-    S.ISO7637_2_ID: "ISO 7637-2:2011 — conducted transients",
-    S.CISPR25_ID: "CISPR 25:2021 — emissions",
-    S.ISO11452_ID: "ISO 11452 — radiated immunity",
-    S.ISO10605_ID: "ISO 10605:2023 — electrostatic discharge",
-    S.ISO16750_3_ID: "ISO 16750-3:2023 — mechanical loads",
-    S.ISO16750_4_ID: "ISO 16750-4:2023 — climatic loads",
-}
+# The bench page shows one standards card, ISO 16750-2. The other automotive standards stay in the catalog
+# (``standards.py``, ``docs/standards/README.md``) but need laboratories this bench will never be (a transient
+# generator, an EMC chamber, an ESD simulator, a shaker, a climatic chamber), so the page names them in one
+# footnote under that card instead of offering greyed cards nobody can select.
+STANDARD_CARD_TITLES = {S.ISO16750_2_ID: "ISO 16750-2:2023 — electrical loads"}
+OTHER_LABORATORIES_NOTE = ("Other automotive standards (ISO 7637-2, CISPR 25, ISO 11452, ISO 10605, ISO 16750-3/-4) "
+                           "need other laboratories; see the standards catalog.")
 CLAUSE_SHORT_NAMES = {"4.2": "supply voltage range", "4.3.1.1": "long-term overvoltage hold",
                       "4.5": "slow decrease and increase", "4.6.1.2": "micro-interruptions", "4.6.2": "reset staircase"}
 SHORT_INSTRUMENT_NAMES = {
@@ -182,12 +180,18 @@ def card_summary(rows: list[dict[str, Any]]) -> str:
 
 
 def standard_cards(bench: BenchProfile | dict, dut: DutProfile | dict, system: str) -> list[dict[str, Any]]:
-    """One card per standard in catalog order; a standard with no tickable clause carries its one-sentence reason.
+    """The standards cards the bench page renders: only ISO 16750-2, as the clause-checklist editor.
 
     ``runnable_count`` counts clauses runnable now (``runs_here``);
     ``after_approval_count`` and ``mock_only_count`` are separate, and
-    ``summary`` is the sentence the card prints ("1 clause runnable now, 2
+    ``summary`` is the sentence the card prints ("1 DC level subset available, 2
     after approval"). ``tickable_count`` is what "Add as tests" can offer.
+    A standard with no tickable clause carries its one-sentence reason.
+
+    The other standards of ``standards.catalog`` (conducted transients, EMC,
+    mechanical and climatic loads) are not cards: none can be tested on this
+    setup, so the page prints ``OTHER_LABORATORIES_NOTE`` under this card
+    and leaves them to the catalog document.
     """
     bench_model, dut_model = _models(bench, dut)
     rows = clause_rows(bench_model, dut_model, system)
@@ -196,21 +200,11 @@ def standard_cards(bench: BenchProfile | dict, dut: DutProfile | dict, system: s
     after = sum(1 for row in rows if row["badge"] == "runs_after_approval")
     mock_only = sum(1 for row in rows if row["badge"] == "mock_only")
     summary = card_summary(rows)
-    cards = [{"id": S.ISO16750_2_ID, "title": STANDARD_CARD_TITLES[S.ISO16750_2_ID],
-              "subtitle": f"Section 4 supply profiles as a clause checklist: {summary}", "runnable": tickable > 0,
-              "reason": None if tickable else "No clause of section 4 can run on this bench for this converter",
-              "runnable_count": now, "after_approval_count": after, "mock_only_count": mock_only,
-              "tickable_count": tickable, "summary": summary, "clause_count": len(rows), "expandable": True}]
-    verdicts = {(e.clause.standard_id): e.feasibility for c in S.catalog(bench_model, dut_model, system) for e in c.entries}
-    for standard_id, standard in S.STANDARDS.items():
-        if standard_id == S.ISO16750_2_ID:
-            continue
-        verdict = verdicts.get(standard_id)
-        cards.append({"id": standard_id, "title": STANDARD_CARD_TITLES.get(standard_id, standard_id),
-                      "subtitle": "; ".join(c.title for c in standard.tests()), "runnable": False,
-                      "reason": verdict.reason if verdict else "not on this bench", "runnable_count": 0,
-                      "clause_count": len(standard.tests()), "expandable": False})
-    return cards
+    return [{"id": S.ISO16750_2_ID, "title": STANDARD_CARD_TITLES[S.ISO16750_2_ID],
+             "subtitle": f"Section 4 supply profiles as a clause checklist: {summary}", "runnable": tickable > 0,
+             "reason": None if tickable else "No clause of section 4 can run on this bench for this converter",
+             "runnable_count": now, "after_approval_count": after, "mock_only_count": mock_only,
+             "tickable_count": tickable, "summary": summary, "clause_count": len(rows), "expandable": True}]
 
 
 # --- recipe generation ---------------------------------------------------------------------------

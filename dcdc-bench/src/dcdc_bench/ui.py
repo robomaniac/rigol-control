@@ -9,10 +9,12 @@ from __future__ import annotations
 import copy
 import ipaddress
 import json
+import re
 import sys
 from pathlib import Path
 
-from .standard_recipes import STANDARDS_GROUP, build_recipe, clause_rows, default_system, standard_cards
+from .standard_recipes import (OTHER_LABORATORIES_NOTE, STANDARDS_GROUP, build_recipe, clause_rows, default_system,
+                               standard_cards)
 from .ui_models import (BENCH_NAMES, DEFAULT_CATEGORY, DELETE_PROMPTS, PLAN_STATUS_LEGEND, REAL_CAN, REAL_CANNOT,
                         SIMULATION_CAN, SIMULATION_CANNOT, SIMULATION_SEQUENCE, SIMULATION_TIME_ESTIMATE, START_LABELS, simulation_time_text,
                         SYNTHETIC_UNCERTAINTY_NOTE, WORKING_STATES, activity_text, artifact_url, bench_equipment, bench_job,
@@ -20,14 +22,14 @@ from .ui_models import (BENCH_NAMES, DEFAULT_CATEGORY, DELETE_PROMPTS, PLAN_STAT
                         edited_dut, edited_recipe, elapsed_text, envelope_rows, event_text, friendly_error, grouped_recipes,
                         job_actions, limits_rows, limits_summary, local_time_text, plan_rows, quantity, recipe_grid,
                         recipe_title, report_became_ready, report_link_rows, report_rows, saved_runs_key, sequence_step,
-                        shutdown_label, skip_reasons, state_label, summary_text, time_legend)
+                        shutdown_label, skip_reasons, state_label, summary_text, time_legend, time_lines)
 
 
 STYLE = '''
 body{background:#fff;color:#183047;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}
-.bench-shell{max-width:1000px;margin:0 auto;width:100%;padding:0 16px 140px}
+.bench-shell{max-width:1280px;margin:0 auto;width:100%;padding:0 16px 140px}
 .bench-header{position:sticky;top:0;z-index:20;background:rgba(255,255,255,.97);border-bottom:1px solid #dce4e9;padding:10px 16px;width:100%}
-.bench-header-inner{max-width:1000px;margin:0 auto;display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center;justify-content:space-between}
+.bench-header-inner{max-width:1280px;margin:0 auto;display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center;justify-content:space-between}
 .bench-title{font-size:23px;font-weight:700;line-height:1.2;letter-spacing:-.03em}
 .bench-subtitle{color:#516677;font-size:13.5px}
 .bench-status-area{display:flex;align-items:center;gap:12px;margin-left:auto;flex-wrap:wrap}
@@ -45,6 +47,11 @@ body{background:#fff;color:#183047;font-family:system-ui,-apple-system,"Segoe UI
 .bench-card-item:hover{border-color:#abc0cf}
 .bench-card-item.selected{border-color:#168477;background:#edf7f4;box-shadow:0 0 0 1px #168477 inset}
 .bench-card-item.greyed{background:#f6f8fa;border-color:#e6edf1}
+/* An editor card (the ISO 16750-2 clause checklist) is never "selected": open, it is blue and dashed with an
+   expand arrow, so it cannot be mistaken for a second selected test (green, solid, with a check). */
+.bench-card-item.editor.open{border-color:#15608f;border-style:dashed;background:#f3f7fa}
+.bench-card-expand{display:inline-flex;width:20px;height:20px;border-radius:50%;border:1px solid #15608f;color:#15608f;align-items:center;justify-content:center;flex-shrink:0}
+.bench-standards-note{font-size:13px;color:#5a6f7e;width:100%;margin-top:4px}.bench-standards-note p{margin:0}.bench-standards-note a{color:#15608f;font-weight:600}
 /* The whole card is one real <button>: Enter and Space select it, nothing interactive is nested inside it. */
 .bench-card-select{all:unset;box-sizing:border-box;display:flex;flex-direction:column;gap:3px;width:100%;flex:1;padding:13px 40px 14px 14px;cursor:pointer;text-align:left;color:inherit;font:inherit;border-radius:6px}
 .bench-card-select:focus-visible{outline:3px solid #15608f;outline-offset:-3px}
@@ -118,15 +125,24 @@ body{background:#fff;color:#183047;font-family:system-ui,-apple-system,"Segoe UI
 .bench-run{border:1px solid #dce4e9;border-radius:8px;padding:16px;width:100%}
 .bench-stat-tile{background:#f3f7f9;border-radius:8px;padding:12px;min-width:140px;flex:1}
 .bench-reports{width:100%}
-/* The time column sizes to its content so a local time with its zone never overprints the run name. */
-.bench-report-row{display:grid;grid-template-columns:max-content minmax(0,1.4fr) max-content max-content minmax(220px,1fr);gap:8px 12px;align-items:start;padding:8px 6px;border-bottom:1px solid #dce4e9;font-size:13.5px;width:100%}
-.bench-report-head{color:#29495d;font-weight:600;background:#f3f7fa}
-.bench-report-when{white-space:nowrap;font-variant-numeric:tabular-nums}
+/* One grid for the whole Reports list: the header row and every run row are subgrids of it, so all of them share the
+   same five column tracks and "When · Run · Bench · Status · Report" sit over their cells. When, Bench, Status and
+   Report size to their content (a status cell and the actions cell are capped so a long sentence wraps inside them);
+   Run is the only flexible column and takes the rest of the 1280 px shell. */
+.bench-report-grid{display:grid;grid-template-columns:max-content minmax(0,2fr) max-content max-content max-content;column-gap:18px;width:100%;font-size:13.5px}
+.bench-report-row{display:grid;grid-template-columns:subgrid;grid-column:1 / -1;align-items:start;padding:8px 8px;border-bottom:1px solid #dce4e9}
+.bench-report-head{color:#29495d;font-weight:600;background:#f3f7fa;border-radius:6px 6px 0 0}
+.bench-report-when{white-space:nowrap;font-variant-numeric:tabular-nums;display:flex;flex-direction:column;gap:1px}
+.bench-report-date{color:#516677;font-size:12.5px}
+.bench-report-run{min-width:0;overflow-wrap:anywhere;line-height:1.35}
+.bench-report-status{display:flex;flex-direction:column;align-items:flex-start;gap:3px;max-width:280px}
 .bench-report-row .bench-badge{justify-self:start}
-.bench-actions{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.bench-report-actions{display:flex;flex-wrap:wrap;gap:2px 12px;align-items:center;max-width:440px}
+.bench-report-actions .q-btn{font-size:13.5px;font-weight:600;min-height:0;padding:0 2px;color:#15608f}
+.bench-report-actions .q-btn .q-icon{font-size:17px}
 .bench-artifact{font-weight:600;color:#15608f}
 .bench-bar{position:fixed;left:0;right:0;bottom:0;z-index:30;background:#fff;border-top:1px solid #dce4e9;box-shadow:0 -4px 16px rgba(24,48,71,.08);padding:10px 16px}
-.bench-bar-inner{max-width:1000px;margin:0 auto;display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center;justify-content:space-between}
+.bench-bar-inner{max-width:1280px;margin:0 auto;display:flex;flex-wrap:wrap;gap:8px 16px;align-items:center;justify-content:space-between}
 .bench-bar-summary{font-size:13.5px;color:#516677;flex:1 1 240px;min-width:0;overflow-wrap:anywhere}
 .bench-bar-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .bench-locked{pointer-events:none;opacity:.55}
@@ -137,15 +153,18 @@ body{background:#fff;color:#183047;font-family:system-ui,-apple-system,"Segoe UI
 /* Shared with the /annotations editor page (annotation_editor.py builds its own layout on this sheet). */
 .bench-card{background:#fff;border:1px solid #dce5eb;border-radius:8px;box-shadow:none;padding:22px;width:100%}
 .bench-section-title{font-size:20px;font-weight:650;margin-bottom:6px}
-.bench-glossary{max-width:1000px;margin:0 auto;padding:16px}
+.bench-glossary{max-width:1280px;margin:0 auto;padding:16px}
 .bench-glossary table{border-collapse:collapse;width:100%;font-size:14px}.bench-glossary th,.bench-glossary td{border-bottom:1px solid #dce4e9;padding:6px 8px;text-align:left;vertical-align:top}
+/* Between a laptop and a phone the Report column gives way so its actions wrap to two lines instead of squeezing Run. */
+@media(max-width:1100px){.bench-report-grid{grid-template-columns:max-content minmax(0,2fr) max-content max-content minmax(150px,1fr)}}
 @media(max-width:650px){.bench-shell{padding:0 12px 170px}.bench-tiles{grid-template-columns:1fr}.bench-cards{grid-template-columns:1fr}
 .bench-fields{grid-template-columns:1fr}.bench-cando{grid-template-columns:1fr}
 .bench-header-inner{flex-wrap:nowrap;gap:8px}.bench-subtitle{display:none}.bench-status-area{width:auto;margin-left:auto;justify-content:flex-end}
 .bench-summary-key{white-space:nowrap}
 .bench-clause-row{grid-template-columns:minmax(0,1fr)}.bench-clause-row>*{min-width:0}
 .bench-plan,.bench-confirm,.bench-run-section{scroll-margin-top:72px}
-.bench-report-row{grid-template-columns:minmax(0,1fr);gap:4px}.bench-report-head{display:none}.bench-bar-actions{width:100%}
+.bench-report-grid,.bench-report-row{grid-template-columns:minmax(0,1fr)}.bench-report-row{gap:4px}.bench-report-head{display:none}
+.bench-report-when{flex-direction:row;gap:6px}.bench-report-status,.bench-report-actions{max-width:none}.bench-bar-actions{width:100%}
 .bench-bar-actions .q-btn{flex:1}.bench-stat-value{font-size:17px}.bench-title{font-size:18px}}
 '''
 
@@ -154,6 +173,27 @@ RASTER_SUFFIXES = {'.png', '.jpg', '.jpeg', '.gif', '.webp'}
 _TOO_LARGE = b'Request body exceeds the upload limit\n'
 # The glossary the page footer links: one document, kept with the source (an editable install has it).
 GLOSSARY_PATH = Path(__file__).resolve().parents[2] / 'docs' / 'glossary.md'
+# The standards catalog the "Which test?" footnote links (/standards): docs/standards/README.md and its siblings.
+STANDARDS_DOCS = GLOSSARY_PATH.parent / 'standards'
+_STANDARDS_DOC_NAME = re.compile(r'[A-Za-z0-9-]+\.md')
+_SIBLING_LINK = re.compile(r'\]\(([A-Za-z0-9-]+\.md)(#[^)]*)?\)')
+_OUTSIDE_LINK = re.compile(r'\[([^\]]+)\]\(\.\.?/[^)]*\)')
+
+
+def standards_document(name: str = 'README.md') -> str | None:
+    """A docs/standards document for the read-only /standards pages, or None when this installation lacks it.
+
+    Links to sibling documents point at ``/standards/<file>`` (the page is served without a trailing slash, so
+    a relative link would otherwise leave the catalog); links into the wider docs tree are reduced to their
+    text, so the page never links a file it does not serve. Only plain ``name.md`` names are looked up.
+    """
+    if not _STANDARDS_DOC_NAME.fullmatch(name):
+        return None
+    path = STANDARDS_DOCS / name
+    if not path.is_file():
+        return None
+    text = _OUTSIDE_LINK.sub(r'\1', path.read_text(encoding='utf-8'))
+    return _SIBLING_LINK.sub(lambda match: f']({"/standards/" + match.group(1)}{match.group(2) or ""})', text)
 
 
 def file_headers(path: Path, relative: str | None = None) -> dict[str, str]:
@@ -331,6 +371,32 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                 ui.label('Glossary').classes('bench-title')
                 ui.label('The glossary file dcdc-bench/docs/glossary.md is not part of this installation. '
                          'It is kept with the source at docs/glossary.md.').classes('bench-message bench-warning')
+
+    def standards_document_page(name):
+        """docs/standards/<name> rendered read-only, the same way as the glossary; nothing on it touches the bench."""
+        ui.add_css(STYLE)
+        with ui.column().classes('bench-glossary gap-3'):
+            with ui.row().classes('gap-5 flex-wrap'):
+                ui.link('← Back to the bench', '/').classes('bench-artifact')
+                if name != 'README.md':
+                    ui.link('← Standards catalog', '/standards').classes('bench-artifact')
+            text = standards_document(name)
+            if text is not None:
+                ui.markdown(text)
+            else:
+                ui.label('Standards catalog').classes('bench-title')
+                ui.label(f'The document dcdc-bench/docs/standards/{name} is not part of this installation. '
+                         'The catalog is kept with the source under docs/standards/.').classes('bench-message bench-warning')
+
+    @ui.page('/standards', response_timeout=30.0)
+    async def standards_page():
+        """The standards catalog (docs/standards/README.md): the automotive standards this bench cannot test are
+        listed there, not as cards. Registered before the published-file routes for the same reason as /glossary."""
+        standards_document_page('README.md')
+
+    @ui.page('/standards/{name}', response_timeout=30.0)
+    async def standards_sibling_page(name: str):
+        standards_document_page(name)
 
     if report_root is not None:
         published_directory = Path(report_root).resolve()
@@ -513,6 +579,9 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                 if state['recipe'] == name:
                     return
                 state['recipe'] = name
+                # Exactly one test is selected at a time: choosing a test folds the ISO 16750-2 editor, so nothing
+                # in another group can look chosen beside it.
+                state['standards'].update(open=False, ticked=set())
                 changed()
             render_tests()
 
@@ -914,20 +983,34 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
             button.on('click.stop', handler)
             return button
 
-        def card(*, selected, title, on_select, subtitle=None, meta=None, reason=None, badge=None, links=(), reason_style='danger'):
+        def card(*, selected, title, on_select, subtitle=None, meta=None, reason=None, badge=None, links=(), reason_style='danger',
+                 expanded=None):
             """A selectable card: one real <button> for the whole face (Enter and Space work, nothing interactive
             nested inside it) plus one "⋯" actions menu beside it. ``reason`` greys the card; ``reason_style``
-            'danger' is for a test the operator chose that cannot run now, 'muted' for a plain fact."""
-            item = ui.element('div').classes('bench-card-item' + (' selected' if selected else '') + (' greyed' if reason else ''))
+            'danger' is for a test the operator chose that cannot run now, 'muted' for a plain fact.
+
+            ``expanded`` (True or False) makes the card an editor that opens below it instead of a selection: it is
+            never green or checked, open it is blue and dashed with an expand arrow, and its button says
+            aria-expanded rather than aria-pressed. The selection stays with the one selected test."""
+            editor = expanded is not None
+            selected = bool(selected) and not editor
+            classes = 'bench-card-item' + (' selected' if selected else '') + (' greyed' if reason else '')
+            if editor:
+                classes += ' editor' + (' open' if expanded else '')
+            item = ui.element('div').classes(classes)
             with item:
                 face = ui.element('button').classes('bench-card-select')
-                face.props(f'type=button aria-pressed={"true" if selected else "false"}')
+                face.props(f'type=button aria-expanded={"true" if expanded else "false"}' if editor
+                           else f'type=button aria-pressed={"true" if selected else "false"}')
                 face.on('click.stop', on_select)
                 with face:
                     with ui.element('div').classes('bench-card-title'):
                         if selected:
                             with ui.element('span').classes('bench-card-check'):
                                 ui.icon('check', size='15px')
+                        elif editor:
+                            with ui.element('span').classes('bench-card-expand'):
+                                ui.icon('expand_less' if expanded else 'expand_more', size='17px')
                         ui.label(title)
                     if subtitle:
                         ui.label(subtitle).classes('bench-card-grid')
@@ -1112,7 +1195,8 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
             return state['standards']['system'] or default_system(current('dut') or {})
 
         def render_standards():
-            """Cards for the automotive standards catalog; non-runnable standards are greyed with their one-sentence reason."""
+            """The ISO 16750-2 card, an editor that expands into the clause checklist (never a selection), then one
+            footnote naming the automotive standards that need other laboratories; those are catalog entries, not cards."""
             dut, bench = current('dut'), current('bench')
             ui.label(STANDARDS_GROUP).classes('bench-group')
             if not dut or not bench:
@@ -1127,20 +1211,16 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                 return
             with ui.element('div').classes('bench-cards'):
                 for info in infos:
-                    if info['expandable']:
-                        item = card(selected=state['standards']['open'], title=info['title'], subtitle=info['subtitle'],
-                                    meta=(f"{info['clause_count']} clauses: " + info['summary']) if info.get('summary')
-                                    else f"{info['runnable_count']} test subsets available · {info['clause_count']} clauses reviewed",
-                                    reason=None if info['runnable'] else info['reason'], badge=f'{system[:-1]} V system',
-                                    on_select=lambda _=None: toggle_standard())
-                        item.classes(add='bench-standard-card')
-                        item.props(f'aria-expanded={"true" if state["standards"]["open"] else "false"}')
-                    else:
-                        # A laboratory this bench will never be is a plain fact, not an operator error: grey, not red.
-                        card(selected=False, title=info['title'], subtitle=info['subtitle'], reason=info['reason'], reason_style='muted',
-                             on_select=lambda _=None: None).classes(add='bench-standard-card')
+                    item = card(selected=False, expanded=state['standards']['open'], title=info['title'], subtitle=info['subtitle'],
+                                meta=(f"{info['clause_count']} clauses: " + info['summary']) if info.get('summary')
+                                else f"{info['runnable_count']} test subsets available · {info['clause_count']} clauses reviewed",
+                                reason=None if info['runnable'] else info['reason'], badge=f'{system[:-1]} V system',
+                                on_select=lambda _=None: toggle_standard())
+                    item.classes(add='bench-standard-card')
             if state['standards']['open']:
                 render_checklist(rows, system)
+            head, catalog, tail = OTHER_LABORATORIES_NOTE.partition('the standards catalog')
+            ui.markdown(f'{head}[{catalog}](/standards){tail}').classes('bench-standards-note')
 
         def ticked_by_default(row):
             """The catalog's own default (``ticked_by_default``); older catalogs without it tick what runs here now."""
@@ -1263,7 +1343,8 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
             await refresh_feasibility()
             if client.is_deleted or generation != state['generation']:
                 return
-            standards['ticked'] = set()
+            # The editor's work is done: its tests are cards under their own group and the last one is the selection.
+            standards.update(open=False, ticked=set())
             render_tests()
             changed()
             notify(f'Added {len(saved)} test{"" if len(saved) == 1 else "s"} under “ISO 16750-2 supply profiles”.', type='positive')
@@ -1703,34 +1784,41 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                 if not jobs:
                     ui.label('Your completed and interrupted runs will appear here.').classes('bench-muted')
                     return
-                with ui.element('div').classes('bench-report-row bench-report-head'):
-                    for head in ('When', 'Run', 'Bench', 'Status', 'Report'):
-                        ui.label(head)
                 rows = report_rows(jobs[:30], recipes=state['catalog']['recipe'])
-                for row in rows:
-                    with ui.element('div').classes('bench-report-row'):
-                        ui.label(row['when']).classes('bench-report-when')
-                        ui.label(row['run'])
-                        ui.label(row['bench']).classes('bench-badge' + (' bench-badge-real' if row['real'] else ''))
-                        with ui.column().classes('gap-0'):
-                            ui.label(row['status']).classes('bench-badge' + (' bench-badge-ok' if row['status'] == 'Complete' else ' bench-badge-partial'))
-                            if row['points']:
-                                ui.label(row['points']).classes('bench-muted')
-                            if row['waiting']:
-                                ui.label(row['waiting']).classes('bench-muted')
-                        with ui.element('div').classes('bench-actions'):
-                            for label, relative in row['links']:
-                                ui.link(label, artifact_url(row['job_id'], relative), new_tab=True).classes('bench-artifact')
-                            ui.button('View run', on_click=lambda _=None, job_id=row['job_id']: select_job(job_id)).props('flat dense no-caps size=sm')
-                            if row['regenerate']:
-                                again = ui.button('Regenerate report', on_click=lambda _=None, job_id=row['job_id']: regenerate_report(job_id),
-                                                  icon='refresh').props('flat dense no-caps size=sm aria-label="Regenerate report"')
-                                again.tooltip('Makes a new report revision from the saved measurements; nothing is re-measured.')
-                                if row['job_id'] in state['regenerate_busy']:
-                                    again.disable()
-                            if row['dequeue']:
-                                ui.button('Remove from report queue', on_click=lambda _=None, job_id=row['job_id']: dequeue_report(job_id),
-                                          icon='playlist_remove').props('flat dense no-caps size=sm')
+                # One grid: the header and every row are subgrids sharing its five columns, so the headings sit over
+                # their cells whatever the longest time, badge or action list in the rows below.
+                with ui.element('div').classes('bench-report-grid'):
+                    with ui.element('div').classes('bench-report-row bench-report-head'):
+                        for head in ('When', 'Run', 'Bench', 'Status', 'Report'):
+                            ui.label(head)
+                    for row in rows:
+                        with ui.element('div').classes('bench-report-row'):
+                            with ui.element('div').classes('bench-report-when'):
+                                clock, date = time_lines(row['when'])
+                                ui.label(clock)
+                                if date:
+                                    ui.label(date).classes('bench-report-date')
+                            ui.label(row['run']).classes('bench-report-run')
+                            ui.label(row['bench']).classes('bench-badge' + (' bench-badge-real' if row['real'] else ''))
+                            with ui.element('div').classes('bench-report-status'):
+                                ui.label(row['status']).classes('bench-badge' + (' bench-badge-ok' if row['status'] == 'Complete' else ' bench-badge-partial'))
+                                if row['points']:
+                                    ui.label(row['points']).classes('bench-muted')
+                                if row['waiting']:
+                                    ui.label(row['waiting']).classes('bench-muted')
+                            with ui.element('div').classes('bench-report-actions'):
+                                for label, relative in row['links']:
+                                    ui.link(label, artifact_url(row['job_id'], relative), new_tab=True).classes('bench-artifact')
+                                ui.button('View run', on_click=lambda _=None, job_id=row['job_id']: select_job(job_id)).props('flat dense no-caps size=sm')
+                                if row['regenerate']:
+                                    again = ui.button('Regenerate report', on_click=lambda _=None, job_id=row['job_id']: regenerate_report(job_id),
+                                                      icon='refresh').props('flat dense no-caps size=sm aria-label="Regenerate report"')
+                                    again.tooltip('Makes a new report revision from the saved measurements; nothing is re-measured.')
+                                    if row['job_id'] in state['regenerate_busy']:
+                                        again.disable()
+                                if row['dequeue']:
+                                    ui.button('Remove from report queue', on_click=lambda _=None, job_id=row['job_id']: dequeue_report(job_id),
+                                              icon='playlist_remove').props('flat dense no-caps size=sm')
                 if len(jobs) > 30:
                     ui.label(f'Newest 30 of {len(jobs)} saved runs shown.').classes('bench-muted')
 

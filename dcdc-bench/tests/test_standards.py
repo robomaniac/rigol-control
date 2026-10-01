@@ -522,6 +522,15 @@ def test_bench_page_card_counts_now_after_approval_and_mock_only_separately(real
                 real_card["tickable_count"]) == (1, 0, 2, 1), system
         assert real_card["summary"] == "1 DC level subset available, 2 mock only (simulated bench)" and real_card["runnable"]
     assert R.card_summary([]) == "0 DC level subsets available"
+    # The page renders one standards card. The laboratories this bench will never be (transients, EMC, mechanical,
+    # climatic) stay catalog entries and one footnote; they are not cards nobody can select.
+    assert [card["id"] for card in R.standard_cards(mock_bench, dut, "12V")] == [S.ISO16750_2_ID]
+    assert set(R.STANDARD_CARD_TITLES) == {S.ISO16750_2_ID}
+    others = (S.ISO7637_2_ID, S.CISPR25_ID, S.ISO11452_ID, S.ISO10605_ID, S.ISO16750_3_ID, S.ISO16750_4_ID)
+    assert all(standard_id in S.STANDARDS for standard_id in others), "the catalog itself keeps them"
+    assert {e.clause.standard_id for c in S.catalog(mock_bench, dut, "12V") for e in c.entries} >= set(others)
+    for name in ("ISO 7637-2", "CISPR 25", "ISO 11452", "ISO 10605", "ISO 16750-3/-4", "other laboratories", "standards catalog"):
+        assert name in R.OTHER_LABORATORIES_NOTE, name
 
 
 def test_generated_mock_only_recipes_ship_unapproved_and_say_where_approval_happens(mock_bench, dut):
