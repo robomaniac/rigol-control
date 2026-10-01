@@ -440,3 +440,24 @@ def test_figure_with_no_plottable_points_says_so_instead_of_staying_silent():
     assert observed["traces"] == []
     assert observed["status"] == ("2 point result(s) in selected test curves. No qualified point is plotted on this "
                                   "figure. Raw observations remain unchanged.")
+
+
+@pytest.mark.parametrize("evidence_label, kind", [("SYNTHETIC", "Simulated"), ("MEASURED", "Measured")])
+def test_axis_title_follows_the_evidence_label(evidence_label, kind):
+    """Codex review item 4: the horizontal-axis title for a chosen quantity says Simulated or Measured as the
+    evidence label does; the time axis and the figure default are unchanged."""
+    script = (TEMPLATES / "web/report.js").read_text()
+    harness = r"""
+const {script, model} = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+""" + SLICE_SUPPORT + r"""
+const shipped = slice('  const quantityLabels', '  const hoverLabels');
+const execute = new Function('model', "'use strict';\n" + helpers + `
+  const state = {x_key: 'default', log_current: false};
+  const points = new Map();
+` + shipped + `
+  return ['Iout_A', 'Pout_W', 'Vin_V', 'elapsed_s', 'default'].map(key => quantityLabel(key) ?? null);`);
+process.stdout.write(JSON.stringify(execute(model)));
+"""
+    observed = _run_node(harness, {"script": script, "model": {"evidence_label": evidence_label}})
+    assert observed == [kind + " output current (A)", kind + " output power (W)", kind + " input voltage (V)",
+                        "Time since first accepted query (s)", None]

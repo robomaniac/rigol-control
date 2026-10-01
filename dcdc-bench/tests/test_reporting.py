@@ -291,7 +291,7 @@ def test_voltage_comparison_uses_supplied_values_and_discloses_unreached_conditi
     assert "| 12 V input | 12.002 V | 83.46 % | 0.797 A | 84.68 % at 0.70 A |" in body
     assert "| 36 V nominal (35.8 V set) | not available | not available | not available | not available |" in body
     assert "same 0.5 A requested output load" in body
-    assert "| Input condition | Measured input at 0.5 A | Efficiency at 0.5 A |" in body
+    assert "| Input condition | Simulated input at 0.5 A | Efficiency at 0.5 A |" in body
     assert "supply is limited to 1 A at its output" in body
     assert "Highest qualified load" in body and "Highest tested load" not in body
     assert "See @fig-efficiency." in body
@@ -445,7 +445,7 @@ def test_prior_attempt_without_recorded_conditions_names_no_voltage(model):
     assert "### Earlier startup attempt {#prior-input-attempt}" in body
     assert "An earlier run attempted an input condition and produced no qualified efficiency result." in body
     assert "An earlier startup attempt produced no qualified efficiency result." in body
-    assert "| Input condition | Measured input at the reference load | Efficiency at the reference load |" in body
+    assert "| Input condition | Simulated input at the reference load | Efficiency at the reference load |" in body
     for invented in ("The earlier ", "condition was attempted", "continues with", "continues at",
                      "covers the requested", "Earlier 12 V", "24 V", "36 V"):
         assert invented not in body, invented
@@ -474,7 +474,7 @@ def test_voltage_narrative_follows_recorded_conditions_not_recipe_literals(model
     body = renderer._body(model)
     assert "Compare the curves at the same 0.25 A requested output load." in body
     assert "supply is limited to 2 A at its output" in body
-    assert "| Input condition | Measured input at 0.25 A | Efficiency at 0.25 A |" in body
+    assert "| Input condition | Simulated input at 0.25 A | Efficiency at 0.25 A |" in body
     assert "The supply powers the converter input at two conditions: 18 V and nominal 28 V." in body
     assert "from the converter's 5 V output" in body
     assert "The supply current limit is 2 A, so" in body
@@ -497,7 +497,7 @@ def test_voltage_narrative_omits_every_condition_the_model_does_not_record(model
     body = renderer._body(model)
     controls = renderer._controls_html(model)
     assert "### Efficiency at each input voltage" in body
-    assert "| Input condition | Measured input at the reference load | Efficiency at the reference load |" in body
+    assert "| Input condition | Simulated input at the reference load | Efficiency at the reference load |" in body
     assert "The supply powers the converter input at each requested condition." in body
     assert "from the converter's output." in body
     assert "A curve stops at the recorded source or measurement boundary." in body
@@ -926,3 +926,42 @@ def test_figure_footer_wraps_a_long_measurement_boundary_onto_its_own_line():
     assert short.count("<br>") == 2 and "path | Aggregated settled DC points" in short
     assert long.count("<br>") == 3 and "load in local sense)<br>Aggregated settled DC points" in long
     assert all(len(line) <= renderer.FOOTER_LINE_CHARS for line in long.split("<br>")[2:])
+
+
+def test_generic_wording_follows_the_evidence_label(model):
+    """Codex review item 4: the axis options, hover modes, table headers and method sentences never call a
+    SYNTHETIC run's values "Measured"; a MEASURED run keeps the measured wording. Captions and numbers that
+    come from the model are left exactly as supplied."""
+    model["points"].append({"point_id": "p0", "test_id": "load", "vin_target_V": 12, "iout_target_A": 0, "Iout_A": 0.,
+                            "Iin_A": .01, "Pin_W": .12, "Vout_V": 5., "efficiency_pct": None, "qualification": "valid"})
+    model["method"] = {"declared_acquisition": {"duration_s": 3, "target_poll_interval_s": .5, "minimum_complete_cycles": 2,
+                                                "maximum_interchannel_skew_s": .05},
+                       "declared_settling": {"minimum_dwell_s": 2, "window_s": 3, "minimum_fresh_samples": 5,
+                                             "maximum_vout_span_V": .01, "timeout_s": 20},
+                       "achieved_points": [], "clock_mode": "monotonic"}
+    model["execution"] = {"voltage_efficiency_sweep": {"prior_input_attempt": {
+        "run_id": "earlier-aborted-run", "last_startup_cycle": {"Vin_V": 7.125, "Iin_A": .9991, "Vout_V": .1, "Iout_A": .02}}},
+        "voltage_comparison": [{"label": "earlier input", "qualified_points": 0, "phase_status": "previous-attempt-unqualified"}]}
+    synthetic_body, synthetic_controls = renderer._body(model), renderer._controls_html(model)
+    assert "Simulated values are aggregated settled DC point results." in synthetic_body
+    assert "| Requested input (V) | Simulated input current (A) | Input power (W) | Output voltage (V) |" in synthetic_body
+    assert "3 s window with 5 queried synthetic readings;" in synthetic_body
+    assert "These synthetic readings belong to the last recorded startup cycle" in synthetic_body
+    assert "Measured values are" not in synthetic_body and "Measured input current" not in synthetic_body
+    assert "Measured input conditions: 12 V." in synthetic_body, "the model's own caption is not rewritten"
+    for option in ('<option value="Iout_A">Simulated output current (A)</option>', '<option value="Pout_W">Simulated output power (W)</option>',
+                   '<option value="Vin_V">Simulated input voltage (V)</option>', '<option value="closest">Nearest simulated point</option>',
+                   '<option value="x unified">Values at simulated x</option>'):
+        assert option in synthetic_controls, option
+    assert "Measured" not in synthetic_controls and "measured" not in synthetic_controls
+    measured = _measured_bench(copy.deepcopy(model))
+    measured["execution"].update(copy.deepcopy(model["execution"]))  # the helper replaces execution; keep the startup attempt
+    measured_body, measured_controls = renderer._body(measured), renderer._controls_html(measured)
+    assert "Measured values are aggregated settled DC point results." in measured_body
+    assert "| Requested input (V) | Measured input current (A) | Input power (W) | Output voltage (V) |" in measured_body
+    assert "3 s window with 5 queried readings;" in measured_body
+    assert "These readings belong to the last recorded startup cycle" in measured_body
+    for option in ('<option value="Iout_A">Measured output current (A)</option>', '<option value="closest">Nearest measured point</option>',
+                   '<option value="x unified">Values at measured x</option>'):
+        assert option in measured_controls, option
+    assert "Simulated" not in measured_controls and "simulated" not in measured_controls

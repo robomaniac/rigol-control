@@ -31,8 +31,10 @@
   let pending = Promise.resolve();
   const errorBox = document.getElementById('report-error');
   const fail = error => { errorBox.textContent = 'Report interaction failed: ' + String(error.message ?? error); console.error(error); };
-  const quantityLabels = {Iout_A: 'Measured output current (A)', Pout_W: 'Measured output power (W)',
-    Vin_V: 'Measured input voltage (V)', elapsed_s: 'Time since first accepted query (s)'};
+  const quantityLabels = {Iout_A: 'output current (A)', Pout_W: 'output power (W)', Vin_V: 'input voltage (V)'};
+  // Axis wording follows the evidence label: a SYNTHETIC run never calls its values "Measured".
+  const quantityLabel = key => key === 'elapsed_s' ? 'Time since first accepted query (s)' :
+    key in quantityLabels ? (model.evidence_label === 'MEASURED' ? 'Measured' : 'Simulated') + ' ' + quantityLabels[key] : undefined;
   function xKey(spec) { return state.x_key === 'default' || spec.sample_series?.length ? spec.x_key : state.x_key; }
   function isLog(spec) { return state.log_current && /current|Iout_A|Iin_A/.test(xKey(spec)); }
   function plottedValue(spec, point) {
@@ -184,7 +186,7 @@
         line:{color:'#6b7280',width:1.2,dash:'dash'},layer:'below'}]:[],
       annotations:reference?[{xref:'paper',x:1,yref:'y',y:reference.value,text:safe(reference.label),
         xanchor:'right',yanchor:'bottom',showarrow:false,font:{size:11,color:'#59636e'},bgcolor:'rgba(255,255,255,0.85)'}]:[],
-      xaxis:{title:{text:safe(spec.sample_series?.length ? spec.x_label : quantityLabels[state.x_key] ?? spec.x_label)}, type:isLog(spec)?'log':'linear',
+      xaxis:{title:{text:safe(spec.sample_series?.length ? spec.x_label : quantityLabel(state.x_key) ?? spec.x_label)}, type:isLog(spec)?'log':'linear',
         gridcolor:'#e6edf1',zeroline:false,range:axisRange,autorange:!axisRange,tickformat:'~g',nticks:7},
       yaxis:{title:{text:safe(spec.y_label)},gridcolor:'#e6edf1',zeroline:false,
         range:ranges.y??reference?.y_range,autorange:!(ranges.y??reference?.y_range),tickformat:'~g',nticks:6},
