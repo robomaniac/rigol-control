@@ -932,7 +932,11 @@ def worker(directory: Path, *, report_only=False):
             save(state="cancelled")
             return
         plan = Plan.model_validate(_read(directory / "plan.json"))
-        if not verify_plan_hash(plan):
+        # The plan hash binds arming. A report-only retry renders finalized
+        # evidence whose integrity manifest _verified_off checks; the saved
+        # plan may predate schema fields added since (its hash then differs
+        # for defaults only) and must not block regenerating a report.
+        if not report_only and not verify_plan_hash(plan):
             raise ValueError("Job plan changed")
         request = _read(directory / "request.json")
         if report_only:

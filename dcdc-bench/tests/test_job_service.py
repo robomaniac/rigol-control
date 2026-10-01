@@ -7,7 +7,7 @@ import uuid
 
 import pytest
 
-from dcdc_bench.job_service import JobService, worker, _latest_cycle
+from dcdc_bench.job_service import JobService, worker, _latest_cycle, _read
 from dcdc_bench.storage import atomic_json, RunStore
 
 
@@ -643,3 +643,19 @@ def test_uncancelled_job_records_no_stop_time_and_an_empty_marker_is_tolerated(s
     (job / "junk").write_text("not a time")
     assert _stop_requested_utc(job / "empty") is None and _stop_requested_utc(job / "junk") is None
     assert _stop_requested_utc(job / "missing") is None
+
+
+def test_report_only_retry_renders_a_job_whose_saved_plan_predates_the_schema(service, monkeypatch):
+    """A plan saved under an older schema no longer re-hashes identically; that must block arming,
+    never the regeneration of a report from finalized evidence."""
+    job_id, job = report_only_job(service, monkeypatch)
+    plan_json = _read(job / "plan.json")
+    plan_json["plan_hash"] = "0" * 64              # stands for a hash computed before new default fields existed
+    atomic_json(job / "plan.json", plan_json)
+    monkeypatch.setattr("dcdc_bench.job_service._render_process", fake_render("success", "success"))
+    worker(job, report_only=True)
+    assert service.status(job_id)["state"] == "completed", service.status(job_id)
+    state = _read(job / "job.json"); state.update(state="queued"); atomic_json(job / "job.json", state)
+    worker(job)                                     # acquisition still refuses the changed plan
+    snapshot = service.status(job_id)
+    assert snapshot["state"] == "failed" and "Job plan changed" in snapshot["error"]
