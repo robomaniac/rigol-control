@@ -176,6 +176,18 @@ def acquire_mock(plan: Plan, out: Path, *, scenario: str = "normal", operator_ob
     if types & set(SUPPLY_PROFILE_TEST_TYPES):
         raise ValueError("A recipe that mixes a supply profile (slow_supply_ramp, reset_staircase) with other test types "
                          "cannot be executed; plan each profile as its own recipe")
+    if types - {"steady_state_load_sweep"}:
+        # Best-effort ISO 16750-2 procedures (transient_hold, momentary_drop, micro_interruption, line_interruption):
+        # phase-scoped, synthetic plant only. Imported here, like the other procedures, only when a plan needs it.
+        from .best_effort_procedures import BEST_EFFORT_TEST_TYPES, run_best_effort_mock
+        if len(types) == 1 and types <= set(BEST_EFFORT_TEST_TYPES):
+            if scenario != "normal":
+                raise ValueError("The best-effort ISO 16750-2 procedures have no failure-injection scenarios; use scenario 'normal'")
+            return run_best_effort_mock(plan, out, operator_observations=operator_observations,
+                                        attachment_descriptors=attachment_descriptors)
+        if types & set(BEST_EFFORT_TEST_TYPES):
+            raise ValueError("A recipe that mixes a best-effort ISO 16750-2 procedure with other test types cannot be executed; "
+                             "plan each clause as its own recipe")
     from .runner import run_mock
     return run_mock(plan, out, scenario=scenario, operator_observations=operator_observations,
                     attachment_descriptors=attachment_descriptors)
