@@ -145,7 +145,7 @@ jobs:
           "$BROWSER_PATH" --version
           pdftohtml -v 2>&1 | head -n 1
 
-      - name: Render the three mock demo reports (HTML and vector PDF)
+      - name: Render the four mock demo reports (HTML and vector PDF)
         # Simulated instruments only. Writes normal/, setup-limited/ and
         # aborted/ runs plus index.html under DCDC_DEMO_DIR.
         run: dcdc-bench demo --out dcdc-bench/examples/generated

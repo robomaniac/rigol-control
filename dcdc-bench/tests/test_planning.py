@@ -488,7 +488,9 @@ def test_best_effort_types_plan_on_the_mock_only_after_approval_and_are_refused_
     assert all("best_effort_approved is false" in p.reason and "accepted_deviations_sha256 is not declared" in p.reason for p in blocked.points)
     assert all("uvlo_approved is false" in p.reason for p in blocked.points), "the 4.5 V drop is below the 9 V minimum"
     gaps = best_effort_approval_gaps(bench, drop)
-    assert gaps[:2] == ["recipe authorization.best_effort_approved is false", "recipe authorization.accepted_deviations_sha256 is not declared"]
+    assert gaps[0] == "recipe authorization.best_effort_approved is false"
+    assert gaps[1].startswith("recipe authorization.accepted_deviations_sha256 is not declared") and recipe_deviations_sha256(drop) in gaps[1], \
+        "the Preview reason names the hash the owner must accept"
     # Approved with the matching hash: executable; the drop level is an expected-off point with no load budget.
     approved = _approve(drop, uvlo=True)
     assert not best_effort_approval_gaps(bench, approved)

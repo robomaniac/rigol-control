@@ -59,6 +59,7 @@ from __future__ import annotations
 from typing import Any
 
 from . import standards as S
+from .planning import deviation_sheets_sha256
 from .domain import (BEST_EFFORT_TEST_TYPES, LINE_INTERRUPTION_TEST_TYPE, MICRO_INTERRUPTION_TEST_TYPE, MOMENTARY_DROP_TEST_TYPE,
                      RESET_STAIRCASE_TEST_TYPE, SLOW_SUPPLY_RAMP_TEST_TYPE, TRANSIENT_HOLD_TEST_TYPE, BenchProfile, DeviationSheet,
                      DutProfile, TestRecipe)
@@ -309,7 +310,8 @@ def _best_effort_notes(number: str, sheets: list[DeviationSheet], params: dict[s
             f"that setting, DS5); the bench's protective policy must set dut_input_overvoltage_V above the top level and never "
             f"treats the source OVP as protection of the converter output (brief 7.4). Observed output states come from about 1 s "
             f"polling; states shorter than the poll interval are not visible to this bench. Synthetic plant only: a real bench "
-            f"refuses this test type as {S.REAL_HARDWARE_REFUSAL}. {S.BEST_EFFORT_APPROVAL_HOW}.")
+            f"refuses this test type as {S.REAL_HARDWARE_REFUSAL}. {S.BEST_EFFORT_APPROVAL_HOW}. The declared deviation sheet "
+            f"hash this recipe must accept is {deviation_sheets_sha256(sheets)} (the Preview reason repeats it while unapproved).")
     if exact:
         text += " This recipe programs the clause level exactly (authorization.program_clause_level_exactly, owner decision 6)."
     elif params.get("level_equals_dut_maximum"):

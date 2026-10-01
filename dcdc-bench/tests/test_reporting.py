@@ -1009,7 +1009,7 @@ def _with_deviation_sheet(model, entries=None):
     return model
 
 
-def test_deviation_sheet_follows_the_results_as_one_pdf_block_with_seven_columns_legend_and_statement(model):
+def test_deviation_sheet_follows_the_results_as_a_seven_column_table_with_numbered_notes_legend_and_statement(model):
     from dcdc_bench.analysis import BEST_EFFORT_STATEMENT
     body = renderer._body(_with_deviation_sheet(model))
     heading = "### Deviations from ISO 16750-2 clause 4.6.1.1, variant A {#deviations}"
@@ -1017,25 +1017,28 @@ def test_deviation_sheet_follows_the_results_as_one_pdf_block_with_seven_columns
     raw_evidence = body.index('<section class="raw-evidence"')
     assert body.index("### Path efficiency") < start < raw_evidence < body.index("## Regulation"), "under the test's results"
     section = body[start:raw_evidence]
-    assert "::: {.report-table .table-deviations}" in section and 'tbl-colwidths="[12,14,22,11,11,12,18]"' in section
+    assert "::: {.report-table .table-deviations}" in section and 'tbl-colwidths="[12,15,29,12,12,14,6]"' in section
     assert DEVIATION_HEADER in section
     rows = [line for line in section.splitlines() if line.startswith("| ") and line not in (DEVIATION_HEADER,) and "---" not in line]
     assert len(rows) == 5
-    assert rows[1] == ("| drop duration (s) | 100 ± 5 ms (ISO) | commanded 100 ms; host-timed 103 ms; bounded 0–270 ms (derived) | "
-                       "LAN voltage step | host clock (write timestamps) | unknown until measured | Two LAN writes, each 4–55 ms "
-                       "transport (LAN) and up to 118 ms processing (DS5); interval between the two write timestamps on the Pi |")
+    assert rows[1].startswith("| drop duration (s) | 100 ± 5 ms (ISO) | commanded 100 ms; host-timed 103 ms; bounded 0–270 ms (derived) | "
+                              "LAN voltage step | host clock (write timestamps) | unknown until measured | ")
+    note_number = rows[1].rstrip("| ").rsplit("| ", 1)[-1].strip()
+    assert note_number.isdigit(), "the last column numbers the row's note instead of carrying its text"
+    assert (f"{note_number}. drop duration (s): Two LAN writes, each 4–55 ms transport (LAN) and up to 118 ms processing (DS5); "
+            "interval between the two write timestamps on the Pi.") in section, "the note follows the table in the numbered list"
     assert rows[2].startswith("| edge max (s) | at most 10 ms (ISO) | \\< 110 ms loaded (DS5); not measured at the converter | supply slew |")
     assert ("Basis tags: ISO = ISO 16750-2 clause text or figure; DS5 = supply datasheet bound; derived = derived from the tagged "
             "bounds; SEED = seeded bench profile or protective policy." in section)
     assert "Observed output states come from about 1 s polling; states shorter than the poll interval are not visible to this bench." in section
     assert "Recorded by the procedure: Variant A commanded over LAN; nothing at the converter terminals is measured." in section
     assert f"**{BEST_EFFORT_STATEMENT}**" in section
-    open_block, close_block = "```{=typst}\n#block(breakable: false)[\n```", "```{=typst}\n]\n```"
-    assert section.count(open_block) == 1 and section.count(close_block) == 1
-    order = [section.index(text) for text in (heading, open_block, DEVIATION_HEADER, "Basis tags:", "Observed output states",
-                                              "Recorded by the procedure", f"**{BEST_EFFORT_STATEMENT}**", close_block)]
-    assert order == sorted(order), "heading, open, table, legend, poll note, procedure statement, statement, close"
-    assert body.count(open_block) == 3, "the DUT block, the acquisition-outcome block and the deviation sheet"
+    open_block = "```{=typst}\n#block(breakable: false)[\n```"
+    assert open_block not in section, "the sheet is left to the theme's measured pagination rule, never forced into one block"
+    order = [section.index(text) for text in (heading, DEVIATION_HEADER, "Notes, numbered in the table's last column:", "Basis tags:",
+                                              "Observed output states", "Recorded by the procedure", f"**{BEST_EFFORT_STATEMENT}**")]
+    assert order == sorted(order), "heading, table, notes, legend, poll note, procedure statement, statement"
+    assert body.count(open_block) == 2, "the DUT block and the acquisition-outcome block only"
     lowered = section.lower()
     for forbidden in ("achieved", " pass", "fail", "compliant"):
         assert forbidden not in lowered, forbidden
@@ -1048,13 +1051,12 @@ def test_deviation_sheet_follows_the_results_as_one_pdf_block_with_seven_columns
 
 def test_long_deviation_sheet_is_left_to_the_table_pagination_rule(model):
     recorded = json.loads(BEST_EFFORT_FIXTURE.read_text(encoding="utf-8"))["deviations"]
-    entries = [{**copy.deepcopy(recorded[index % len(recorded)]), "parameter": f"parameter_{index}_s"}
-               for index in range(renderer.DEVIATION_KEEP_TOGETHER_ROWS + 1)]
+    entries = [{**copy.deepcopy(recorded[index % len(recorded)]), "parameter": f"parameter_{index}_s"} for index in range(9)]
     body = renderer._body(_with_deviation_sheet(model, entries))
     start = body.index("### Deviations from ISO 16750-2 clause 4.6.1.1, variant A {#deviations}")
     section = body[start:body.index('<section class="raw-evidence"')]
     assert section.count("```{=typst}\n#block(breakable: false)[\n```") == 0 and DEVIATION_HEADER in section
-    assert sum(1 for line in section.splitlines() if line.startswith("| parameter ")) == renderer.DEVIATION_KEEP_TOGETHER_ROWS + 1
+    assert sum(1 for line in section.splitlines() if line.startswith("| parameter ")) == 9
     assert body.count("```{=typst}\n#block(breakable: false)[\n```") == 2
 
 

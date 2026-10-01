@@ -97,15 +97,20 @@ def uvlo_approval_gaps(bench: BenchProfile, recipe: TestRecipe) -> list[str]:
     return gaps
 
 
-def recipe_deviations_sha256(recipe: TestRecipe) -> str | None:
-    """The hash a best-effort approval accepts: the single sheet's ``sha256()``, or for a recipe with several best-effort
-    tests the SHA-256 of the JSON list of their sheet hashes in test order. None when the recipe carries no sheet."""
-    digests = [test.best_effort.deviation_sheet.sha256() for test in recipe.tests if test.best_effort is not None]
+def deviation_sheets_sha256(sheets: list) -> str | None:
+    """The hash a best-effort approval accepts: the single sheet's ``sha256()``, or for several sheets (one recipe with
+    several best-effort tests) the SHA-256 of the JSON list of their hashes in test order. None without a sheet."""
+    digests = [sheet.sha256() for sheet in sheets]
     if not digests:
         return None
     if len(digests) == 1:
         return digests[0]
     return hashlib.sha256(json.dumps(digests, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def recipe_deviations_sha256(recipe: TestRecipe) -> str | None:
+    """``deviation_sheets_sha256`` over the recipe's best-effort tests in order; None when the recipe carries no sheet."""
+    return deviation_sheets_sha256([test.best_effort.deviation_sheet for test in recipe.tests if test.best_effort is not None])
 
 
 def best_effort_approval_gaps(bench: BenchProfile, recipe: TestRecipe) -> list[str]:
@@ -128,7 +133,8 @@ def best_effort_approval_gaps(bench: BenchProfile, recipe: TestRecipe) -> list[s
         gaps.append("recipe authorization.best_effort_approved is false")
     declared = recipe_deviations_sha256(recipe)
     if authorization.accepted_deviations_sha256 is None:
-        gaps.append("recipe authorization.accepted_deviations_sha256 is not declared")
+        gaps.append("recipe authorization.accepted_deviations_sha256 is not declared"
+                    + (f" (the declared deviation sheet's hash is {declared})" if declared else ""))
     elif declared is None:
         gaps.append("recipe declares no deviation sheet to accept")
     elif authorization.accepted_deviations_sha256 != declared:

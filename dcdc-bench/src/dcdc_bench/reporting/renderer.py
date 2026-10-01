@@ -53,10 +53,8 @@ TABLE_LAYOUTS = {
     "startup-readings": (25, 25, 25, 25),
     "exclusions": (10, 13, 17, 20, 40),
     "about": (22, 78),
-    "deviations": (12, 14, 22, 11, 11, 12, 18),
+    "deviations": (12, 15, 29, 12, 12, 14, 6),
 }
-# A deviation sheet of at most this many rows is one unbreakable PDF block with its legend and statement.
-DEVIATION_KEEP_TOGETHER_ROWS = 8
 # ReportProfile.paper -> the Quarto/Typst paper name; Letter is the default (brief §12.6).
 PAPER_SIZES = {"letter": "us-letter", "a4": "a4"}
 # Plain-language reading of a measurement-binding location (bench-profile vocabulary).
@@ -766,23 +764,34 @@ def _phase_outcome(value: Any) -> str:
 def _deviation_sheet_section(model: dict) -> list[str]:
     """The best-effort deviation sheet under the test's results (best-effort proposal §2.3 item 1).
 
-    One Markdown source serves HTML and PDF. A sheet of a few rows is one
-    unbreakable Typst block, the DUT-section pattern, so its basis legend and
-    statement stay with the table; a longer sheet is left to the theme's table
-    pagination rule. The no-compliance statement is renderer-owned text, so no
-    model can leave it out, and no cell uses the verb "achieved": the bench
-    commands, the host clock times, and the converter side is "not measured".
+    One Markdown source serves HTML and PDF. The table keeps its cells short:
+    the last column numbers each row's note and the notes follow the table as
+    a numbered list, so the rows stay a few lines tall and the print theme's
+    measured pagination rule (templates/theme/print-tables.typ) decides whether
+    the table moves whole or breaks between rows; a sheet is never forced into
+    one unbreakable block, which overflowed the page when the notes were long.
+    The no-compliance statement is renderer-owned text, so no model can leave
+    it out, and no cell uses the verb "achieved": the bench commands, the host
+    clock times, and the converter side is "not measured".
     """
     sheet = model.get("best_effort")
     if not sheet:
         return []
-    rows = deviation_sheet_rows(sheet)
+    table_rows: list[list[str]] = []
+    notes: list[str] = []
+    for row in deviation_sheet_rows(sheet):
+        cells = [str(cell) for cell in row[:6]]
+        note = str(row[6]).strip() if len(row) > 6 else ""
+        if note and note != "—":
+            notes.append(f"{len(notes) + 1}. {_md(cells[0])}: {_md(note)}.")
+            cells.append(str(len(notes)))
+        else:
+            cells.append("—")
+        table_rows.append(cells)
     title = sheet.get("title") or f"Deviations from ISO 16750-2 clause {sheet.get('clause', 'unknown')}"
-    out = [f"### {_md(title)} {{#deviations}}", ""]
-    keep_together = len(rows) <= DEVIATION_KEEP_TOGETHER_ROWS
-    if keep_together:
-        out += ["```{=typst}", "#block(breakable: false)[", "```", ""]
-    out += [_rows_table(list(DEVIATION_HEADERS), rows, layout="deviations"), ""]
+    out = [f"### {_md(title)} {{#deviations}}", "", _rows_table(list(DEVIATION_HEADERS), table_rows, layout="deviations"), ""]
+    if notes:
+        out += ["Notes, numbered in the table's last column:", "", *notes, ""]
     bases = sheet.get("bases") or {}
     if isinstance(bases, dict) and bases:
         out += ["Basis tags: " + "; ".join(f"{_md(tag)} = {_md(text)}" for tag, text in bases.items()) + ".", ""]
@@ -790,8 +799,6 @@ def _deviation_sheet_section(model: dict) -> list[str]:
     if isinstance(sheet.get("procedure_statement"), str) and sheet["procedure_statement"].strip():
         out += ["Recorded by the procedure: " + _md(sheet["procedure_statement"]), ""]
     out += [f"**{_md(BEST_EFFORT_STATEMENT)}**", ""]
-    if keep_together:
-        out += ["```{=typst}", "]", "```", ""]
     return out
 
 

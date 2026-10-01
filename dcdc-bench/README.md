@@ -25,7 +25,7 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -e . -e './dcdc-bench[ui,report,real]'
 sudo apt-get install --no-install-recommends chromium-headless-shell poppler-utils
 python3 dcdc-bench/tools/setup.py                              # pinned Quarto into dcdc-bench/.tools/ (the dcdc-bench/.venv it also creates is optional)
-.venv/bin/dcdc-bench demo --out dcdc-bench/examples/generated  # three simulated reports; run on a laptop if you can
+.venv/bin/dcdc-bench demo --out dcdc-bench/examples/generated  # four simulated reports; run on a laptop if you can
 .venv/bin/dcdc-bench ui --root dcdc-bench/workspace            # bench page on http://localhost:8082, simulated bench
 ```
 
@@ -113,9 +113,12 @@ python -m pip install -e . -e './dcdc-bench[ui,report,real]'
 dcdc-bench ui --root dcdc-bench/workspace --inventory Software/config/lab.yaml
 ```
 
-The default local URL is `http://localhost:8082`; forward that port through
-SSH when the server is on a Pi, and omit `--inventory` to use simulated
-equipment. The report toolchain also needs Quarto/Typst and Chromium, described
+The default local URL is `http://localhost:8082`. The page binds to the
+server's loopback address only (no login; it can energize an approved bench),
+so from another computer it is reached through a port forward, never by the
+Pi's LAN address: VS Code **Forward a Port** (or `ssh -L 8082:127.0.0.1:8082
+<user>@<pi>`), then `http://localhost:8082/` in your own browser. Omit
+`--inventory` to use simulated equipment. The report toolchain also needs Quarto/Typst and Chromium, described
 below. On this development bench, the persistent service uses the already
 forwarded **[port 8081](http://localhost:8081/)** *(local bench only; reachable through an SSH port forward)* and preserves existing
 `/Runs/` report links. Real jobs run in separate services with automatic
@@ -174,11 +177,14 @@ output stays to nominal as load and input change, and input consumption while
 enabled with no external load. The planner retains all **21 requested
 points**; with a 1 A source, an assumed 80% efficiency and a 90% current
 budget, two 12 V points are excluded by the planning budget. These assumptions
-are not measured efficiency or an approved protective policy. Three examples
+are not measured efficiency or an approved protective policy. Four examples
 are produced: **Normal** (valid acquired points, planning exclusions, graphs
 and evidence), **Setup limited** (a simulated source enters current limiting;
-that point cannot support a nominal efficiency claim) and **Aborted** (an early
-stop preserves completed points, unrun points and shutdown evidence).
+that point cannot support a nominal efficiency claim), **Aborted** (an early
+stop preserves completed points, unrun points and shutdown evidence) and
+**Best effort** (the ISO 16750-2 §4.3.1.2 jump start as this bench can command
+it, with the deviation sheet that records what the clause asks against what the
+simulated supply did; its approval is part of the demonstration).
 
 Open **`dcdc-bench/examples/generated/index.html`** when the command completes. Every
 report works offline with JavaScript enabled and no Python server: choose

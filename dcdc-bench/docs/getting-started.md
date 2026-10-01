@@ -225,13 +225,13 @@ converter, source and load.
    that exceed the 1 A source budget at the assumed 80 % efficiency; they are
    kept in the plan with an explanation and skipped.
 
-2. Generate the three simulated example reports.
+2. Generate the four simulated example reports.
 
    ```bash
    .venv/bin/dcdc-bench demo --out dcdc-bench/examples/generated
    ```
 
-   **Memory and time.** This runs three mock acquisitions and six document
+   **Memory and time.** This runs four mock acquisitions and eight document
    builds (HTML and PDF each). On the 1 GB verification Pi the three run
    folders were created about **3.5 minutes apart** (run IDs `083115`,
    `083435`, `083852` in [implementation_status.md](implementation_status.md)),
@@ -244,7 +244,8 @@ converter, source and load.
 
    *What you should see:* `Mock normal: acquiring and rendering…`,
    `Saved dcdc-bench/examples/generated/normal/<run_id>`, the same for
-   `setup-limited` and `aborted`, then `Open: /abs/path/dcdc-bench/examples/generated/index.html`.
+   `setup-limited`, `aborted` and `best-effort`, then
+   `Open: /abs/path/dcdc-bench/examples/generated/index.html`.
 
 3. Open the index in a browser.
 
@@ -259,18 +260,19 @@ converter, source and load.
    `ssh -L 8082:127.0.0.1:8082 <user>@<pi>`) and open `http://localhost:8082/`.
 
    *What you should see:* a page titled **DC–DC converter characterization**
-   marked **SYNTHETIC — software demonstration only** with three entries, each
+   marked **SYNTHETIC — software demonstration only** with four entries, each
    linking an *Interactive report* and a *Canonical PDF*.
 
-4. What the three examples show (dcdc-bench README):
+4. What the four examples show (dcdc-bench README):
 
    | Example | What to inspect |
    | --- | --- |
    | Normal test | Valid acquired points, planning exclusions, graphs and evidence |
    | Supply reaches its current limit | A simulated source enters current limiting; that point cannot support a nominal efficiency claim |
    | Test stopped early | An early stop preserves completed points, unrun points and shutdown evidence |
+   | ISO 16750-2 §4.3.1.2 jump start, best effort | The deviation sheet: what the clause asks against what the simulated supply commanded (26 V held 60 s from 10.8 V), host-clock intervals, edges "not measured", the hold level as a measured point; its approval is part of the demonstration |
 
-   Each run asks the simulated supply for **12, 24 and 30 V** and the
+   The first three runs ask the simulated supply for **12, 24 and 30 V** and the
    simulated load for **0, 0.05, 0.1, 0.25, 0.5, 0.75 and 1 A**. In the HTML,
    hover the markers, choose curves and quantities, zoom, and export CSV/SVG/PNG.
    **Reset zoom** keeps your selections; **Restore default view** resets them.
@@ -303,6 +305,28 @@ converter, source and load.
    ```bash
    .venv/bin/dcdc-bench ui --root dcdc-bench/workspace
    ```
+
+   *Reaching the page from your own computer.* The page listens only on
+   the Pi's own loopback address (`127.0.0.1`), on purpose: it has no login
+   and, once a bench is approved, it can energize equipment. So typing the
+   Pi's LAN address (`http://192.168.x.x:8082`) in your browser does **not**
+   work, and `http://localhost:8082` on your computer only works once that
+   port is tunnelled to the Pi. Two ways to tunnel it:
+
+   - *VS Code Remote-SSH:* press Ctrl+Shift+P, run *Forward a Port*,
+     type the port (`8082` for this command; `8081` for the installed bench
+     service), then open the *Forwarded Address* the *Ports* panel shows,
+     which is `http://localhost:8082/` or `http://localhost:8081/` on your
+     computer. The forward lasts while VS Code is connected; add it again after
+     a reconnect.
+   - *Plain SSH:* `ssh -L 8081:127.0.0.1:8081 <user>@<pi>` in a terminal on
+     your computer, then open `http://localhost:8081/` in your browser.
+
+   Nothing on the Pi has to change for either; see
+   [Open a report from the Pi](../../Documentation/Viewing-Local-Reports.md)
+   for the same steps with screenshots of the Ports panel. The simulation
+   needs no approval: pick **Simulation**, a converter, **Normal operating
+   voltage**, then **Preview** and **Start simulation**.
 
    Without `--inventory` no real bench can start. Under **2 Simulated or real
    bench?** the **Simulation** tile is selected; it shows the synthetic

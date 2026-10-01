@@ -58,10 +58,11 @@ def parser() -> argparse.ArgumentParser:
                          help="Simulated bench behaviour: normal, setup-limited (source reaches its current limit) "
                               "or aborted (early stop) (default: normal)")
     command.add_argument("--formats", type=_formats, default=("html", "pdf"), help=FORMATS_HELP + " (default: html,pdf)")
-    command = sub.add_parser("demo", help="Render the three simulated example reports and their index (no hardware)",
-                             description="Run the normal, setup-limited and aborted scenarios on the simulated bench "
-                                         "and render their HTML and PDF reports plus an index page. Rendering is the "
-                                         "heavy step: allow several minutes on a Raspberry Pi.")
+    command = sub.add_parser("demo", help="Render the four simulated example reports and their index (no hardware)",
+                             description="Run the normal, setup-limited and aborted load sweeps and the best-effort "
+                                         "ISO 16750-2 jump start on the simulated bench and render their HTML and PDF "
+                                         "reports plus an index page. Rendering is the heavy step: allow several minutes "
+                                         "on a Raspberry Pi.")
     command.add_argument("--out", type=Path, default=Path("examples/generated"),
                          help="Output folder; existing demo contents are replaced (default: examples/generated)")
     command.add_argument("--formats", type=_formats, default=("html", "pdf"), help=FORMATS_HELP + " (default: html,pdf)")
