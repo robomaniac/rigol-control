@@ -113,3 +113,6 @@ findings were consolidated and assigned to implementers (see the first row).
 | [simulation-review/new-user.md](simulation-review/new-user.md) | First-time user's walkthrough with a confusion log and glossary. |
 | [simulation-review/manager.md](simulation-review/manager.md) | Engineering manager's verified-vs-claimed table, risk register and two-week plan. |
 | [simulation-review/qa.md](simulation-review/qa.md) | QA engineer's observable-state table, robustness findings and proposed tests. |
+| [simulation-review/ui-ux-recheck.md](simulation-review/ui-ux-recheck.md) | UI/UX designer's re-check after the fix wave: blockers measured as fixed, remaining minors, verdict. |
+| [simulation-review/new-user-recheck.md](simulation-review/new-user-recheck.md) | First-time user's re-check and the follow-up pass that closed its remaining items. |
+| [simulation-review/codex-review-audit.md](simulation-review/codex-review-audit.md) | Independent audit of the Codex review's committed fixes (`031b122`): each claimed fix traced to its diff and test with a verdict, the verification-count discrepancy explained, and its remaining findings assessed. |

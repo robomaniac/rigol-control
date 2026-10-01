@@ -98,11 +98,11 @@ under `dcdc-bench/docs/` were not edited. The coordinator can apply these.
 Old:
 
 ```markdown
-**DC–DC converter work:** the separate [dcdc-bench project](../README.md)
+**DC–DC converter work:** the separate [dcdc-bench project](dcdc-bench/README.md)
 provides saved converter profiles, a local test interface, bounded real DC sweeps,
-and interactive HTML/vector PDF reports. See [the bench workflow](bench-ui.md).
+and interactive HTML/vector PDF reports. See [the bench workflow](dcdc-bench/docs/bench-ui.md).
 On the development Pi, **[open the bench interface](http://localhost:8081/)**
-using the existing port forward. Its [completed real workflow test](../README.md#completed-test-through-the-interface)
+using the existing port forward. Its [completed real workflow test](dcdc-bench/README.md#completed-test-through-the-interface)
 includes the automatically generated HTML and PDF.
 ```
 
@@ -114,19 +114,19 @@ LXI/VXI-11 (LAN); verified on a DP821A and a DL3031A. **Safety stance:** every
 setpoint is checked against explicit, hand-maintained limits before a VISA
 session opens; limits are never inferred from a model name; software limits
 complement, never replace, the instruments' own OVP/OCP/OPP; tests and CI use
-fake instruments only. **Start:** [Getting started](getting-started.md)
-· [Contributing](../../CONTRIBUTING.md).
+fake instruments only. **Start:** [Getting started](dcdc-bench/docs/getting-started.md)
+· [Contributing](CONTRIBUTING.md).
 
-**DC–DC converter work:** the separate [dcdc-bench project](../README.md)
+**DC–DC converter work:** the separate [dcdc-bench project](dcdc-bench/README.md)
 provides saved converter profiles, a local test interface, bounded real DC sweeps,
-and interactive HTML/vector PDF reports. See [the bench workflow](bench-ui.md)
-and its milestone position in [implementation status](implementation_status.md)
+and interactive HTML/vector PDF reports. See [the bench workflow](dcdc-bench/docs/bench-ui.md)
+and its milestone position in [implementation status](dcdc-bench/docs/implementation_status.md)
 (M0 reached; M1 substantially reached; M2 partial; an M3 workflow slice
 demonstrated; M4/M5 not started). Real converter runs additionally require
 saved-profile approvals and a fresh wiring/serial confirmation at each Start.
 The bench interface listens only on the bench computer's loopback interface
 (`http://localhost:8081/` on the development Pi through an SSH port forward;
-that address does not work from GitHub). Its [completed real workflow test](../README.md#completed-test-through-the-interface)
+that address does not work from GitHub). Its [completed real workflow test](dcdc-bench/README.md#completed-test-through-the-interface)
 includes the automatically generated HTML and PDF.
 ```
 
@@ -170,8 +170,8 @@ Old:
 python -m pytest
 ```
 
-Tests use fake instruments. See the [verification record](../../Data/Verification.md).
-[Publishing to GitHub](../../Documentation/Publishing.md)
+Tests use fake instruments. See the [verification record](Data/Verification.md).
+[Publishing to GitHub](Documentation/Publishing.md)
 explains commit identity, ignored files, authentication and the first push.
 Choose a license before inviting others to reuse the code.
 ```
@@ -187,10 +187,10 @@ python -m pytest dcdc-bench/tests -q -m 'not browser and not pdf and not integra
 ```
 
 Tests use fake instruments; the same commands run in
-[GitHub Actions](../../.github/workflows/ci.yml) on Python 3.11 and 3.13. The
+[GitHub Actions](.github/workflows/ci.yml) on Python 3.11 and 3.13. The
 browser/PDF gates need Chromium and Quarto and run in a separate, non-blocking
-CI job. See the [verification record](../../Data/Verification.md) and
-[CONTRIBUTING.md](../../CONTRIBUTING.md). [Publishing to GitHub](../../Documentation/Publishing.md)
+CI job. See the [verification record](Data/Verification.md) and
+[CONTRIBUTING.md](CONTRIBUTING.md). [Publishing to GitHub](Documentation/Publishing.md)
 explains commit identity, ignored files, authentication and the first push.
 
 ## License
@@ -198,7 +198,7 @@ explains commit identity, ignored files, authentication and the first push.
 **To be chosen by the repository owner.** There is no `LICENSE` file yet, so no
 reuse permission is granted beyond viewing on GitHub. Before inviting reuse,
 check whether any code was adapted from the GPL-3.0 project referenced in
-[the DC–DC plan](../../Documentation/DC-DC-Characterization-Plan.md), then add the
+[the DC–DC plan](Documentation/DC-DC-Characterization-Plan.md), then add the
 chosen license text as `LICENSE` and the matching `license` field to both
 `pyproject.toml` files.
 ```

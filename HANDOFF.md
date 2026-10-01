@@ -78,7 +78,7 @@ to a fresh card instead of swapping this one):
 
 ## 4. Branch state and how to verify it
 
-Current test total (2026-09-30, `dcdc-bench-hardening` at the end of the simulation review round): the full run `pytest dcdc-bench/tests -m "not browser and not pdf"` passed **874 tests** with 16 browser/PDF gates deselected (Raspberry Pi 4, 199 s). Quote that figure; the counts in the block below are dated checkpoints. CI (GitHub Actions) was fully green on `af52981`, 2026-09-30, including the browser/PDF job.
+Current test total (2026-09-30, `dcdc-bench-hardening` at the end of the simulation review round): the full run `pytest dcdc-bench/tests -m "not browser and not pdf"` passed **875 tests** with 16 browser/PDF gates deselected on the bench Raspberry Pi 4. That count includes tests parametrised over the Pi's local, git-ignored run folders; a clean clone collects 934 at `b9adf70` (903 in CI's required selection), which is why CI totals are lower than bench totals. Quote that figure; the counts in the block below are dated checkpoints. CI (GitHub Actions) was fully green on `af52981`, 2026-09-30, including the browser/PDF job.
 
 Last fully verified state (2026-09-28, commit `cc98899` on `dcdc-bench-hardening`):
 
