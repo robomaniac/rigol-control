@@ -965,3 +965,27 @@ def test_generic_wording_follows_the_evidence_label(model):
                    '<option value="x unified">Values at measured x</option>'):
         assert option in measured_controls, option
     assert "Simulated" not in measured_controls and "simulated" not in measured_controls
+
+
+def test_dut_section_is_one_pdf_block_so_its_documentation_note_stays_with_its_tables(model):
+    """Codex review item 8: in a rendered ISO subset the DUT documentation note opened page 2 alone, away from its
+    table. The Device tested tables and the note are now one unbreakable Typst block, the pattern already used for
+    the acquisition outcome, so the note travels with its tables (and the sticky heading with the block)."""
+    model["dut"]["ratings"] = {"input_voltage_min_V": 9, "input_voltage_max_V": 36, "output_voltage_nominal_V": 12,
+                               "output_current_rated_A": 4, "output_power_rated_W": 48, "origin": "datasheet",
+                               "verified_from_sample_label": True}
+    body = renderer._body(model, sensor_placement_present=True)
+    start = body.index("## Device tested {#dut}")
+    section = body[start:body.index("\n## ", start + 1)]
+    open_block, close_block = "```{=typst}\n#block(breakable: false)[\n```", "```{=typst}\n]\n```"
+    assert section.count(open_block) == 1 and section.count(close_block) == 1
+    order = [section.index(text) for text in (open_block, "| Identity | Recorded value |", "| Rating / evidence | Recorded value |",
+                                              "[Sensor placement section](#sensor-placement)",
+                                              "No internal topology or component identity is inferred.", close_block)]
+    assert order == sorted(order), "heading, open, both tables, the note, close"
+    assert section.index("#pagebreak()") > section.index(close_block), "the section's own page break follows the block"
+    without_ratings = renderer._body({**model, "dut": {"model": "Different 5 V DUT"}})
+    start = without_ratings.index("## Device tested {#dut}")
+    section = without_ratings[start:without_ratings.index("\n## ", start + 1)]
+    assert section.count(open_block) == 1 and section.count(close_block) == 1 and "Rating / evidence" not in section
+    assert body.count(open_block) == 2, "the DUT block and the acquisition-outcome block"

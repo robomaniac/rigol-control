@@ -200,3 +200,66 @@ def test_datasheet_theme_pages_carry_identity_numbers_and_flow_continuously(tmp_
     first = result.to_dict()["pages"][0]
     assert first["page_number"] == f"Page 1 of {len(pages)}" and first["run_id_present"]
     assert {"1 Summary", "1.1 Coverage", "2 Results"} <= set(first["headings"]), "numbered; the page break became a gap"
+
+
+# The Device tested section as Quarto emits it from the renderer's Markdown: two key-value tables (each inside
+# Quarto's own #block) and the documentation note, between the renderer's raw Typst block delimiters.
+DUT_TABLES = """#block[
+#table(
+  columns: (28%, 72%),
+  align: (auto,auto,),
+  table.header([Identity], [Recorded value],),
+  table.hline(),
+  [Model], [FIXTURE-DUT],
+  [Sample], [sample-1],
+  [Brand on sample label], [unknown],
+  [Owner-provided aliases], [none],
+  [Topology / controller / isolation], [unknown — black-box characterization],
+)
+]
+#block[
+#table(
+  columns: (28%, 72%),
+  align: (auto,auto,),
+  table.header([Rating / evidence], [Recorded value],),
+  table.hline(),
+  [Input operating range], [9–36 V],
+  [Nominal output], [12 V],
+  [Rated output], [4 A / 48 W],
+  [Rating origin], [datasheet],
+  [Sample-label verification], [yes],
+)
+]
+"""
+DUT_NOTE = ("Schematic and sample photographs: not supplied in this report model. "
+            "No internal topology or component identity is inferred.")
+
+
+def _dut_body(filler_pt: int, guarded: bool) -> str:
+    opening, closing = ("#block(breakable: false)[\n", "]\n") if guarded else ("", "")
+    return (f"= Summary\n<summary>\n#block(height: 100% - {filler_pt}pt)[Filler that leaves part of the page free.]\n"
+            "= Device tested\n<dut>\n" + opening + DUT_TABLES + DUT_NOTE + "\n" + closing
+            + "= Test method\n<method>\nAfter the device section.\n")
+
+
+@pytest.mark.integration
+def test_dut_documentation_note_shares_its_page_with_its_tables(tmp_path):
+    """Codex review item 8, compiled with the issued theme: wherever the section starts on the page, the
+    documentation note is on the same page as both Device tested tables and no pagination error results.
+    The unguarded layout (the control) separates the note from its tables for at least one of these positions,
+    which is what the review observed."""
+    header = renderer._print_header(THEME_IDENTITY, "letter") + QUARTO_PAGE_AND_SHOW
+    separated = []
+    for filler in (200, 230, 260, 290, 320):
+        for guarded in (False, True):
+            pdf = _compile(tmp_path, f"dut-{filler}-{'guarded' if guarded else 'control'}", header + _dut_body(filler, guarded))
+            pages = _page_texts(pdf)
+            note_page = next(index for index, text in enumerate(pages) if "No internal topology" in text)
+            together = all(text in pages[note_page] for text in ("Identity Recorded value", "Rating / evidence", "Owner-provided aliases"))
+            if guarded:
+                assert together, f"filler {filler}pt: the note left its tables"
+                assert "Device tested" in pages[note_page], "the sticky heading travels with the block"
+                assert _errors(pdf) == []
+            else:
+                separated.append(not together)
+    assert any(separated), "the control must separate the note for at least one position, or the test proves nothing"

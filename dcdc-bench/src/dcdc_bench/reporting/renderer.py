@@ -866,6 +866,11 @@ def _body(model: dict, *, sensor_placement_present: bool = False) -> str:
                      ["Brand on sample label", identity.get("actual_brand_on_label") or "unknown"],
                      ["Owner-provided aliases", ", ".join(identity.get("brand_aliases", [])) or "none"],
                      ["Topology / controller / isolation", construction_text]]
+    # The identity and ratings tables and the documentation note form one PDF block, as the acquisition
+    # outcome does below: the note never opens a page alone, away from its tables. The section is short
+    # (two five-row tables and a paragraph), so the block moves whole with its sticky heading when the
+    # current page cannot hold it. Raw Typst blocks disappear from HTML.
+    out += ["```{=typst}", "#block(breakable: false)[", "```", ""]
     if identity_rows:
         out += [_rows_table(["Identity", "Recorded value"], identity_rows, layout="key-value"), ""]
     ratings = dut.get("ratings", {})
@@ -887,6 +892,7 @@ def _body(model: dict, *, sensor_placement_present: bool = False) -> str:
     if not documentation:
         documentation.append("Schematic and sample photographs: not supplied in this report model.")
     out += [" ".join(documentation) + " No internal topology or component identity is inferred.", ""]
+    out += ["```{=typst}", "]", "```", ""]
     if not stages:
         out += ["```{=typst}", "#pagebreak()", "```", ""]
     # Scope denser vertical table padding to the PDF method section. Keeping
