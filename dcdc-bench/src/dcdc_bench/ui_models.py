@@ -291,6 +291,17 @@ def local_time_text(iso_utc, *, zone: tzinfo | None = None) -> str:
     return parsed.astimezone(zone).strftime(LOCAL_TIME_FORMAT)
 
 
+def time_lines(text: str) -> tuple[str, str]:
+    """A ``local_time_text`` value as the two lines of a narrow When column: ('13:40:12 PDT', '2026-09-29').
+
+    ``'unknown'`` (or any text without the bracketed date) stays one line with an empty second line.
+    """
+    clock, _, date = text.partition(' (')
+    if date.endswith(')'):
+        return clock, date[:-1]
+    return text, ''
+
+
 def local_zone_name(zone: tzinfo | None = None) -> str:
     """The abbreviation the page shows for its clock, e.g. 'PDT'."""
     return datetime.now(timezone.utc).astimezone(zone).tzname() or 'local time'
