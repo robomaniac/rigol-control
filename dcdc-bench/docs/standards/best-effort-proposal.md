@@ -581,3 +581,36 @@ note's own track.
    best-effort recipe with variant A (100 ms commanded, depth unknown) next to
    it, or A alone? And confirm the figure values 4.5 V and 100 ms on the
    printed copy.
+
+## 8. Owner decisions (2026-10-01)
+
+Recorded from the owner's review of this proposal. They govern the
+implementation that follows; where they change a verdict in section 3 the
+new verdict is stated here.
+
+| Question | Decision | Consequence |
+| --- | --- | --- |
+| 1. Longer instrument-timed bound | **Approved per recipe.** Each recipe that needs more than the 660 s / 720 s policy declares its own bound and the operator approves that recipe. | 4.3.1.1 (12 V and 24 V) and 4.5 become compliant runs, not approximations, when the recipe is approved. |
+| 2. CH2 in series for 4.8 | **Dropped.** Series CH2 yields a positive offset only (owner measured 5 V + 1 V = 6 V), never the negative one, and the series wiring is not documented as safe at the converter's maximum. | 4.8 stays grey until a floating offset source exists. |
+| 3. "Commanded, not measured" wording | **Accepted.** | Deviation sheets use `measured_by: host_clock` for intervals the Pi timestamps itself and `none` for anything at the converter terminals until a scope or DAQ exists. |
+| 4. Approval gate | **Same as UVLO.** `best_effort_approved: true` plus the accepted deviation sheet's hash in the saved recipe; the real path refuses the recipe otherwise. | Implemented mock-first; the real procedures stay refused until bench checks. |
+| 5. Scope or DAQ | **Not yet.** | Every terminal-side timing stays `unknown_until_measured`. |
+| 6. Protective policy at the clause level | **Owner's call, per recipe.** The owner regards the 0.2 V margin between 35.8 V and the converter's user-supplied 36 V maximum as immaterial. | A recipe may declare `program_clause_level_exactly: true` (36.0 V, 18 V at 12 V, 26 V for jump start) with OVP set just above; the default remains the margin setting, and the deviation sheet records which was used. |
+| 7. Clauses to keep grey | **4.3.2 moves to best effort** (the owner's reading: hold the level as fast as the supply allows, 400 ms or longer, five times; same shape as jump start). 4.6.3 and 4.8 stay grey pending the owner's answer below. | New recipe for 4.3.2 at 12 V with the clause's 400 ms and a longer-plateau variant. |
+| 8. 4.6.1.1 default | **Variant B (supply-timed 1 s drop) is the default; 4.5 V / 100 ms confirmed for variant A.** | As proposed. |
+
+### A switch box (owner's idea)
+
+The owner proposes a relay (or MOSFET) switch between the supply and the
+converter: a true open circuit for 4.9.1 / 4.9.2 instead of "output OFF";
+interruptions of about 10 ms with a relay (shorter with a MOSFET) for 4.6.1.2;
+and 4.6.1.1 by switching the converter input between CH1 at the system
+voltage and CH2 preset to 4.5 V, so the edges are the switch's and not the
+supply's slew. It does not help 4.3.1.2 or 4.3.2 (both levels exceed CH2's
+8 V). A DPDT reversal for 4.7 is physically possible but is the fault
+injection the brief excludes; it is designed only as a policy exception the
+owner must approve explicitly, accepting converter damage. Design document:
+[switch-box-design.md](switch-box-design.md) (pending). Open owner questions:
+4.6.3 grey or a one-second-segment approximation; 4.7 in or out; drive from
+the Pi's GPIO or from the supply's trigger lines (is the digital I/O terminal
+fitted?).
