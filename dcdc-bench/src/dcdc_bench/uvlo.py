@@ -316,15 +316,17 @@ def run_uvlo_mock(plan: Plan, out: Path, *, seed: int = 1, synthetic: SyntheticU
 def run_phase_scoped_mock(plan: Plan, out: Path, *, procedure_factory: Callable[[Plan], Any], method_key: str, run_tag: str,
                           scenario: str, authorization_note: str, seed: int = 1, synthetic: SyntheticUvlo | None = None,
                           reading_override: ReadingOverride | None = None, operator_observations: list[str] | None = None,
-                          attachment_descriptors: list[dict] | None = None) -> Path:
-    """The in-process harness shared by the phase-scoped mock procedures (UVLO ramp, supply profiles).
+                          attachment_descriptors: list[dict] | None = None,
+                          bench_factory: Callable[[Plan, SyntheticUvlo, int], UvloMockBench] | None = None) -> Path:
+    """The in-process harness shared by the phase-scoped mock procedures (UVLO ramp, supply profiles, best effort).
 
     ``procedure_factory(plan)`` builds the procedure (it refuses what the planner
     did not approve); ``method_key`` is the ``run["method"]`` entry the procedure's
-    metadata declares. The harness owns the synthetic plant (``UvloMockBench``),
-    the virtual clock, the file locks, fsync-per-record persistence, the
-    fault/stop bookkeeping and the verified-OFF shutdown. Nothing here imports
-    or creates a real instrument.
+    metadata declares. The harness owns the synthetic plant (``UvloMockBench``,
+    or the ``UvloMockBench`` subclass/configuration ``bench_factory(plan, synthetic,
+    seed)`` returns), the virtual clock, the file locks, fsync-per-record
+    persistence, the fault/stop bookkeeping and the verified-OFF shutdown.
+    Nothing here imports or creates a real instrument.
     """
     if plan.bench.mode != "mock":
         raise ValueError("phase-scoped mock procedures accept mock profiles only; real execution is not implemented")
@@ -334,9 +336,14 @@ def run_phase_scoped_mock(plan: Plan, out: Path, *, procedure_factory: Callable[
     if any(quantity not in plan.bench.measurements for quantity in QUANTITIES):
         raise ValueError("mock acquisition requires four declared electrical measurement bindings")
     synthetic = synthetic if synthetic is not None else SyntheticUvlo()
-    bench = UvloMockBench(plan.dut.ratings.output_voltage_nominal_V,
-                          plan.bench.protective_controls.source_current_limit_A or plan.bench.source.max_current_A,
-                          plan.bench.load.min_voltage_V, seed, uvlo=synthetic)
+    if bench_factory is not None:
+        bench = bench_factory(plan, synthetic, seed)
+        if not isinstance(bench, UvloMockBench):
+            raise ValueError("bench_factory must return the synthetic UvloMockBench plant; no other adapter runs here")
+    else:
+        bench = UvloMockBench(plan.dut.ratings.output_voltage_nominal_V,
+                              plan.bench.protective_controls.source_current_limit_A or plan.bench.source.max_current_A,
+                              plan.bench.load.min_voltage_V, seed, uvlo=synthetic)
     created = datetime.now(timezone.utc)
     run_id = created.strftime("%Y%m%dT%H%M%S.%fZ") + f"_{run_tag}_" + uuid.uuid4().hex[:8]
     directory = Path(out) / run_id

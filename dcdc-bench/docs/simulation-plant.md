@@ -206,8 +206,10 @@ the local-sense bench so no S+/S− leads are depicted that the real bench lacks
 
 ## 8. What the plant deliberately does not model
 
-- Ripple, switching noise, transients, load-step or line-step response, inrush, hold-up;
-  the load steps in 10 ms and the converter in 0.3 s because the DC bench polls at ≥ 1 s.
+- Ripple, switching noise, transients, load-step or line-step response, inrush; hold-up only
+  through the single-capacitor model of section 10, which exists so the best-effort
+  procedures have something to interrupt; the load steps in 10 ms and the converter in 0.3 s
+  because the DC bench polls at ≥ 1 s.
 - Any waveform-level or EMC behaviour, protection trips other than UVLO and the source
   current limit, temperature dependence of the losses, ageing.
 - Thermal images, sensor placement, a real case: the thermal channels are a first-order
@@ -218,6 +220,67 @@ the local-sense bench so no S+/S− leads are depicted that the real bench lacks
   reproduces the recorded points and the recorded failure, not the device.
 - That a successful simulated run says anything about the safety of the same recipe on
   the real bench.
+
+## 10. Input hold-up, live output commands and instrument programs (best-effort procedures)
+
+The best-effort ISO 16750-2 procedures (`best_effort_procedures.py`: transient hold, momentary
+drop, micro and line interruption; `docs/standards/best-effort-proposal.md` §6) need the plant to
+do three things the steady-state and ramp plants never did: lose its supply for a commanded
+interval, take a command some milliseconds after it was issued, and run a Delayer or Timer
+program on its own clock. All three are additive and **off by default**: a `MockBench` built
+without a `HoldUpModel` behaves exactly as before, and nothing here is a DUT property.
+
+**Hold-up (`HoldUpModel`, `HOLD_UP_MODEL_PARAMETERS`).** One capacitor `C` at the DUT input,
+default `470 µF`. It is invisible while the supply holds the node. When the supply stops holding
+it — live output OFF (an interruption) or a setpoint below the node (a drop: a lab supply cannot
+sink) — the node decays through the converter's own draw:
+
+| Phase | Law | Why |
+| --- | --- | --- |
+| Converter running | constant input power `P`, fixed at the operating point when the supply let go: `V(t)² = V0² − 2·P·t/C` | a regulating converter draws constant power; the hold-up time to the UVLO turn-off is `t = C·(V0² − Vuvlo²)/(2·P)` |
+| After the UVLO trip | constant standby current `I`: `V(t) = Vtrip − I·t/C` | the converter is off and draws 4 mA |
+| Node reaches the floor | the segment ends; the floor is the setpoint (output live) or 0 V (output off) | the supply holds the node again, or there is nothing left |
+
+At 12 V and 0.1 A the plant draws about 1.84 W, so `470 µF` rides through about **9 ms** before
+tripping at 8.6 V: a 100 ms interruption or a 100 ms drop to 4.5 V trips the converter, which
+then restarts through the soft start (`StartupModel()`: 1 s cold-start delay only on the first
+start, `τ = 0.3 s`) once the supply is back. A recipe's plant may declare a larger value
+(`run_best_effort_mock(..., hold_up=HoldUpModel(input_capacitance_F=0.01))`): **10 mF rides
+through about 190 ms**, so the same 100 ms interruption leaves the output in band and nothing on
+the bench observes the event, which is exactly what the "invisible to polling" statement in the
+run record describes. The UVLO comparator is evaluated **along the path**, not only at query
+time: pending commands are replayed in order whenever the plant is evaluated, the decay segment is
+evolved to each command's effective instant and to the query instant, and a trip is placed at the
+analytically solved crossing time (`uvlo.transitions[].monotonic_s`), so an interruption between
+two polls still reaches the latch.
+
+What the synthetic instruments report while the supply is not holding the node: the source
+channel shows `0 V / 0 A` with mode `OFF` when its output is off (the DP800 records a disabled
+channel as 0; its OFF-state impedance is unverified), and the node voltage with `0 A` in `CV` when
+it is live but back-driven; the load sees whatever the converter delivers (nothing after a trip,
+so the sample is flagged `load-out-of-compliance`). The DUT-pin voltage in `PlantState` is the
+true node value, which no instrument on the bench measures.
+
+**Command latency.** `UvloMockBench.command_latency_s()` draws one LAN round trip from the
+readback model's distribution (the recorded `4 ms + Exp(4 ms)`, capped at 55 ms, when the
+procedure builds the plant with `ReadbackModel.clean(**ReadbackModel.recorded_round_trips())`);
+`set_live_voltage(..., effective_at=)` and `set_output(enabled, now, effective_at=)` queue the
+change for that instant. The procedure stamps `commanded_at` before the write and
+`acknowledged_at` after the driver's error drain and readback (5 round trips for a live voltage
+step, 3 for output OFF/ON), which is what the real path's host clock can know; the effective
+instant is plant truth, kept under `synthetic_plant_truth` in the run record and labelled so.
+The supply's command processing time (< 118 ms, DS5) is not modelled.
+
+**Programs (`program_delayer`, `program_timer`, `INSTRUMENT_TIMING_PARAMETERS`).** ON/OFF groups
+(Delayer) or voltage/current/time groups (Timer) in whole seconds, 1 s to 99999 s, 1-2048
+groups, 1-99999 cycles, end state applied when the program ends, never both programs at once —
+the programming guide's rules (`docs/standards/instrument-sequencing-dp800.md`). The plant
+executes the schedule on its own clock: each boundary lands within `±0.5 ms` of its nominal
+instant so two boundaries differ by at most 1 ms from the programmed seconds (the real figure is
+unverified, bench check B1). `program_status(now)` is what `:TIMER?` / `:DELAY?` would report;
+`cancel_program()` is `:TIMER OFF` / `:DELAY OFF`. The procedure predicts every boundary from its
+own program-start instant and the programmed seconds with a `173 ms` tolerance (command
+processing plus LAN transport) and treats a source OFF outside a predicted window as a fault.
 
 ## 9. Parameter record
 

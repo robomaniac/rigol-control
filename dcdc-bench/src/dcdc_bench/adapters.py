@@ -67,6 +67,31 @@ READBACK_MODEL_PARAMETERS: dict[str, Any] = {
     "round_trip_min_s": 0.004, "round_trip_scale_s": 0.004, "round_trip_max_s": 0.055,
     "label": "synthetic readback model shaped on the recorded instrument behaviour; not an instrument specification",
 }
+HOLD_UP_MODEL_PARAMETERS: dict[str, Any] = {
+    # Input hold-up of the synthetic converter (best-effort ISO 16750-2 procedures, docs/simulation-plant.md §10).
+    # While the supply holds the DUT input node the capacitor is invisible; when the supply stops holding it
+    # (output OFF, or a setpoint below the node: a lab supply cannot sink) the node decays through the
+    # converter's draw. Running: constant input power fixed at the operating point, V(t)² = V0² − 2·P·t/C, so
+    # the hold-up time to the UVLO turn-off is t = C·(V0² − Vuvlo²)/(2·P). After the trip: the standby
+    # current discharges the node linearly. 470 µF holds a 12 V input above 8.6 V for about 9 ms at 1.8 W,
+    # so a 100 ms interruption trips the converter unless a recipe's plant declares a larger value
+    # (10 mF rides through about 190 ms). A simulation parameter, not a DUT property.
+    "input_capacitance_F": 470e-6,
+    "decay_while_running": "constant input power, fixed at the operating point when the supply stopped holding the node",
+    "decay_after_trip": "constant standby current (uvlo.standby_input_current_A)",
+    "label": "synthetic input hold-up; not a DUT characteristic and not a measurement",
+}
+INSTRUMENT_TIMING_PARAMETERS: dict[str, Any] = {
+    # Emulated DP800 Delayer/Timer programs (docs/standards/instrument-sequencing-dp800.md): whole-second groups,
+    # 1 s to 99999 s, Timer and Delayer never enabled together, end state applied when the program ends. Each
+    # group boundary lands within this error of its nominal instant so two boundaries differ by at most 1 ms
+    # from the programmed whole seconds; the real figure is unverified (bench check B1).
+    "group_seconds": {"min": 1, "max": 99999, "integer": True},
+    "group_boundary_error_max_s": 0.0005,
+    "programs_exclusive": True,
+    "label": ("synthetic emulation of the DP800 Delayer/Timer timing; whole-second groups per the programming guide, "
+              "sub-second acceptance and the boundary error are unverified on the instrument"),
+}
 MODEL_PARAMETERS: dict[str, Any] = {
     "label": ("SYNTHETIC plant fitted to the recorded behaviour of the first converter sample (runs eb3bcd, e0fab9, "
               "bed075); not a DUT characteristic and not a measurement"),
@@ -229,11 +254,22 @@ class ReadbackModel:
         return cls(quantisation=quantisation, **overrides)
 
     @classmethod
-    def clean(cls) -> ReadbackModel:
-        """Unquantised, fresh, offset-free load readback with a fixed 2 ms round trip (legacy plant behaviour)."""
-        return cls(quantisation={q: 0.0 for q in QUANTITIES}, hold_s={q: 0.0 for q in QUANTITIES},
-                   load_current_offset_A=0.0, load_off_bistable_A=0.0,
-                   round_trip_min_s=0.002, round_trip_scale_s=0.0, round_trip_max_s=0.002)
+    def clean(cls, **overrides: Any) -> ReadbackModel:
+        """Unquantised, fresh, offset-free load readback with a fixed 2 ms round trip (legacy plant behaviour).
+
+        ``overrides`` replace individual terms: the best-effort procedures keep the clean readbacks but
+        draw command latencies from the recorded round-trip distribution (``recorded_round_trips()``).
+        """
+        values: dict[str, Any] = dict(quantisation={q: 0.0 for q in QUANTITIES}, hold_s={q: 0.0 for q in QUANTITIES},
+                                      load_current_offset_A=0.0, load_off_bistable_A=0.0,
+                                      round_trip_min_s=0.002, round_trip_scale_s=0.0, round_trip_max_s=0.002)
+        values.update(overrides)
+        return cls(**values)
+
+    @classmethod
+    def recorded_round_trips(cls) -> dict[str, float]:
+        """The recorded LAN round-trip terms (4 ms + Exp(4 ms), capped at 55 ms) as ``clean(**...)`` overrides."""
+        return {key: READBACK_MODEL_PARAMETERS[key] for key in ("round_trip_min_s", "round_trip_scale_s", "round_trip_max_s")}
 
     def parameters(self) -> dict:
         return {"quantisation": dict(self.quantisation), "hold_s": dict(self.hold_s), "offsets": dict(self.offsets),
@@ -241,6 +277,48 @@ class ReadbackModel:
                 "load_off_bistable_A": self.load_off_bistable_A,
                 "round_trip_s": {"min": self.round_trip_min_s, "scale": self.round_trip_scale_s, "max": self.round_trip_max_s},
                 "label": READBACK_MODEL_PARAMETERS["label"]}
+
+
+@dataclass(frozen=True)
+class HoldUpModel:
+    """Input hold-up of the synthetic converter: one capacitor at the DUT input (``HOLD_UP_MODEL_PARAMETERS``).
+
+    Used only when the supply stops holding the node (live output OFF, or a setpoint below the node). The
+    converter draws constant power from the capacitor until the UVLO turn-off, then its standby current.
+    """
+    input_capacitance_F: float = HOLD_UP_MODEL_PARAMETERS["input_capacitance_F"]
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.input_capacitance_F) or self.input_capacitance_F <= 0:
+            raise ValueError("The hold-up capacitance must be a finite positive value")
+
+    def constant_power_decay_s(self, v0: float, v1: float, power_W: float) -> float:
+        """Time for the node to fall from ``v0`` to ``v1`` under a constant power draw (0 when v1 >= v0, inf for no draw)."""
+        if v1 >= v0:
+            return 0.0
+        if power_W <= 0:
+            return math.inf
+        return self.input_capacitance_F * (v0**2 - v1**2) / (2.0 * power_W)
+
+    def voltage_after_constant_power(self, v0: float, power_W: float, elapsed_s: float) -> float:
+        return math.sqrt(max(0.0, v0**2 - 2.0 * power_W * max(0.0, elapsed_s) / self.input_capacitance_F))
+
+    def constant_current_decay_s(self, v0: float, v1: float, current_A: float) -> float:
+        if v1 >= v0:
+            return 0.0
+        if current_A <= 0:
+            return math.inf
+        return (v0 - v1) * self.input_capacitance_F / current_A
+
+    def voltage_after_constant_current(self, v0: float, current_A: float, elapsed_s: float) -> float:
+        return max(0.0, v0 - current_A * max(0.0, elapsed_s) / self.input_capacitance_F)
+
+    def hold_up_s(self, v0: float, uvlo_turn_off_V: float, power_W: float) -> float:
+        """How long the running converter rides through an interruption from ``v0`` before its UVLO trips."""
+        return self.constant_power_decay_s(v0, uvlo_turn_off_V, power_W)
+
+    def parameters(self) -> dict:
+        return {**HOLD_UP_MODEL_PARAMETERS, "input_capacitance_F": self.input_capacitance_F}
 
 
 def quantise(value: float, step: float) -> float:
@@ -266,7 +344,7 @@ class MockBench:
     def __init__(self, nominal_voltage: float, current_limit: float,
                  minimum_load_voltage: float = 0.0, seed: int = 1, *,
                  uvlo: SyntheticUvlo | None = None, startup: StartupModel | None = None,
-                 readback: ReadbackModel | None = None):
+                 readback: ReadbackModel | None = None, hold_up: HoldUpModel | None = None):
         self.nominal_voltage = nominal_voltage
         self.current_limit = current_limit
         self.minimum_load_voltage = minimum_load_voltage
@@ -274,6 +352,16 @@ class MockBench:
         self.uvlo = uvlo if uvlo is not None else SyntheticUvlo()
         self.startup = startup if startup is not None else StartupModel()
         self.readback = readback if readback is not None else ReadbackModel.realistic()
+        # Optional input hold-up (best-effort procedures). None keeps the legacy plant: the DUT input node follows
+        # the supply instantly and a live output OFF trips the converter at once.
+        self.hold_up = hold_up
+        # Live output and setpoint commands with their effective instants, instrument programs and the DUT input
+        # node's decay segment (section "live commands" below). Cleared with the converter state.
+        self._output_live = True
+        self._scheduled: list[dict[str, Any]] = []
+        self._node: dict[str, Any] | None = None
+        self._program: dict[str, Any] | None = None
+        self.applied_transitions: list[dict[str, Any]] = []
         self.source_enabled = False
         self.load_enabled = False
         self.source_voltage = 0.0
@@ -313,7 +401,9 @@ class MockBench:
         return {**electrical, "source_current_limit_A": float(self.current_limit),
                 "load_minimum_voltage_V": float(self.minimum_load_voltage),
                 "uvlo": self.uvlo.parameters(), "startup": self.startup.parameters(),
-                "source_current_limit": dict(SOURCE_LIMIT_PARAMETERS), "readback": self.readback.parameters()}
+                "source_current_limit": dict(SOURCE_LIMIT_PARAMETERS), "readback": self.readback.parameters(),
+                **({"hold_up": self.hold_up.parameters(), "instrument_timing": dict(INSTRUMENT_TIMING_PARAMETERS)}
+                   if self.hold_up is not None else {})}
 
     def identify(self) -> dict:
         return {"source": "synthetic-source", "load": "synthetic-load",
@@ -335,7 +425,7 @@ class MockBench:
 
     def status(self) -> dict:
         """Switch states and setpoints as last commanded; no plant solution here."""
-        return {"source_output": "ON" if self.source_enabled else "OFF",
+        return {"source_output": "ON" if self.output_live else "OFF",
                 "load_input": "ON" if self.load_enabled else "OFF",
                 "remote_sense_verified": self.sense_enabled,
                 "source_voltage_setpoint_V": self.source_voltage,
@@ -397,6 +487,11 @@ class MockBench:
         self._collapsed_since = None
         self._tripped_at = None
         self.uvlo.output_enabled = False  # no input: the converter cannot be running
+        # No source: no pending live command, no program, the node follows the (absent) supply.
+        self._output_live = True
+        self._scheduled = []
+        self._node = None
+        self._program = None
 
     def _load_command(self, now: float) -> float:
         """The electronic load's actual CC demand: a ``load_step_time_s`` linear step, zero with the input OFF."""
@@ -511,6 +606,11 @@ class MockBench:
         if not self.source_enabled:
             self._reset_converter()
             return PlantState(0, 0, 0, 0, 0, 0, "OFF", True)
+        if self._scheduled or self._node is not None:
+            self._advance(now)
+        if not self._output_live or self._node is not None:
+            # A live interruption, or the DUT input node still above a supply that cannot sink: the capacitor path.
+            return self._capacitor_state(now)
         p = MODEL_PARAMETERS
         limited = force_limit or self._injected_limit
         limit = min(self.current_limit, p["injected_source_current_limit_A"]) if limited else self.current_limit
@@ -551,6 +651,249 @@ class MockBench:
             self._tripped_at = now
             return self._off_state()
         return PlantState(self.source_voltage, needed, dut_input, voltage, current, loss, "CV", compliance)
+
+    # -- live commands, instrument programs and the input hold-up (best-effort procedures) --------
+    # Every live command takes effect at an instant the caller supplies (its issue time plus a drawn LAN
+    # latency); the plant replays pending transitions in order whenever it is evaluated, evolving the DUT
+    # input node between them, so a 100 ms interruption between two polls still reaches the UVLO latch at
+    # the analytically solved crossing time instead of being missed at query time.
+    def schedule_output(self, enabled: bool, at: float, *, origin: str = "lan") -> None:
+        """Queue a live source-output change effective at ``at`` (the source stays energised in the procedure's sense)."""
+        if not self.source_enabled:
+            raise RuntimeError("a live output command requires an energised source; use source_on/source_off while idle")
+        self._scheduled.append({"at": float(at), "kind": "output", "value": bool(enabled), "origin": origin})
+        self._scheduled.sort(key=lambda item: item["at"])
+
+    def schedule_voltage(self, vin: float, at: float, *, origin: str = "lan") -> None:
+        """Queue a live setpoint change effective at ``at``."""
+        if not self.source_enabled:
+            raise RuntimeError("a live voltage step requires an ON source; use configure while outputs are OFF")
+        if vin < 0:
+            raise ValueError("source voltage cannot be negative")
+        self._scheduled.append({"at": float(at), "kind": "voltage", "value": float(vin), "origin": origin})
+        self._scheduled.sort(key=lambda item: item["at"])
+
+    @property
+    def output_live(self) -> bool:
+        """The live source-output state (False during a commanded interruption); the setpoint is kept."""
+        return self.source_enabled and self._output_live
+
+    def _advance(self, now: float) -> None:
+        pending = [item for item in self._scheduled if item["at"] <= now]
+        self._scheduled = [item for item in self._scheduled if item["at"] > now]
+        for item in pending:
+            self._evolve_node(item["at"])
+            self._apply(item)
+        self._evolve_node(now)
+
+    def _node_floor(self) -> float:
+        """What the supply holds the DUT input node at: its setpoint while the output is live, nothing otherwise."""
+        return self.source_voltage if self._output_live else 0.0
+
+    def _segment_voltage(self, segment: dict[str, Any], t: float) -> float:
+        hold_up = self.hold_up
+        elapsed = t - segment["t0"]
+        if segment["mode"] == "power":
+            return hold_up.voltage_after_constant_power(segment["v0"], segment["p_W"], elapsed)
+        return hold_up.voltage_after_constant_current(segment["v0"], segment["i_A"], elapsed)
+
+    def _node_voltage_at(self, t: float) -> float:
+        if self._node is not None:
+            return max(self._segment_voltage(self._node, t), self._node_floor())
+        if not self._output_live:
+            return 0.0
+        if self._running:
+            iin = self._steady_demand(self._load_command(t))
+            iin = iin if math.isfinite(iin) else self.current_limit
+            return self.source_voltage - iin * MODEL_PARAMETERS["input_lead_resistance_ohm"]
+        return self._standby_input()
+
+    def _input_power_W(self, t: float) -> float:
+        """Power the running converter draws from its input node at the current operating point."""
+        iin = self._steady_demand(self._load_command(t))
+        iin = iin if math.isfinite(iin) else self.current_limit
+        return max(1e-9, self.source_voltage * iin - iin**2 * MODEL_PARAMETERS["input_lead_resistance_ohm"])
+
+    def _begin_decay(self, t: float, v0: float) -> None:
+        if self.hold_up is None:
+            # Legacy plant: the node follows the supply instantly; a live OFF trips a running converter at once.
+            self._node = None
+            if self._running and self._node_floor() < self.uvlo.turn_off_below_V:
+                self.uvlo.trip(t, self._node_floor())
+                self._running, self._started_at, self._tripped_at = False, None, t
+            return
+        if self._node is not None:
+            return  # already decaying; the floor is evaluated dynamically
+        if self._running:
+            self._node = {"t0": t, "v0": v0, "mode": "power", "p_W": self._input_power_W(t)}
+        else:
+            self._node = {"t0": t, "v0": v0, "mode": "standby", "i_A": self.uvlo.standby_current_A}
+
+    def _settle_node(self, t: float) -> None:
+        if self._node is not None and self._node_floor() >= self._segment_voltage(self._node, t):
+            self._node = None  # the supply holds the node again
+
+    def _evolve_node(self, t: float) -> None:
+        """Advance the decay segment to ``t``: trip at the solved UVLO crossing, end the segment at the floor."""
+        segment = self._node
+        if segment is None:
+            return
+        floor = self._node_floor()
+        turn_off = self.uvlo.turn_off_below_V
+        if segment["mode"] == "power" and floor < turn_off < segment["v0"]:
+            crossing = segment["t0"] + self.hold_up.constant_power_decay_s(segment["v0"], turn_off, segment["p_W"])
+            if crossing <= t:
+                self.uvlo.trip(crossing, turn_off)
+                self._running, self._started_at, self._tripped_at = False, None, crossing
+                segment = self._node = {"t0": crossing, "v0": turn_off, "mode": "standby", "i_A": self.uvlo.standby_current_A}
+        if self._segment_voltage(segment, t) <= floor + 1e-12:
+            self._node = None
+
+    def _apply(self, item: dict[str, Any]) -> None:
+        t, kind, value = item["at"], item["kind"], item["value"]
+        node_before = self._node_voltage_at(t)
+        if kind == "output":
+            if value:
+                self._output_live = True
+                self._input_changed_at = t
+                self._settle_node(t)
+            else:
+                self._output_live = False
+                self._begin_decay(t, node_before)
+        else:
+            previous = self.source_voltage
+            self.source_voltage = value
+            self._input_changed_at = t
+            if self.hold_up is not None and self._output_live and value < node_before:
+                self._begin_decay(t, node_before)  # the supply cannot sink: the node falls through the converter's draw
+            elif self.hold_up is not None:
+                self._settle_node(t)
+            item = {**item, "from_V": previous}
+        self.applied_transitions.append({**item, "node_before_V": node_before, "converter_running": self._running})
+
+    def _capacitor_state(self, now: float) -> PlantState:
+        """The plant while the supply is not holding the DUT input node (interruption or a setpoint below it)."""
+        p = MODEL_PARAMETERS
+        node = self._node_voltage_at(now)
+        live = self._output_live
+        # The instrument reports its disabled output as 0 V / 0 A (OFF-state impedance unverified); while live but
+        # back-driven by the node it shows the node voltage and delivers nothing.
+        terminal = max(self.source_voltage, node) if live else 0.0
+        command = self._load_command(now)
+        if self._running:
+            elapsed = now - (self._started_at if self._started_at is not None else now)
+            open_circuit = (1.0 + p["output_setpoint_offset_fraction"]) * self.nominal_voltage * self.startup.soft(elapsed)
+            voltage, current, compliance = open_circuit - p["output_path_resistance_ohm"] * command, command, True
+            if command > 0 and voltage < self.minimum_load_voltage:
+                current, voltage, compliance = 0.0, open_circuit, False
+            pout = voltage * current
+            loss = (p["base_loss_W"] + p["input_voltage_loss_W_per_V"] * node
+                    + p["output_current_loss_W_per_A2"] * current**2 + p["output_power_loss_fraction"] * pout)
+        else:
+            voltage = current = 0.0
+            compliance = not (self.load_enabled and command > 0)
+            loss = node * self.uvlo.standby_current_A
+        return PlantState(terminal, 0.0, node, voltage, current, loss, "CV" if live else "OFF", compliance)
+
+    def _group_boundary_error_s(self) -> float:
+        bound = INSTRUMENT_TIMING_PARAMETERS["group_boundary_error_max_s"]
+        return self.random.uniform(-bound, bound)
+
+    @staticmethod
+    def _whole_seconds(value: Any, what: str) -> int:
+        limits = INSTRUMENT_TIMING_PARAMETERS["group_seconds"]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value != int(value):
+            raise ValueError(f"{what} must be a whole number of seconds ({limits['min']} s to {limits['max']} s)")
+        seconds = int(value)
+        if not limits["min"] <= seconds <= limits["max"]:
+            raise ValueError(f"{what} must lie between {limits['min']} s and {limits['max']} s")
+        return seconds
+
+    def _require_no_program(self, now: float, kind: str) -> None:
+        if not self.source_enabled or not self._output_live:
+            raise RuntimeError(f"the {kind} is started with the output ON; energise the source first")
+        if self._program is not None and now < self._program["ends_at"]:
+            raise RuntimeError("the Timer and the Delayer cannot be enabled together; the running program must end or be cancelled first")
+
+    def program_delayer(self, groups: list[tuple[str, int]], now: float, *, cycles: int = 1, end_state: str = "OFF",
+                        start_latency_s: float = 0.0) -> dict[str, Any]:
+        """Emulate a DP800 Delayer program: ON/OFF groups in whole seconds, executed by the plant's own clock.
+
+        The program starts ``start_latency_s`` after ``now`` (the ``:DELAY ON`` write's transport) and ends with
+        ``end_state`` (``OFF``, ``ON`` or ``LAST``). Returns the schedule as the plant will run it; the procedure
+        records only what the host can know (its own write instants and the programmed whole seconds).
+        """
+        self._require_no_program(now, "Delayer")
+        if not 1 <= len(groups) <= 2048 or not 1 <= int(cycles) <= 99999 or end_state not in ("ON", "OFF", "LAST"):
+            raise ValueError("A Delayer program has 1-2048 groups, 1-99999 cycles and an end state ON, OFF or LAST")
+        validated = []
+        for state, seconds in groups:
+            if str(state).upper() not in ("ON", "OFF"):
+                raise ValueError("Delayer groups are ON or OFF")
+            validated.append((str(state).upper(), self._whole_seconds(seconds, "a Delayer group")))
+        started_at = now + start_latency_s
+        t, schedule = started_at, []
+        for cycle in range(int(cycles)):
+            for index, (state, seconds) in enumerate(validated):
+                at = t + (self._group_boundary_error_s() if (cycle or index) else 0.0)
+                schedule.append({"at": at, "nominal_at": t, "kind": "output", "value": state == "ON", "group": index, "cycle": cycle})
+                t += seconds
+        ends_at = t
+        if end_state != "LAST":
+            schedule.append({"at": ends_at + self._group_boundary_error_s(), "nominal_at": ends_at, "kind": "output",
+                             "value": end_state == "ON", "group": None, "cycle": None, "end_state": end_state})
+        self._scheduled.extend({**item, "origin": "delayer"} for item in schedule)
+        self._scheduled.sort(key=lambda item: item["at"])
+        self._program = {"kind": "delayer", "started_at": started_at, "ends_at": ends_at, "groups": validated,
+                         "cycles": int(cycles), "end_state": end_state, "schedule": schedule}
+        return dict(self._program)
+
+    def program_timer(self, groups: list[tuple[float, float, int]], now: float, *, cycles: int = 1, end_state: str = "OFF",
+                      start_latency_s: float = 0.0) -> dict[str, Any]:
+        """Emulate a DP800 Timer program: (voltage, current, whole seconds) groups with the output already ON.
+
+        The current of every group must not exceed the plant's source current limit (the Timer programs the
+        channel's limit too). End state ``OFF`` turns the output off when the program ends; ``LAST`` keeps the
+        last group's setpoint.
+        """
+        self._require_no_program(now, "Timer")
+        if not 1 <= len(groups) <= 2048 or not 1 <= int(cycles) <= 99999 or end_state not in ("OFF", "LAST"):
+            raise ValueError("A Timer program has 1-2048 groups, 1-99999 cycles and an end state OFF or LAST")
+        validated = []
+        for voltage, current, seconds in groups:
+            if voltage < 0 or current < 0 or current > self.current_limit + 1e-12:
+                raise ValueError("Timer groups need a nonnegative voltage and a current within the source current limit")
+            validated.append((float(voltage), float(current), self._whole_seconds(seconds, "a Timer group")))
+        started_at = now + start_latency_s
+        t, schedule = started_at, []
+        for cycle in range(int(cycles)):
+            for index, (voltage, current, seconds) in enumerate(validated):
+                at = t + (self._group_boundary_error_s() if (cycle or index) else 0.0)
+                schedule.append({"at": at, "nominal_at": t, "kind": "voltage", "value": voltage, "current_A": current,
+                                 "group": index, "cycle": cycle})
+                t += seconds
+        ends_at = t
+        if end_state == "OFF":
+            schedule.append({"at": ends_at + self._group_boundary_error_s(), "nominal_at": ends_at, "kind": "output",
+                             "value": False, "group": None, "cycle": None, "end_state": end_state})
+        self._scheduled.extend({**item, "origin": "timer"} for item in schedule)
+        self._scheduled.sort(key=lambda item: item["at"])
+        self._program = {"kind": "timer", "started_at": started_at, "ends_at": ends_at, "groups": validated,
+                         "cycles": int(cycles), "end_state": end_state, "schedule": schedule}
+        return dict(self._program)
+
+    def program_status(self, now: float) -> dict[str, Any] | None:
+        """What ``:TIMER?`` / ``:DELAY?`` would report: the running program and its elapsed time, or None."""
+        program = self._program
+        if program is None:
+            return None
+        return {"kind": program["kind"], "running": program["started_at"] <= now < program["ends_at"],
+                "elapsed_s": now - program["started_at"], "ends_at": program["ends_at"]}
+
+    def cancel_program(self) -> None:
+        """``:TIMER OFF`` / ``:DELAY OFF``: drop the pending program transitions; the output keeps its current state."""
+        self._scheduled = [item for item in self._scheduled if item["origin"] not in ("delayer", "timer")]
+        self._program = None
 
     # -- what the synthetic instruments report --------------------------------------------------
     def query_round_trip_s(self) -> float:
