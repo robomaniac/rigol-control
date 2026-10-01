@@ -14,15 +14,16 @@ from dcdc_bench.cli import main
 from dcdc_bench.job_service import JobService
 from dcdc_bench.standard_recipes import clause_rows
 from dcdc_bench.ui import GLOSSARY_PATH, RequestBodyLimit, file_headers, published_file, require_loopback, run_ui, unique_name
-from dcdc_bench.ui_models import (PLAN_STATUS_LEGEND, REAL_CAN, REAL_CANNOT, SIMULATION_CAN, SIMULATION_CANNOT,
+from dcdc_bench.ui_models import (PLAN_STATUS_LEGEND, REAL_CAN, REAL_CANNOT, REPORTS_PAGE, SIMULATION_CAN, SIMULATION_CANNOT,
                                   SIMULATION_SEQUENCE, SIMULATION_TIME_ESTIMATE, SYNTHETIC_UNCERTAINTY_NOTE, activity_text,
                                   artifact_url, bench_equipment, bench_job, bench_title, card_meta, deferred_text, dequeued,
                                   dut_approved, dut_subtitle, duration_text, edited_dut, edited_recipe, elapsed_text,
-                                  envelope_rows, event_text, friendly_error, grouped_recipes, job_actions, job_title,
-                                  limits_rows, limits_summary, local_time_text, number, plan_rows, point_count, quantity,
-                                  recipe_category, recipe_grid, recipe_title, report_became_ready, report_link_rows,
-                                  report_rows, run_option_text, saved_runs_key, sequence_step, shutdown_label, skip_reasons,
-                                  state_label, summary_text, target_values, time_legend, time_lines)
+                                  envelope_rows, event_text, filter_report_rows, friendly_error, grouped_recipes, job_actions,
+                                  job_title, limits_rows, limits_summary, local_time_text, number, plan_rows, point_count,
+                                  quantity, recipe_category, recipe_grid, recipe_title, report_became_ready, report_link_rows,
+                                  report_rows, reports_count_text, run_option_text, run_panel_key, run_panel_progress,
+                                  run_panel_texts, saved_runs_key, sequence_step, shutdown_label, skip_reasons, state_label,
+                                  summary_text, target_values, time_legend, time_lines)
 
 LOS_ANGELES = ZoneInfo('America/Los_Angeles')
 DOCS = Path(__file__).resolve().parents[1] / 'docs'
@@ -1724,7 +1725,7 @@ NOT_UI_LABELS = {'8082', '8081', 'Ports → Forward a Port → 8082', 'no job is
                  'Exit 0', 'Exit 4', 'Exit 2'}
 # Labels the guide quotes with a placeholder or a runtime value: the literal fragments the page source must contain.
 COMPOSED_LABELS = {'Measured input / Supply current / Measured output / Load current':
-                       ('Measured', "reading_kind + ' input'", 'Supply current', "reading_kind + ' output'", 'Load current'),
+                       ('Measured', "'{kind} input'", 'Supply current', "'{kind} output'", 'Load current'),
                    'Acquiring… point n of m': ('Acquiring… point ', ' of '),
                    'Simulation: Acquiring… point 2 of 21': ('Simulation: ', 'Acquiring… point ', ' of '),
                    'Waiting for free memory: 96 MiB available, 150 MiB needed': ('Waiting for free memory: ', ' MiB available', ' MiB needed'),
@@ -2010,6 +2011,27 @@ def test_time_lines_split_the_local_time_for_a_narrow_column():
     assert time_lines(local_time_text('2026-09-29T20:37:14+00:00', zone=LOS_ANGELES)) == ('13:37:14 PDT', '2026-09-29')
 
 
+def test_report_filter_matches_every_word_and_the_count_line_says_what_is_listed():
+    """Codex review item 1: the Reports filter and the line under the list, as pure text rules."""
+    when = local_time_text('2026-09-29T20:40:12+00:00')
+    rows = [{'job_id': 'job-3', 'run': '12T12-4A · Quick sweep', 'bench': 'Simulation · synthetic data', 'status': 'Complete', 'when': when},
+            {'job_id': 'job-2', 'run': 'Other-5V', 'bench': 'Real bench · measured', 'status': 'Needs attention', 'when': when},
+            {'job_id': 'job-1', 'run': '12T12-4A · 24 V small grid', 'bench': 'Real bench · measured', 'status': 'Complete', 'when': when}]
+    ids = lambda query: [row['job_id'] for row in filter_report_rows(rows, query)]
+    assert filter_report_rows(rows, '') == rows and filter_report_rows(rows, '   ') == rows and filter_report_rows(rows, None) == rows
+    assert ids('REAL') == ['job-2', 'job-1'], 'case-insensitive, matches the bench label'
+    assert ids('real complete') == ['job-1'], 'every word must match the same row'
+    assert ids('12t12 quick') == ['job-3'] and ids('attention') == ['job-2'] and ids('job-1') == ['job-1']
+    assert ids(when.split(' ')[0]) == ['job-3', 'job-2', 'job-1'], 'the local start time is searchable'
+    assert ids('thermal') == []
+    assert REPORTS_PAGE == 30
+    assert reports_count_text(30, 30, 30) == '' and reports_count_text(5, 5, 5) == ''
+    assert reports_count_text(30, 45, 45) == 'Newest 30 of 45 saved runs shown.'
+    assert reports_count_text(3, 3, 45, 'real') == '3 of 45 saved runs match "real".'
+    assert reports_count_text(30, 33, 45, 'real') == 'Newest 30 of 33 saved runs matching "real" shown (45 saved).'
+    assert reports_count_text(0, 0, 45, 'zzz') == 'No saved run matches "zzz". Clear the filter to see all 45 saved runs.'
+
+
 def test_exactly_one_test_is_selected_and_the_iso_card_is_an_editor_not_a_second_selection(tmp_path, monkeypatch):
     """Owner: 'Is it normal I can select Normal operating voltage and Automotive supply standards at the same time?!'
     What they saw: a selected test card in one group while the open ISO 16750-2 card in the standards group was drawn
@@ -2130,6 +2152,178 @@ def test_reports_list_is_one_grid_whose_header_and_rows_share_the_columns(tmp_pa
                 assert '.bench-report-row{display:grid;grid-template-columns:subgrid;grid-column:1 / -1' in STYLE
                 assert '.bench-shell{max-width:1280px' in STYLE and '.bench-header-inner{max-width:1280px' in STYLE and '.bench-bar-inner{max-width:1280px' in STYLE
                 assert '.bench-report-grid,.bench-report-row{grid-template-columns:minmax(0,1fr)}' in STYLE.split('@media(max-width:650px)')[1]
+            assert page.errors == []
+        finally:
+            client.delete()
+    asyncio.run(scenario())
+
+
+def test_reports_page_through_older_runs_and_filter_by_converter_bench_or_status(tmp_path, monkeypatch):
+    """Codex review item 1: Reports stopped at the newest 30 runs with no way to reach older ones or to find one.
+    "Show older runs" adds 30 at a time; "Filter runs" narrows the list by converter, test, bench or status words.
+    The filter field is built once with the layout, so typing never rebuilds it; the list's own refreshes keep both."""
+    snapshots = {}
+    for index in range(1, 41):
+        extra = dict(REPORT_DONE)
+        if index <= 5:
+            extra['dut_model'] = 'Other-5V'
+        if 6 <= index <= 8:
+            extra['mode'] = 'real'
+        if index == 9:
+            extra = {'state': 'failed', 'run_dir': '/w/jobs/job-09/runs/r', 'error': 'worker exited'}
+        snapshots[f'job-{index:02d}'] = snapshot(f'job-{index:02d}', **extra)
+
+    def grid_rows(reports):
+        grids = [child for child in descendants(reports) if 'bench-report-grid' in child.classes]
+        if not grids:
+            return []
+        return [child for child in grids[0].default_slot.children
+                if 'bench-report-row' in child.classes and 'bench-report-head' not in child.classes]
+
+    def older_button(reports):
+        return [child for child in descendants(reports) if child._props.get('label') == 'Show older runs']
+
+    async def scenario():
+        page = await open_bench_page(monkeypatch, tmp_path, snapshots)
+        client = page.client
+        try:
+            with client:
+                reports = find(client, css='bench-reports')
+                assert len(grid_rows(reports)) == 30 and 'Newest 30 of 40 saved runs shown.' in texts(reports)
+                assert grid_rows(reports)[0].default_slot.children[1].text == '12T12-4A', 'newest first'
+                await click(older_button(reports)[0])
+                assert len(grid_rows(reports)) == 40 and older_button(reports) == []
+                assert not any(text.startswith('Newest') for text in texts(reports)), 'nothing left to page through'
+                assert grid_rows(reports)[-1].default_slot.children[1].text == 'Other-5V'
+                filter_field = field(client, 'Filter runs')
+                filter_field.set_value('other')
+                await settle()
+                rows = grid_rows(reports)
+                assert len(rows) == 5 and all(row.default_slot.children[1].text == 'Other-5V' for row in rows)
+                assert '5 of 40 saved runs match "other".' in texts(reports) and older_button(reports) == []
+                filter_field.set_value('Real complete')
+                await settle()
+                rows = grid_rows(reports)
+                assert len(rows) == 3 and all(row.default_slot.children[2].text == 'Real bench · measured' for row in rows)
+                filter_field.set_value('attention')
+                await settle()
+                rows = grid_rows(reports)
+                assert len(rows) == 1 and 'Needs attention' in [child.text for child in rows[0].default_slot.children[3].default_slot.children]
+                filter_field.set_value('nothing like this')
+                await settle()
+                assert grid_rows(reports) == []
+                assert 'No saved run matches "nothing like this". Clear the filter to see all 40 saved runs.' in texts(reports)
+                filter_field.set_value(None)  # Quasar's clear button
+                await settle()
+                assert len(grid_rows(reports)) == 30 and len(older_button(reports)) == 1, 'a changed filter starts from the newest page'
+                assert field(client, 'Filter runs') is filter_field, 'the field is never rebuilt while typing'
+                # The list's own refresh (poll transitions, Refresh saved runs) keeps the filter and the paging.
+                filter_field.set_value('12t12')
+                await settle()
+                assert len(grid_rows(reports)) == 30 and 'Newest 30 of 35 saved runs matching "12t12" shown (40 saved).' in texts(reports)
+                await click(older_button(reports)[0])
+                assert len(grid_rows(reports)) == 35 and '35 of 40 saved runs match "12t12".' in texts(reports)
+                await click(button(client, 'Refresh saved runs'))
+                assert len(grid_rows(reports)) == 35 and '35 of 40 saved runs match "12t12".' in texts(reports)
+                assert field(client, 'Filter runs') is filter_field and filter_field.value == '12t12'
+            assert page.errors == []
+        finally:
+            client.delete()
+    asyncio.run(scenario())
+
+
+def test_run_panel_slots_follow_the_snapshot_and_the_key_changes_only_with_the_structure():
+    """Codex review item 2, the pure part: which labels the Run panel holds and when it must be rebuilt."""
+    queued = snapshot('job-1', 'report-queued', run_dir='/w/r', deferred_reason='MemAvailable below 150 MiB',
+                      deferred_memory={'available_mib': 96.}, events=[{'event': 'started'}])
+    texts = run_panel_texts(queued)
+    assert list(texts)[:4] == ['state', 'mode', 'queued', 'queued_tip'] and 'reporting' not in texts
+    assert texts['state'] == 'Measurements saved — report queued' and texts['points'] == '1 / 4 load points accepted'
+    assert texts['queued'].endswith('Waiting for free memory: 96 MiB available, 150 MiB needed.')
+    assert texts['tile_label:Vin_V'] == 'Simulated input' and texts['tile:Vin_V'] == quantity(None, 'V')
+    assert texts['detail:elapsed_s'] == 'Elapsed seconds: 12' and 'measuring' not in texts
+    key = run_panel_key(queued)
+    ticked = {**queued, 'deferred_memory': {'available_mib': 120.}, 'elapsed_s': 30., 'events': [{'event': 'started'}, {'event': 'deferred'}]}
+    assert run_panel_key(ticked) == key, 'texts change, the structure does not'
+    assert run_panel_texts(ticked)['queued'] != texts['queued']
+    assert run_panel_key({**queued, **REPORT_DONE}) != key, 'links appear, the queue button goes'
+    assert run_panel_key({**queued, 'events': []}) != key and run_panel_key({**queued, 'job_id': 'job-2'}) != key
+    assert run_panel_key({**queued, 'error': 'worker exited'}) != key, 'a new note is a new slot'
+    assert run_panel_progress(queued) == .25 and run_panel_progress({**queued, 'progress': {}}) == 0
+    real = snapshot('job-3', 'acquiring', mode='real', latest={'Vin_V': 24.},
+                    progress={'completed': 0, 'total': 4, 'current': 'p1', 'requested_input_V': 24., 'requested_output_A': .5})
+    texts = run_panel_texts(real)
+    assert texts['mode'] == 'Real bench · measured data' and texts['tile_label:Vout_V'] == 'Measured output'
+    assert texts['measuring'] == 'Measuring this condition' and texts['requested'].startswith('Requested input: ')
+    assert texts['latest_note'].startswith('Latest raw readings')
+    assert run_panel_texts({**real, 'latest_kind': 'startup'})['latest_note'].startswith('Latest readings are from startup')
+    done = snapshot('job-4', **REPORT_DONE)
+    assert 'synthetic' in run_panel_texts(done) and 'failed' not in run_panel_texts(done)
+    assert 'failed' in run_panel_texts({**done, 'report_artifacts': {'html': {'status': 'success'}}})
+    assert 'no_measurements' in run_panel_texts(snapshot('job-5', 'failed', error='x'))
+
+
+def test_polling_updates_the_run_panel_in_place_so_a_focused_control_survives(tmp_path, monkeypatch):
+    """Codex review item 2: show_status() rebuilt the Run panel on every two-second poll, so an element the operator
+    had focused (a report link, Remove from report queue, the events expansion) was replaced and keyboard focus fell
+    to the page body. A poll that changes only texts and values now updates the existing elements; the panel is
+    rebuilt only when its structure (job, state, which notes, links and controls exist) changes."""
+    from nicegui import ui
+    jobs = {'job-1': snapshot('job-1', 'report-queued', run_dir='/w/jobs/job-1/runs/r-0001', queued_utc='2026-09-29T20:50:00+00:00',
+                              deferred_reason='MemAvailable below 150 MiB', deferred_memory={'available_mib': 96.},
+                              events=[{'event': 'started'}])}
+
+    def run_panel(client):
+        return find(client, css='bench-run')
+
+    def in_panel(client, **props):
+        return [child for child in descendants(run_panel(client)) if all(child._props.get(k) == v for k, v in props.items())]
+
+    def html_link(client):
+        return next(child for child in descendants(run_panel(client)) if child.tag == 'nicegui-link' and child.text == 'Open HTML')
+
+    def expansion(client):
+        return next(child for child in descendants(run_panel(client)) if isinstance(child, ui.expansion))
+
+    async def scenario():
+        page = await open_bench_page(monkeypatch, tmp_path, jobs)
+        client, poll = page.client, page.poll
+        try:
+            with client:
+                panel = run_panel(client)
+                remove = in_panel(client, label='Remove from report queue')[0]
+                events = expansion(client)
+                events.open()  # the operator focused the expansion header and pressed Enter
+                assert 'Waiting for free memory: 96 MiB available, 150 MiB needed' in ' '.join(texts(panel))
+                assert 'Elapsed seconds: 12' in texts(panel) and event_text({'event': 'started'}) in texts(panel)
+                # A tick: more memory, more time, another event. Texts and values change; the structure does not.
+                jobs['job-1'].update(deferred_memory={'available_mib': 120.}, elapsed_s=14.,
+                                     events=[{'event': 'started'}, {'event': 'deferred'}])
+                await poll()
+                await poll()
+                assert run_panel(client) is panel, 'the panel was not rebuilt'
+                assert in_panel(client, label='Remove from report queue')[0] is remove, 'the focused button is the same element'
+                assert expansion(client) is events and events.value, 'the expansion and its open state survive'
+                assert all(element.id in client.elements for element in (panel, remove, events))
+                assert 'Waiting for free memory: 120 MiB available, 150 MiB needed' in ' '.join(texts(panel))
+                assert 'Elapsed seconds: 14' in texts(panel) and event_text({'event': 'deferred'}) in texts(panel)
+                # The report becomes ready: links replace the queue button, so the panel is rebuilt once...
+                jobs['job-1'].update(REPORT_DONE)
+                await poll()
+                assert run_panel(client) is not panel and in_panel(client, label='Remove from report queue') == []
+                panel, link = run_panel(client), html_link(client)
+                assert expansion(client).value, 'the rebuilt log stays open for the same job'
+                # ...and later ticks keep the report links and the events log in place again.
+                jobs['job-1'].update(elapsed_s=20., events=[{'event': 'started'}, {'event': 'deferred'}, {'event': 'completed'}])
+                await poll()
+                await poll()
+                assert run_panel(client) is panel and html_link(client) is link
+                assert 'Elapsed seconds: 20' in texts(panel) and event_text({'event': 'completed'}) in texts(panel)
+                # Viewing another run is a new structure: the panel follows it (the newest run is listed first).
+                jobs['job-2'] = snapshot('job-2', 'completed', error='worker exited')
+                await click(button(client, 'Refresh saved runs'))
+                await click([child for child in descendants(find(client, css='bench-reports')) if child._props.get('label') == 'View run'][0])
+                assert run_panel(client) is not panel and 'No measurements were acquired for this job.' in texts(run_panel(client))
             assert page.errors == []
         finally:
             client.delete()

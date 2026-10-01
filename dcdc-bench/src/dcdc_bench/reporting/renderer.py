@@ -356,6 +356,18 @@ def _measurement_points(model: dict) -> str:
     return sentence + "."
 
 
+def _result_kind(model: dict) -> str:
+    """'Measured' for MEASURED evidence, otherwise 'Simulated'. Generic axis, hover, control and table wording
+    takes this word so a SYNTHETIC run never calls its values measured; captions and numbers from the model
+    are not touched."""
+    return "Measured" if str(model.get("evidence_label", "")).upper() == "MEASURED" else "Simulated"
+
+
+def _readings_word(model: dict) -> str:
+    """'readings' for MEASURED evidence, 'synthetic readings' otherwise."""
+    return "readings" if _result_kind(model) == "Measured" else "synthetic readings"
+
+
 def _evidence_sentence(label: str) -> str:
     sentences = {"MEASURED": "Measured — readings were acquired from the connected instruments during this run.",
                  "SYNTHETIC": "Synthetic (simulated) — values come from a software model, not from hardware.",
@@ -793,7 +805,7 @@ def _body(model: dict, *, sensor_placement_present: bool = False) -> str:
             intro.append("Each curve can reach a different maximum load because the supply is limited to "
                          f"{source_limit:g} A at its output.")
         out += ["### Efficiency at each input voltage", "", *([" ".join(intro), ""] if intro else []),
-            _rows_table(["Input condition", f"Measured input {at_reference}", f"Efficiency {at_reference}",
+            _rows_table(["Input condition", f"{_result_kind(model)} input {at_reference}", f"Efficiency {at_reference}",
                          "Highest qualified load", "Best observed efficiency"],
                         _voltage_comparison_rows(voltage_comparison), layout="voltage-comparison"), "",
             "Only qualified measurements are shown. Best observed efficiency describes the measured grid; "
@@ -854,6 +866,11 @@ def _body(model: dict, *, sensor_placement_present: bool = False) -> str:
                      ["Brand on sample label", identity.get("actual_brand_on_label") or "unknown"],
                      ["Owner-provided aliases", ", ".join(identity.get("brand_aliases", [])) or "none"],
                      ["Topology / controller / isolation", construction_text]]
+    # The identity and ratings tables and the documentation note form one PDF block, as the acquisition
+    # outcome does below: the note never opens a page alone, away from its tables. The section is short
+    # (two five-row tables and a paragraph), so the block moves whole with its sticky heading when the
+    # current page cannot hold it. Raw Typst blocks disappear from HTML.
+    out += ["```{=typst}", "#block(breakable: false)[", "```", ""]
     if identity_rows:
         out += [_rows_table(["Identity", "Recorded value"], identity_rows, layout="key-value"), ""]
     ratings = dut.get("ratings", {})
@@ -875,6 +892,7 @@ def _body(model: dict, *, sensor_placement_present: bool = False) -> str:
     if not documentation:
         documentation.append("Schematic and sample photographs: not supplied in this report model.")
     out += [" ".join(documentation) + " No internal topology or component identity is inferred.", ""]
+    out += ["```{=typst}", "]", "```", ""]
     if not stages:
         out += ["```{=typst}", "#pagebreak()", "```", ""]
     # Scope denser vertical table padding to the PDF method section. Keeping
@@ -986,7 +1004,7 @@ def _body(model: dict, *, sensor_placement_present: bool = False) -> str:
 
         out += ["### Acquisition method", "", _rows_table(["Policy / evidence", "Recorded setting or result"], [
             ["Declared settling", f"At least {_number(settling['minimum_dwell_s'])} s dwell; "
-             f"{_number(settling['window_s'])} s window with {settling['minimum_fresh_samples']} queried readings; "
+             f"{_number(settling['window_s'])} s window with {settling['minimum_fresh_samples']} queried {_readings_word(model)}; "
              f"Vout span ≤ {_number(settling['maximum_vout_span_V'])} V; timeout {_number(settling['timeout_s'])} s"],
             ["Declared acquisition", f"{_number(acquisition['duration_s'])} s phase; "
              f"{_number(acquisition['target_poll_interval_s'])} s polling target; "
@@ -1046,7 +1064,7 @@ def _body(model: dict, *, sensor_placement_present: bool = False) -> str:
             [[role.capitalize(), state.get("state", "UNKNOWN"),
               "yes" if state.get("verified") is True else "not established"]
              for role, state in shutdown.items()]), ""]
-    out += ["Measured values are aggregated settled DC point results. The raw-sample explorer in HTML "
+    out += [f"{_result_kind(model)} values are aggregated settled DC point results. The raw-sample explorer in HTML "
             "shows only evidence embedded in this report. No waveform, thermal, calibration or uncertainty "
             "claim is inferred from ordinary DC polling.", ""]
     out += ["```{=typst}", "]", "]", "```", ""]
@@ -1094,7 +1112,7 @@ def _body(model: dict, *, sensor_placement_present: bool = False) -> str:
     no_load = [p for p in model["points"] if p.get("iout_target_A") == 0 and p.get("qualification") == "valid"]
     if no_load:
         out += ["### Enabled with no external load", "", "These values describe board/path input consumption, not controller quiescent current. Efficiency is not applicable.", "",
-            _rows_table(["Requested input (V)", "Measured input current (A)", "Input power (W)", "Output voltage (V)"],
+            _rows_table(["Requested input (V)", f"{_result_kind(model)} input current (A)", "Input power (W)", "Output voltage (V)"],
                 [[_number(p.get(key)) for key in ("vin_target_V", "Iin_A", "Pin_W", "Vout_V")]
                  for p in no_load]), ""]
     elif stages or voltage_sweep:
@@ -1122,7 +1140,7 @@ def _body(model: dict, *, sensor_placement_present: bool = False) -> str:
         startup = prior_input_attempt.get('last_startup_cycle', {})
         out += [(f"### Earlier {prior_phrase} startup attempt {{#prior-input-attempt}}" if prior_phrase
                  else "### Earlier startup attempt {#prior-input-attempt}"), "",
-            "These readings belong to the last recorded startup cycle of a separate, aborted run. "
+            f"These {_readings_word(model)} belong to the last recorded startup cycle of a separate, aborted run. "
             "They are not a settled operating point and do not qualify an efficiency measurement. "
             "They are excluded from the efficiency curves and comparison values.", "",
             _rows_table(["Input voltage", "Input current", "Output voltage", "Output current"],
@@ -1179,16 +1197,19 @@ def _controls_html(model: dict) -> str:
                    if any(figure["x_key"] == "elapsed_s" for figure in model["figures"]) else '')
     temperature = (' Temperatures: not acquired; no temperature channel is bound in this bench profile.'
                    if _temperature_note(model) else '')
+    # The axis and hover options follow the evidence label, as the embedded script's axis titles do.
+    kind = _result_kind(model)
+    lower = kind.lower()
     return ('<div class="exploratory-print">EXPLORATORY CURRENT VIEW — issued findings remain unchanged.</div>'
         '<section class="report-controls" aria-labelledby="controls-title"><h3 id="controls-title">Explore recorded results</h3>'
         f'<div class="identity-strip">{html.escape(_identity(model))} · Run {html.escape(model["run_id"])} · '
         f'{html.escape(model.get("evidence_label", ""))}</div>'
         '<div class="control-grid"><label>Metric<select id="metric-select"><option value="all">All result figures</option></select></label>'
         '<label>Horizontal axis<select id="x-select"><option value="default">Figure default</option>'
-        '<option value="Iout_A">Measured output current (A)</option><option value="Pout_W">Measured output power (W)</option>'
-        '<option value="Vin_V">Measured input voltage (V)</option>' + time_option + '</select></label>'
-        '<label>Hover<select id="hover-select"><option value="closest">Nearest measured point</option>'
-        '<option value="x unified">Values at measured x</option></select></label>'
+        f'<option value="Iout_A">{kind} output current (A)</option><option value="Pout_W">{kind} output power (W)</option>'
+        f'<option value="Vin_V">{kind} input voltage (V)</option>' + time_option + '</select></label>'
+        f'<label>Hover<select id="hover-select"><option value="closest">Nearest {lower} point</option>'
+        f'<option value="x unified">Values at {lower} x</option></select></label>'
         '<label><span>Current scale</span><span><input id="log-current" type="checkbox"> Log current</span></label></div>'
         '<fieldset><legend class="scope-note">Test conditions — also synchronized with plot legends</legend>'
         '<div id="trace-options" class="trace-options"></div></fieldset>'
