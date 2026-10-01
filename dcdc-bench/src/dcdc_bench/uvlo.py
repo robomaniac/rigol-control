@@ -16,6 +16,8 @@ context can drive ``execute``; that context does not exist here.
 from __future__ import annotations
 
 import math
+import signal
+import threading
 import uuid
 from contextlib import ExitStack
 from datetime import datetime, timezone
@@ -29,8 +31,8 @@ from filelock import FileLock
 from .adapters import MODEL_PARAMETERS, MODEL_VERSION
 from .domain import UVLO_TEST_TYPE, Plan, RawSample, TestDefinition, uvlo_ramp_phases
 from .mock_uvlo import UVLO_MODEL_VERSION, SyntheticUvlo, UvloMockBench
-from .planning import uvlo_approval_gaps, verify_plan_hash
-from .runner import QUANTITIES, Clock, _lock_paths, _provenance
+from .planning import require_phase_scoped_mock_budget, uvlo_approval_gaps, verify_plan_hash
+from .runner import QUANTITIES, Clock, WorkerTerminated, _lock_paths, _provenance
 from .storage import PersistenceError, RunStore, atomic_json
 
 LOAD_CURRENT_TOLERANCE_A = .02
@@ -63,6 +65,22 @@ class SourceBoundaryStop(UvloStop):
     qualification = "setup-limited"
 
 
+def absolute_limits(plan: Plan) -> dict[str, Any]:
+    """The absolute protective limits a phase-scoped procedure enforces at every observation of every phase."""
+    controls, ratings = plan.bench.protective_controls, plan.dut.ratings
+    return {
+        "input_current_A": controls.source_current_limit_A,
+        "input_voltage_V": controls.dut_input_overvoltage_V if controls.dut_input_overvoltage_V is not None
+                           else ratings.input_voltage_max_V,
+        "input_voltage_ceiling_source": ("bench protective_controls.dut_input_overvoltage_V"
+                                         if controls.dut_input_overvoltage_V is not None
+                                         else "DUT input_voltage_max_V (no bench input OVP declared)"),
+        "output_voltage_V": controls.dut_output_overvoltage_V,
+        "output_current_A": controls.output_overcurrent_A,
+        "load_current_tolerance_A": LOAD_CURRENT_TOLERANCE_A,
+    }
+
+
 class UvloInputRampProcedure:
     """Plan-driven UVLO ramp. Construction refuses anything the planner did not approve outright."""
 
@@ -81,23 +99,13 @@ class UvloInputRampProcedure:
         if blocked:
             raise ValueError(f"UVLO input ramp refused: {len(blocked)} declared step(s) are not executable and a ramp is "
                              f"never run with steps skipped or clipped. First: {blocked[0].point_id} — {blocked[0].reason}")
+        require_phase_scoped_mock_budget(plan)
         self.snapshot = plan.model_copy(deep=True)
         self.stage = "idle"
         self.policy = None
         self.step: dict[str, Any] | None = None
         self.acquiring = False  # the load-established rule judges acquisition cycles, not the settling transient
-        controls, ratings = plan.bench.protective_controls, plan.dut.ratings
-        self.limits = {
-            "input_current_A": controls.source_current_limit_A,
-            "input_voltage_V": controls.dut_input_overvoltage_V if controls.dut_input_overvoltage_V is not None
-                               else ratings.input_voltage_max_V,
-            "input_voltage_ceiling_source": ("bench protective_controls.dut_input_overvoltage_V"
-                                             if controls.dut_input_overvoltage_V is not None
-                                             else "DUT input_voltage_max_V (no bench input OVP declared)"),
-            "output_voltage_V": controls.dut_output_overvoltage_V,
-            "output_current_A": controls.output_overcurrent_A,
-            "load_current_tolerance_A": LOAD_CURRENT_TOLERANCE_A,
-        }
+        self.limits = absolute_limits(plan)
 
     # -- contract surface -------------------------------------------------------------------------
     def plan(self) -> Plan:
@@ -295,25 +303,55 @@ def run_uvlo_mock(plan: Plan, out: Path, *, seed: int = 1, synthetic: SyntheticU
     reading; injected samples are flagged in their acquisition settings.
     This function never creates or imports real instruments.
     """
-    if plan.bench.mode != "mock" or plan.recipe.execution_mode != "mock":
+    if plan.bench.mode != "mock":  # the bench decides; a legacy recipe mode is metadata
         raise ValueError("run_uvlo_mock accepts mock profiles only; real UVLO execution is not implemented and requires review")
-    procedure = UvloInputRampProcedure(plan)
+    return run_phase_scoped_mock(plan, out, procedure_factory=UvloInputRampProcedure, method_key="uvlo_input_ramp",
+                                 run_tag="uvlo", scenario="uvlo-input-ramp",
+                                 authorization_note="explicit run_uvlo_mock call under the recipe's UVLO approval block; "
+                                                    "never arms real equipment",
+                                 seed=seed, synthetic=synthetic, reading_override=reading_override,
+                                 operator_observations=operator_observations, attachment_descriptors=attachment_descriptors)
+
+
+def run_phase_scoped_mock(plan: Plan, out: Path, *, procedure_factory: Callable[[Plan], Any], method_key: str, run_tag: str,
+                          scenario: str, authorization_note: str, seed: int = 1, synthetic: SyntheticUvlo | None = None,
+                          reading_override: ReadingOverride | None = None, operator_observations: list[str] | None = None,
+                          attachment_descriptors: list[dict] | None = None,
+                          bench_factory: Callable[[Plan, SyntheticUvlo, int], UvloMockBench] | None = None) -> Path:
+    """The in-process harness shared by the phase-scoped mock procedures (UVLO ramp, supply profiles, best effort).
+
+    ``procedure_factory(plan)`` builds the procedure (it refuses what the planner
+    did not approve); ``method_key`` is the ``run["method"]`` entry the procedure's
+    metadata declares. The harness owns the synthetic plant (``UvloMockBench``,
+    or the ``UvloMockBench`` subclass/configuration ``bench_factory(plan, synthetic,
+    seed)`` returns), the virtual clock, the file locks, fsync-per-record
+    persistence, the fault/stop bookkeeping and the verified-OFF shutdown.
+    Nothing here imports or creates a real instrument.
+    """
+    if plan.bench.mode != "mock":
+        raise ValueError("phase-scoped mock procedures accept mock profiles only; real execution is not implemented")
+    procedure = procedure_factory(plan)
     if plan.bench.source.max_current_A is None:
         raise ValueError("mock source current capability is required")
     if any(quantity not in plan.bench.measurements for quantity in QUANTITIES):
         raise ValueError("mock acquisition requires four declared electrical measurement bindings")
     synthetic = synthetic if synthetic is not None else SyntheticUvlo()
-    bench = UvloMockBench(plan.dut.ratings.output_voltage_nominal_V,
-                          plan.bench.protective_controls.source_current_limit_A or plan.bench.source.max_current_A,
-                          plan.bench.load.min_voltage_V, seed, uvlo=synthetic)
+    if bench_factory is not None:
+        bench = bench_factory(plan, synthetic, seed)
+        if not isinstance(bench, UvloMockBench):
+            raise ValueError("bench_factory must return the synthetic UvloMockBench plant; no other adapter runs here")
+    else:
+        bench = UvloMockBench(plan.dut.ratings.output_voltage_nominal_V,
+                              plan.bench.protective_controls.source_current_limit_A or plan.bench.source.max_current_A,
+                              plan.bench.load.min_voltage_V, seed, uvlo=synthetic)
     created = datetime.now(timezone.utc)
-    run_id = created.strftime("%Y%m%dT%H%M%S.%fZ") + "_uvlo_" + uuid.uuid4().hex[:8]
+    run_id = created.strftime("%Y%m%dT%H%M%S.%fZ") + f"_{run_tag}_" + uuid.uuid4().hex[:8]
     directory = Path(out) / run_id
     snapshot = plan.model_dump(mode="json")
     run: dict[str, Any] = {
         "schema_version": "1.0", "run_id": run_id, "data_source": "simulated", "execution_status": "running",
         "lifecycle_state": "VALIDATING", "created_utc": created.isoformat(), "plan_hash": plan.plan_hash,
-        "scenario": "uvlo-input-ramp",
+        "scenario": scenario,
         "points": [{**p.model_dump(), "planning_status": p.status, "qualification": "not-run", "reason": "not reached",
                     "acquisition_cycle_ids": [], "requirement_result": "not-evaluated"} for p in plan.points],
         "shutdown": {"source": {"state": "UNKNOWN"}, "load": {"state": "UNKNOWN"}},
@@ -326,7 +364,7 @@ def run_uvlo_mock(plan: Plan, out: Path, *, seed: int = 1, synthetic: SyntheticU
         "operator_observations": list(operator_observations or []),
         "attachment_descriptors": list(attachment_descriptors or []), "real_hardware_opened": False, "errors": []}
     run.update(procedure.metadata())
-    run["method"]["uvlo_input_ramp"]["synthetic_model"] = synthetic.parameters()
+    run["method"][method_key]["synthetic_model"] = synthetic.parameters()
     store = RunStore(directory)
     store.initialize({"dut": snapshot["dut"], "bench": snapshot["bench"], "recipe": snapshot["recipe"],
                       "authorization": run["authorization"]}, snapshot, run)
@@ -416,11 +454,20 @@ def run_uvlo_mock(plan: Plan, out: Path, *, seed: int = 1, synthetic: SyntheticU
         run["shutdown"] = {role: {"state": "OFF", "verified": True} for role in ("source", "load")}
 
     locks = ExitStack()
+    previous_signals = {}
+    if threading.current_thread() is threading.main_thread():
+        def interrupt(signum, frame):
+            if signum == signal.SIGINT:
+                raise KeyboardInterrupt("Operator cancelled the simulation")
+            raise WorkerTerminated("SIGTERM received: simulated acquisition interrupted")
+
+        for number in (signal.SIGINT, signal.SIGTERM):
+            previous_signals[number] = signal.signal(number, interrupt)
+            locks.callback(signal.signal, number, previous_signals[number])
     try:
         transition("PLAN_READY")
         transition("AWAITING_ARM")
-        event("mock_authorized", detail="explicit run_uvlo_mock call under the recipe's UVLO approval block; "
-                                        "never arms real equipment")
+        event("mock_authorized", detail=authorization_note)
         for path in _lock_paths(plan):
             locks.enter_context(FileLock(str(path), timeout=.1))
         owned = True
@@ -444,24 +491,35 @@ def run_uvlo_mock(plan: Plan, out: Path, *, seed: int = 1, synthetic: SyntheticU
         run["stop"] = {"classification": stop.classification, "point_id": active["point_id"] if active else None,
                        "procedure_stage": procedure.stage, "ramp_phase": (procedure.step or {}).get("ramp_phase"),
                        "output_off_expected": (procedure.step or {}).get("output_off_expected"), "values": stop.values,
-                       "reason": str(stop)}
+                       "reason": str(stop),
+                       **({"level_kind": procedure.step["level_kind"]} if procedure.step and "level_kind" in procedure.step else {})}
         if active is not None:
             active.update(qualification=stop.qualification, reason=message, acquisition_cycle_ids=[])
         try:
             event("fault", classification=stop.classification, reason=message)
         except PersistenceError:
             pass
-    except Exception as exc:
-        state = "error"
-        message = f"{type(exc).__name__}: {exc}"
+    except BaseException as exc:
+        # UI Stop sends SIGINT to this in-process owner. Record the incomplete
+        # acquisition before finalizing; an interrupt must never retain the
+        # optimistic initial "completed" state. SIGTERM follows the same
+        # durable shutdown path when a worker service stops or times out.
+        state = "aborted" if isinstance(exc, KeyboardInterrupt) else "interrupted" if isinstance(exc, WorkerTerminated) else "error"
+        message = ("Operator cancelled the simulation before completion" if isinstance(exc, KeyboardInterrupt)
+                   else f"{type(exc).__name__}: {exc}")
         run["errors"].append(message)
         if active is not None:
-            active.update(qualification="error", reason=message, acquisition_cycle_ids=[])
+            active.update(qualification="inconclusive" if state != "error" else "error",
+                          reason=message, acquisition_cycle_ids=[])
         try:
             event("fault", reason=message)
         except PersistenceError:
             pass
     finally:
+        # A repeated Stop/service signal must not interrupt OFF verification or
+        # the integrity manifest. Restore the caller's handlers when closing.
+        for number in previous_signals:
+            signal.signal(number, signal.SIG_IGN)
         run["lifecycle_state"] = "STOPPING"
         try:
             event("lifecycle", state="STOPPING")
@@ -488,7 +546,7 @@ def run_uvlo_mock(plan: Plan, out: Path, *, seed: int = 1, synthetic: SyntheticU
         else:
             run["shutdown"] = {role: {"state": "UNKNOWN", "reason": "resource not owned; no commands sent"}
                                for role in ("source", "load")}
-        run["method"]["uvlo_input_ramp"]["synthetic_transitions"] = list(synthetic.transitions)
+        run["method"][method_key]["synthetic_transitions"] = list(synthetic.transitions)
         run.update(execution_status=state, lifecycle_state=state.upper(), completed_utc=clock.utc(),
                    duration_s=clock.now(), raw_sample_count=persisted)
         try:

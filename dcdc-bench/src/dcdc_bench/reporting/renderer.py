@@ -28,7 +28,9 @@ from types import SimpleNamespace
 from typing import Any
 
 # The issued CSV export guards text cells exactly as the analysis export does.
-from ..analysis import _safe_cell
+from ..analysis import (BEST_EFFORT_CLASSIFICATIONS, BEST_EFFORT_POLL_NOTE, BEST_EFFORT_STATEMENT, DEVIATION_COLUMNS,
+                        DEVIATION_HEADERS, READBACK_METRIC_PREFIX, _safe_cell, deviation_sheet_rows, is_flagged_implausible)
+from ..annotations import load_annotations
 from .sensor_placement import with_sensor_placement
 from ..resources import children_peak_rss_mib, session_survivors, terminate_group, try_log_event
 
@@ -49,7 +51,22 @@ TABLE_LAYOUTS = {
     "voltage-comparison": (20, 19, 18, 18, 25),
     "voltage-outcomes": (22, 14, 20, 44),
     "startup-readings": (25, 25, 25, 25),
+    "exclusions": (10, 13, 17, 20, 40),
+    "about": (22, 78),
+    "deviations": (12, 15, 29, 12, 12, 14, 6),
 }
+# ReportProfile.paper -> the Quarto/Typst paper name; Letter is the default (brief §12.6).
+PAPER_SIZES = {"letter": "us-letter", "a4": "a4"}
+# Plain-language reading of a measurement-binding location (bench-profile vocabulary).
+# Longer keys come first; a location outside the vocabulary is shown as recorded.
+LOCATION_PHRASES = (
+    ("load_input_terminals", "the load terminals"), ("load_terminals", "the load terminals"),
+    ("load_input", "the load terminals"), ("load", "the load terminals"),
+    ("dut_output_sense", "the DUT output terminals through the remote-sense leads"),
+    ("dut_output", "the DUT output terminals"), ("dut_input", "the DUT input terminals"),
+    ("source_terminals", "the supply terminals"), ("source_output", "the supply terminals"),
+    ("source", "the supply terminals"),
+)
 FIELDS = ("Vin_V", "Iin_A", "Vout_V", "Iout_A", "Pin_W", "Pout_W", "loss_W",
           "efficiency_pct", "vout_error_pct")
 # A cold headless browser alone takes about 27 s on the 1 GB bench Pi.
@@ -214,6 +231,17 @@ def validate_report_model(model: dict) -> dict:
             raise ValueError("Metric references a missing point")
         if not set(metric.get("figure_ids", [])) <= figure_ids:
             raise ValueError("Metric references a missing figure")
+    sheet = model.get("best_effort")
+    if sheet is not None:
+        # The best-effort deviation sheet (proposal §2.3): a clause and classified entries, nothing inferred.
+        if (not isinstance(sheet, dict) or not isinstance(sheet.get("clause"), str)
+                or not isinstance(sheet.get("deviations"), list)):
+            raise ValueError("Best-effort sheet must record a clause and a list of deviations")
+        for entry in sheet["deviations"]:
+            if not isinstance(entry, dict) or not isinstance(entry.get("parameter"), str):
+                raise ValueError("Deviation entry must name its parameter")
+            if entry.get("classification") not in BEST_EFFORT_CLASSIFICATIONS:
+                raise ValueError(f"Deviation {entry.get('parameter')!r} has an unknown classification")
     return model
 
 
@@ -222,12 +250,192 @@ def _identity(model: dict) -> str:
     return str(dut.get("identity", {}).get("model", dut.get("model", dut.get("name", "DUT"))))
 
 
+def _parse_utc(value: Any) -> datetime | None:
+    """An ISO instant from the run evidence; a naive string is UTC, as the workers write it."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip())
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+
+
+def _local_parts(moment: datetime) -> tuple[str, str, str]:
+    """('Sep 29, 2026', '13:37', 'PDT') in the bench computer's zone (``datetime.astimezone()``)."""
+    local = moment.astimezone()
+    return f"{local:%b} {local.day}, {local.year}", f"{local:%H:%M}", local.tzname() or "local time"
+
+
+def _recorded(model: dict) -> tuple[str, str]:
+    """(header stamp, page-1 span) of the acquisition in local time.
+
+    The run's created and finished instants are read from the report model's
+    execution record; the evidence files themselves stay UTC. A model without
+    them gives an empty stamp and a plain notice rather than an invented time.
+    """
+    execution = model.get("execution") or {}
+    start, end = _parse_utc(execution.get("created_utc")), _parse_utc(execution.get("finished_utc"))
+    if start is None:
+        return "", "Run time not recorded in this report model"
+    start_date, start_clock, zone = _local_parts(start)
+    stamp = f"{start_date}, {start_clock} {zone}"
+    if end is None or end < start:
+        span = stamp
+    else:
+        end_date, end_clock, end_zone = _local_parts(end)
+        span = (f"{start_date}, {start_clock}–{end_clock} {end_zone}" if (end_date, end_zone) == (start_date, zone)
+                else f"{stamp} to {end_date}, {end_clock} {end_zone}")
+    return stamp, span + " (bench-computer local time; evidence files record UTC)"
+
+
+def _short_title(model: dict) -> str:
+    """The document title without the DUT model, which the header band shows on its own line."""
+    title, dut = str(model.get("title") or "DC–DC converter characterization"), _identity(model)
+    for pattern in (f" · {dut}", f"{dut} · "):
+        if pattern in title and title.replace(pattern, "", 1).strip():
+            return title.replace(pattern, "", 1).strip()
+    return title
+
+
+def _instrument_text(model: dict, role: str, word: str) -> str | None:
+    """'DP821A CH1 (supply)': the reported identity, else the profile's physical or reported model."""
+    bench_item = (model.get("bench") or {}).get(role)
+    reported = ((model.get("provenance") or {}).get("instrument_identities") or {}).get(role)
+    if not isinstance(bench_item, dict) and not isinstance(reported, dict):
+        return None
+    bench_item = bench_item if isinstance(bench_item, dict) else {}
+    candidates = [reported.get("model") if isinstance(reported, dict) else None,
+                  bench_item.get("physical_model"), bench_item.get("reported_identity")]
+    name = next((str(c).strip() for c in candidates if isinstance(c, str) and str(c).strip()),
+                f"{word} instrument (model not reported)")
+    channel = bench_item.get("channel")
+    if isinstance(channel, int) and not isinstance(channel, bool) and f"CH{channel}" not in name:
+        name += f" CH{channel}"
+    elif isinstance(channel, str) and channel.strip() and not channel.startswith("model:") and channel.strip() not in name:
+        name += f" {channel.strip()}"
+    return f"{name} ({word})"
+
+
+def _equipment_text(model: dict) -> str:
+    """The instruments in plain words; the bench-profile slug follows, never leads."""
+    items = [text for text in (_instrument_text(model, "source", "supply"), _instrument_text(model, "load", "load")) if text]
+    if not items:
+        return "Equipment not recorded in this report model"
+    bench_id = (model.get("bench") or {}).get("bench_id")
+    return ", ".join(items) + (f"; bench profile {bench_id}" if bench_id else "")
+
+
+def _location_phrase(location: Any) -> str | None:
+    if not isinstance(location, str) or not location.strip():
+        return None
+    key = location.strip().casefold()
+    for prefix, phrase in LOCATION_PHRASES:
+        if key.startswith(prefix):
+            return phrase
+    return key.replace("_", " ")
+
+
+def _measurement_points(model: dict) -> str:
+    """One plain sentence for the measurement boundary, derived from the recorded bindings and path.
+
+    The input and output phrases come from the binding locations of the voltage
+    (else current) channels; the wiring clause from the declared path text. No
+    recipe is assumed: a model without usable bindings states its declared path.
+    """
+    bindings = (model.get("bench") or {}).get("measurements")
+    bindings = bindings if isinstance(bindings, dict) else {}
+
+    def side(*names: str) -> str | None:
+        for name in names:
+            binding = bindings.get(name)
+            phrase = _location_phrase(binding.get("location") if isinstance(binding, dict) else None)
+            if phrase:
+                return phrase
+        return None
+
+    boundary = str(model.get("boundary") or "").strip()
+    input_side, output_side = side("Vin_V", "Iin_A"), side("Vout_V", "Iout_A")
+    if not input_side or not output_side:
+        return f"Measured across the declared path: {boundary}." if boundary else "Measurement points not recorded in this report model."
+    sentence = f"Input measured at {input_side}, output at {output_side}"
+    lower = boundary.casefold()
+    if re.search(r"wir|cabl|lead", lower) and "includ" in lower:
+        sentence += "; wiring losses are included in the path"
+    elif "supply" in input_side and "load" in output_side:
+        sentence += "; the wiring between them is part of the measured path"
+    elif "supply" in input_side and "DUT output" in output_side:
+        sentence += "; input wiring losses are included in the path, output wiring is not"
+    return sentence + "."
+
+
+def _result_kind(model: dict) -> str:
+    """'Measured' for MEASURED evidence, otherwise 'Simulated'. Generic axis, hover, control and table wording
+    takes this word so a SYNTHETIC run never calls its values measured; captions and numbers from the model
+    are not touched."""
+    return "Measured" if str(model.get("evidence_label", "")).upper() == "MEASURED" else "Simulated"
+
+
+def _readings_word(model: dict) -> str:
+    """'readings' for MEASURED evidence, 'synthetic readings' otherwise."""
+    return "readings" if _result_kind(model) == "Measured" else "synthetic readings"
+
+
+def _evidence_sentence(label: str) -> str:
+    sentences = {"MEASURED": "Measured — readings were acquired from the connected instruments during this run.",
+                 "SYNTHETIC": "Synthetic (simulated) — values come from a software model, not from hardware.",
+                 "SIMULATED": "Simulated — values come from a software model, not from hardware."}
+    return sentences.get(label.upper(), f"{label} — see the qualification notes in the appendix.")
+
+
+def _traceability_text(model: dict) -> str:
+    return (f"Run ID {model['run_id']}; analysis {model['analysis_id']}; method version "
+            f"{(model.get('provenance') or {}).get('formula_version', 'unknown')}; report revision "
+            f"{model.get('report_revision', 'not supplied')} — these match this document to its raw data files.")
+
+
+def _about_rows(model: dict) -> list[list[str]]:
+    """Page-1 identity in plain words (brief §12.3); every identifier stays, in the last row."""
+    dut = model["dut"]
+    identity = dut.get("identity", dut) if isinstance(dut.get("identity", dut), dict) else {}
+    sample = identity.get("sample_id")
+    return [["Device tested", _identity(model) + (f" — Sample: {sample}" if sample else " — no sample id recorded")],
+            ["Equipment", _equipment_text(model)],
+            ["Measurement points", _measurement_points(model)],
+            ["Recorded", _recorded(model)[1]],
+            ["Evidence", _evidence_sentence(str(model.get("evidence_label", "Evidence type unknown")))],
+            ["Traceability", _traceability_text(model)]]
+
+
+def _report_identity(model: dict) -> dict[str, str]:
+    """Strings for the PDF header band, footer and title block; every page carries the run identity."""
+    evidence = str(model.get("evidence_label", "Evidence type unknown"))
+    stamp, _ = _recorded(model)
+    return {"title": _short_title(model), "dut": _identity(model), "evidence": evidence, "recorded": stamp,
+            "subtitle": f"{evidence} evidence" + (f" · Recorded {stamp}" if stamp else ""),
+            "run": str(model["run_id"]), "revision": str(model.get("report_revision", "not supplied")),
+            "analysis": str(model["analysis_id"])}
+
+
+def _typst_string(value: Any) -> str:
+    """A Typst string literal; user text never becomes code (Typst has no JSON-style \\uXXXX escape)."""
+    text = "".join(ch if ch >= " " else " " for ch in str(value))
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+FOOTER_LINE_CHARS = 150  # the 183-character line overran the US Letter page box by 3 pt on CI fonts; 124 fit
+
+
 def _footer(model: dict, figure: dict, conditions: str = "canonical conditions") -> str:
+    path = f"Measured path: {model.get('boundary', 'not supplied')}"
+    aggregation = "Aggregated settled DC points; uncertainty unquantified unless explicitly supplied"
+    # A long measurement-boundary description gets its own line so the exported
+    # figure never draws text past the page edge (PDF-02 clipped-text).
+    joiner = "<br>" if len(path) + 3 + len(aggregation) > FOOTER_LINE_CHARS else " | "
     return (f"{model.get('evidence_label', 'Evidence status not supplied')} | {_identity(model)} | "
             f"Run {model['run_id']} | Analysis {model['analysis_id']}<br>"
             f"{figure['id']} | {conditions}<br>"
-            f"Boundary: {model.get('boundary', 'not supplied')} | "
-            "Aggregated settled DC points; uncertainty unquantified unless explicitly supplied")
+            f"{path}{joiner}{aggregation}")
 
 
 def _stage_transition_pairs(model: dict, spec: dict) -> list[tuple[dict, dict]]:
@@ -364,8 +572,9 @@ def _figure_references(model: dict) -> dict[str, dict]:
         for series in spec["series"]:
             for pid in series["point_ids"]:
                 point = points[pid]
-                if (point.get("qualification") != "valid" or not finite(point.get(spec["x_key"]))
-                        or not finite(point.get(spec["y_key"]))):
+                # Flagged (open-marker) points are drawn, so the default range keeps them in view.
+                if ((point.get("qualification") != "valid" and not is_flagged_implausible(point))
+                        or not finite(point.get(spec["x_key"])) or not finite(point.get(spec["y_key"]))):
                     continue
                 # Keep any supplied display band in view as well as the mean.
                 values.extend(float(point[key]) for key in (spec["y_key"], spec.get("lower_key"), spec.get("upper_key"))
@@ -395,41 +604,60 @@ def _plot_figure(model: dict, spec: dict, number: int):
             meta={"isTransition": True}))
     conditions = []
     plotted_currents: set[float] = set()
+    flagged_count = 0
+
+    def finite_pairs(horizontals, values):
+        return [(float(horizontal), float(value)) for horizontal, value in zip(horizontals, values)
+            if isinstance(horizontal, (int, float)) and not isinstance(horizontal, bool)
+            and isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(horizontal) and math.isfinite(value)]
+
     # The same condition keeps its color across both formats and every figure,
     # including a hold-only panel with a subset of the sequence's conditions.
     condition_styles = _condition_styles(model)
     for index, series in enumerate(spec["series"]):
         rows = [points[pid] for pid in series["point_ids"]]
         valid = [p.get("qualification") == "valid" for p in rows]
+        # Brief 9.1: an implausible ratio is preserved and flagged, never clamped
+        # or hidden. Flagged points are drawn open, unjoined, and never as qualified.
+        flagged = [is_flagged_implausible(p) for p in rows]
         x = [p.get(spec["x_key"]) for p in rows]
         y = [p.get(spec["y_key"]) if okay else None for p, okay in zip(rows, valid)]
-        plotted = [(float(horizontal), float(value)) for horizontal, value in zip(x, y)
-            if isinstance(horizontal, (int, float)) and not isinstance(horizontal, bool)
-            and isinstance(value, (int, float)) and not isinstance(value, bool)
-            and math.isfinite(horizontal) and math.isfinite(value)]
+        y_flagged = [p.get(spec["y_key"]) if flag else None for p, flag in zip(rows, flagged)]
+        plotted = finite_pairs(x, y)
+        plotted_flagged = finite_pairs(x, y_flagged)
         # Keep requested points in the report model/evidence controls, but do
         # not imply a measured curve exists through an empty legend entry.
-        if not plotted:
+        if not plotted and not plotted_flagged:
             continue
         style = condition_styles[_condition_key(series)]
         color = style["color"]
         condition = str(series.get("label", series["id"]))
-        conditions.append(condition)
         if spec["x_key"] == "Iout_A":
-            plotted_currents.update(current for current, _ in plotted)
-        lower, upper = spec.get("lower_key"), spec.get("upper_key")
-        if lower and upper:
-            for key, fill in ((lower, None), (upper, "tonexty")):
-                figure.add_trace(go.Scatter(x=x, y=[p.get(key) if okay else None
-                    for p, okay in zip(rows, valid)], mode="lines", line={"width": 0},
-                    fill=fill, fillcolor=_rgba(color, .13), showlegend=False,
-                    legendgroup=series["id"], hoverinfo="skip", connectgaps=False))
-        figure.add_trace(go.Scatter(x=x, y=y, name=html.escape(condition),
-            mode="lines+markers" if series.get("connect_points", True) else "markers",
-            line={"width": 2, "color": color, "dash": style["dash"]},
-            marker={"size": 9, "color": color, "symbol": style["symbol"]}, connectgaps=False,
-            legendgroup=series["id"], customdata=[p["point_id"] for p in rows],
-            hovertemplate="%{customdata}<br>%{x:.6g}<br>%{y:.6g}<extra>%{fullData.name}</extra>"))
+            plotted_currents.update(current for current, _ in [*plotted, *plotted_flagged])
+        if plotted:
+            conditions.append(condition)
+            lower, upper = spec.get("lower_key"), spec.get("upper_key")
+            if lower and upper:
+                for key, fill in ((lower, None), (upper, "tonexty")):
+                    figure.add_trace(go.Scatter(x=x, y=[p.get(key) if okay else None
+                        for p, okay in zip(rows, valid)], mode="lines", line={"width": 0},
+                        fill=fill, fillcolor=_rgba(color, .13), showlegend=False,
+                        legendgroup=series["id"], hoverinfo="skip", connectgaps=False))
+            figure.add_trace(go.Scatter(x=x, y=y, name=html.escape(condition),
+                mode="lines+markers" if series.get("connect_points", True) else "markers",
+                line={"width": 2, "color": color, "dash": style["dash"]},
+                marker={"size": 9, "color": color, "symbol": style["symbol"]}, connectgaps=False,
+                legendgroup=series["id"], customdata=[p["point_id"] for p in rows],
+                hovertemplate="%{customdata}<br>%{x:.6g}<br>%{y:.6g}<extra>%{fullData.name}</extra>"))
+        if plotted_flagged:
+            flagged_count += len(plotted_flagged)
+            figure.add_trace(go.Scatter(x=x, y=y_flagged, name=html.escape(condition + " · flagged, not qualified"),
+                mode="markers", showlegend=not plotted, legendgroup=series["id"], connectgaps=False,
+                marker={"size": 10, "color": color, "symbol": f"{style['symbol']}-open", "line": {"width": 2, "color": color}},
+                customdata=[p["point_id"] for p in rows],
+                hovertemplate="%{customdata}<br>%{x:.6g}<br>%{y:.6g}<br>Not qualified: implausible power ratio"
+                              "<extra>%{fullData.name}</extra>"))
     # Retained raw time series (e.g. thermal settling) are drawn exactly as supplied.
     for index, series in enumerate(spec.get("sample_series", [])):
         color = COLORS[index % len(COLORS)]
@@ -439,7 +667,10 @@ def _plot_figure(model: dict, spec: dict, number: int):
             mode="lines+markers", line={"width": 1.5, "color": color}, marker={"size": 5, "color": color},
             connectgaps=False, legendgroup=series["id"],
             hovertemplate="%{x:.6g} s<br>%{y:.6g}<extra>%{fullData.name}</extra>"))
-    footer = _footer(model, spec, "; ".join(conditions) or "no qualified plotted conditions")
+    plotted_conditions = "; ".join(conditions) or "no qualified plotted conditions"
+    if flagged_count:
+        plotted_conditions += f" | {flagged_count} flagged point(s) drawn with open markers, not qualified"
+    footer = _footer(model, spec, plotted_conditions)
     # Every user supplied segment is escaped before entering Plotly rich text.
     footer = "<br>".join(html.escape(line) for line in footer.split("<br>"))
     figure.update_layout(template="plotly_white", width=1080, height=530,
@@ -530,12 +761,57 @@ def _phase_outcome(value: Any) -> str:
     return labels.get(value, str(value).replace("_", " ").replace("-", " ").capitalize()) if value else "Not reported"
 
 
-def _body(model: dict) -> str:
+def _deviation_sheet_section(model: dict) -> list[str]:
+    """The best-effort deviation sheet under the test's results (best-effort proposal §2.3 item 1).
+
+    One Markdown source serves HTML and PDF. The table keeps its cells short:
+    the last column numbers each row's note and the notes follow the table as
+    a numbered list, so the rows stay a few lines tall and the print theme's
+    measured pagination rule (templates/theme/print-tables.typ) decides whether
+    the table moves whole or breaks between rows; a sheet is never forced into
+    one unbreakable block, which overflowed the page when the notes were long.
+    The no-compliance statement is renderer-owned text, so no model can leave
+    it out, and no cell uses the verb "achieved": the bench commands, the host
+    clock times, and the converter side is "not measured".
+    """
+    sheet = model.get("best_effort")
+    if not sheet:
+        return []
+    table_rows: list[list[str]] = []
+    notes: list[str] = []
+    for row in deviation_sheet_rows(sheet):
+        cells = [str(cell) for cell in row[:6]]
+        note = str(row[6]).strip() if len(row) > 6 else ""
+        if note and note != "—":
+            notes.append(f"{len(notes) + 1}. {_md(cells[0])}: {_md(note)}.")
+            cells.append(str(len(notes)))
+        else:
+            cells.append("—")
+        table_rows.append(cells)
+    title = sheet.get("title") or f"Deviations from ISO 16750-2 clause {sheet.get('clause', 'unknown')}"
+    out = [f"### {_md(title)} {{#deviations}}", "", _rows_table(list(DEVIATION_HEADERS), table_rows, layout="deviations"), ""]
+    if notes:
+        out += ["Notes, numbered in the table's last column:", "", *notes, ""]
+    bases = sheet.get("bases") or {}
+    if isinstance(bases, dict) and bases:
+        out += ["Basis tags: " + "; ".join(f"{_md(tag)} = {_md(text)}" for tag, text in bases.items()) + ".", ""]
+    out += [_md(sheet.get("poll_note") or BEST_EFFORT_POLL_NOTE), ""]
+    if isinstance(sheet.get("procedure_statement"), str) and sheet["procedure_statement"].strip():
+        out += ["Recorded by the procedure: " + _md(sheet["procedure_statement"]), ""]
+    out += [f"**{_md(BEST_EFFORT_STATEMENT)}**", ""]
+    return out
+
+
+def _body(model: dict, *, sensor_placement_present: bool = False) -> str:
     if model.get("kind") == "comparison":
         from .comparison import comparison_body
         return comparison_body(model)
     evidence = str(model.get("evidence_label", "Evidence type unknown"))
-    out = ["## Summary {#summary}", "", f"**{_md(evidence)} — {_md(model.get('boundary', 'Boundary not supplied'))}.**",
+    points_sentence = _measurement_points(model)
+    # Page 1 opens with the identity in plain words (brief §12.3). The same rows
+    # serve HTML and PDF; the identifiers close the table rather than open it.
+    out = [_rows_table(["About this report", ""], _about_rows(model), layout="about"), "",
+        "## Summary {#summary}", "", f"**{_md(evidence)} — {_md(points_sentence)}**",
         "", "This issued summary is fixed. Reader filters change exploratory views only.", ""]
     metrics = model["metrics"]
     metric_registry = {metric["id"]: metric for metric in metrics}
@@ -583,7 +859,7 @@ def _body(model: dict) -> str:
             intro.append("Each curve can reach a different maximum load because the supply is limited to "
                          f"{source_limit:g} A at its output.")
         out += ["### Efficiency at each input voltage", "", *([" ".join(intro), ""] if intro else []),
-            _rows_table(["Input condition", f"Measured input {at_reference}", f"Efficiency {at_reference}",
+            _rows_table(["Input condition", f"{_result_kind(model)} input {at_reference}", f"Efficiency {at_reference}",
                          "Highest qualified load", "Best observed efficiency"],
                         _voltage_comparison_rows(voltage_comparison), layout="voltage-comparison"), "",
             "Only qualified measurements are shown. Best observed efficiency describes the measured grid; "
@@ -631,13 +907,24 @@ def _body(model: dict) -> str:
     stages = list(dict.fromkeys(point.get("phase_label") for point in model["points"] if point.get("phase_label")))
     if stages or voltage_sweep or model.get("execution", {}).get("startup_descent"):
         out += ["```{=typst}", "#pagebreak()", "```", ""]
-    out += ["", "## Device under test {#dut}", ""]
+    out += ["", "## Device tested {#dut}", ""]
     dut = model["dut"]
     identity = dut.get("identity", dut)
+    construction = dut.get("construction") or {}
+    construction_values = [construction.get(key) or "unknown"
+                           for key in ("topology", "controller_part_number", "isolation")]
+    construction_text = ("unknown — black-box characterization"
+                         if all(str(value).strip().lower() == "unknown" for value in construction_values)
+                         else " / ".join(str(value) for value in construction_values))
     identity_rows = [["Model", _identity(model)], ["Sample", identity.get("sample_id") or "not assigned"],
                      ["Brand on sample label", identity.get("actual_brand_on_label") or "unknown"],
                      ["Owner-provided aliases", ", ".join(identity.get("brand_aliases", [])) or "none"],
-                     ["Topology / controller / isolation", "unknown — black-box characterization"]]
+                     ["Topology / controller / isolation", construction_text]]
+    # The identity and ratings tables and the documentation note form one PDF block, as the acquisition
+    # outcome does below: the note never opens a page alone, away from its tables. The section is short
+    # (two five-row tables and a paragraph), so the block moves whole with its sticky heading when the
+    # current page cannot hold it. Raw Typst blocks disappear from HTML.
+    out += ["```{=typst}", "#block(breakable: false)[", "```", ""]
     if identity_rows:
         out += [_rows_table(["Identity", "Recorded value"], identity_rows, layout="key-value"), ""]
     ratings = dut.get("ratings", {})
@@ -648,8 +935,18 @@ def _body(model: dict) -> str:
                 ["Rating origin", ratings.get("origin", "unknown")],
                 ["Sample-label verification", "yes" if ratings.get("verified_from_sample_label") else "not verified"]]
         out += [_rows_table(["Rating / evidence", "Recorded value"], rows, layout="key-value"), ""]
-    out += ["Schematic and sample photographs: not supplied in this report model. "
-            "No internal topology or component identity is inferred.", ""]
+    descriptors = model.get("provenance", {}).get("attachment_descriptors") or []
+    documentation = []
+    if descriptors:
+        documentation.append(f"Attachment references: {len(descriptors)} supplied with acquisition metadata. "
+                             "References alone do not establish that a schematic or photograph is embedded.")
+    if sensor_placement_present:
+        documentation.append("Photographic sensor-placement documentation is included in the "
+                             "[Sensor placement section](#sensor-placement).")
+    if not documentation:
+        documentation.append("Schematic and sample photographs: not supplied in this report model.")
+    out += [" ".join(documentation) + " No internal topology or component identity is inferred.", ""]
+    out += ["```{=typst}", "]", "```", ""]
     if not stages:
         out += ["```{=typst}", "#pagebreak()", "```", ""]
     # Scope denser vertical table padding to the PDF method section. Keeping
@@ -659,11 +956,11 @@ def _body(model: dict) -> str:
     out += ["```{=typst}", "#block(breakable: true)[",
             "#set table(inset: (x: 6pt, y: 3pt))",
             "#set par(spacing: 0.55em)", "```", ""]
-    out += ["## Setup and method {#setup}", "", _md(model.get("boundary", "Boundary not supplied")), ""]
+    out += ["## Setup and method {#setup}", "", "**Measurement points:** " + _md(points_sentence)
+            + " Declared path: " + _md(model.get("boundary", "not supplied")) + ".", ""]
     bench = model.get("bench", {})
-    for key in ("bench_id",):
-        if key in bench:
-            out += [f"**{_md(key.replace('_',' '))}:** {_md(_compact(bench[key]))}", ""]
+    if "bench_id" in bench:
+        out += [f"**Equipment profile:** {_md(_compact(bench['bench_id']))}", ""]
     sources = []
     for key in ("source", "load"):
         item = bench.get(key)
@@ -761,7 +1058,7 @@ def _body(model: dict) -> str:
 
         out += ["### Acquisition method", "", _rows_table(["Policy / evidence", "Recorded setting or result"], [
             ["Declared settling", f"At least {_number(settling['minimum_dwell_s'])} s dwell; "
-             f"{_number(settling['window_s'])} s window with {settling['minimum_fresh_samples']} queried readings; "
+             f"{_number(settling['window_s'])} s window with {settling['minimum_fresh_samples']} queried {_readings_word(model)}; "
              f"Vout span ≤ {_number(settling['maximum_vout_span_V'])} V; timeout {_number(settling['timeout_s'])} s"],
             ["Declared acquisition", f"{_number(acquisition['duration_s'])} s phase; "
              f"{_number(acquisition['target_poll_interval_s'])} s polling target; "
@@ -821,7 +1118,7 @@ def _body(model: dict) -> str:
             [[role.capitalize(), state.get("state", "UNKNOWN"),
               "yes" if state.get("verified") is True else "not established"]
              for role, state in shutdown.items()]), ""]
-    out += ["Measured values are aggregated settled DC point results. The raw-sample explorer in HTML "
+    out += [f"{_result_kind(model)} values are aggregated settled DC point results. The raw-sample explorer in HTML "
             "shows only evidence embedded in this report. No waveform, thermal, calibration or uncertainty "
             "claim is inferred from ordinary DC polling.", ""]
     out += ["```{=typst}", "]", "]", "```", ""]
@@ -839,6 +1136,8 @@ def _body(model: dict) -> str:
                 '<button type="button" data-action="svg">Export SVG</button>'
                 '<button type="button" data-action="png">Export PNG</button></div>'
                 f'<p class="figure-status" id="status-{fid}" aria-live="polite"></p>', "```", "", "::: ", ""]
+    # A best-effort ISO 16750-2 run: its deviation sheet follows the test's results.
+    out += _deviation_sheet_section(model)
     out += ["```{=html}", '<section class="raw-evidence" aria-labelledby="evidence-title">'
             '<h3 id="evidence-title">Point results and raw evidence</h3>'
             '<label for="point-picker">Inspect point (keyboard accessible)</label><br>'
@@ -848,20 +1147,33 @@ def _body(model: dict) -> str:
              "## Regulation and return results {#regulation}" if stages else
              "## Regulation results {#regulation}" if voltage_sweep else
              "## Regulation and no-load results {#regulation}"), ""]
-    if len(metrics) > 1:
+    cross_check = [m for m in metrics if str(m.get("id", "")).startswith(READBACK_METRIC_PREFIX)]
+    regulation = [m for m in metrics[1:] if m not in cross_check]
+    if regulation:
         out += [_rows_table(["Metric", "Value", "Actually covered conditions"],
             [[m["label"], f"{_number(m.get('value'))} {m.get('unit','')}", m.get("conditions", "")]
-             for m in metrics[1:]]), "", "See @fig-voltage for the qualified voltage values."
+             for m in regulation]), "", "See @fig-voltage for the qualified voltage values."
              + (" See @fig-hold-voltage for the sustained-load interval." if has_hold else ""), ""]
+    if cross_check:
+        # A pass-through profile (topology "none ...") declares no converter: the source
+        # and load instruments read the same series current and nearly the same voltage.
+        out += ["### Readback cross-check (pass-through, not calibration)", "",
+                "The DUT profile declares a direct connection with no converter, so the source and load instruments "
+                "read the same series current. These rows are differences between the two instruments' readbacks "
+                "along the declared path, computed from the same channel means as the point results. They are not a "
+                "calibration, their uncertainty is unquantified, and no stored value is corrected.", "",
+                _rows_table(["Cross-check", "Value", "Conditions"],
+                    [[_md(str(m["label"]).split(": ", 1)[-1]), f"{_number(m.get('value'))} {m.get('unit','')}",
+                      _md(m.get("conditions", ""))] for m in cross_check]), ""]
     no_load = [p for p in model["points"] if p.get("iout_target_A") == 0 and p.get("qualification") == "valid"]
     if no_load:
         out += ["### Enabled with no external load", "", "These values describe board/path input consumption, not controller quiescent current. Efficiency is not applicable.", "",
-            _rows_table(["Requested input (V)", "Measured input current (A)", "Input power (W)", "Output voltage (V)"],
+            _rows_table(["Requested input (V)", f"{_result_kind(model)} input current (A)", "Input power (W)", "Output voltage (V)"],
                 [[_number(p.get(key)) for key in ("vin_target_V", "Iin_A", "Pin_W", "Vout_V")]
                  for p in no_load]), ""]
     elif stages or voltage_sweep:
         out += ["No-load consumption was not measured in this run.", ""]
-    if len(metrics) <= 1 and not no_load:
+    if not regulation and not no_load:
         out += ["This run has insufficient input-voltage and load coverage to calculate regulation, "
                 "and no qualified no-load point. A broader acquired grid is needed for these results.", ""]
     out += ["```{=typst}", "#pagebreak()", "```", "",
@@ -884,7 +1196,7 @@ def _body(model: dict) -> str:
         startup = prior_input_attempt.get('last_startup_cycle', {})
         out += [(f"### Earlier {prior_phrase} startup attempt {{#prior-input-attempt}}" if prior_phrase
                  else "### Earlier startup attempt {#prior-input-attempt}"), "",
-            "These readings belong to the last recorded startup cycle of a separate, aborted run. "
+            f"These {_readings_word(model)} belong to the last recorded startup cycle of a separate, aborted run. "
             "They are not a settled operating point and do not qualify an efficiency measurement. "
             "They are excluded from the efficiency curves and comparison values.", "",
             _rows_table(["Input voltage", "Input current", "Output voltage", "Output current"],
@@ -911,23 +1223,21 @@ def _body(model: dict) -> str:
     if exclusions:
         out += [_rows_table(["Point", "Test", "Requested input / load", "Qualification", "Reason"],
             [[p["point_id"],p.get("test_id"),f"{p.get('vin_target_V')} V / {p.get('iout_target_A')} A",
-              p.get("qualification"),p.get("reason", "not supplied")] for p in exclusions]), "",
-            ': {tbl-colwidths="[10,13,17,20,40]"}', ""]
+              p.get("qualification"),p.get("reason", "not supplied")] for p in exclusions],
+            layout="exclusions"), ""]
     else:
         out += ["No attempted measurements were excluded." if source_search or voltage_sweep else
                 "No excluded points are recorded in this analysis.", ""]
     out += ["Uncertainty: " + _md((model.get("uncertainty") or {}).get("note") or "No applicable validated uncertainty budget "
             "is supplied. Bands and difference-resolution conclusions are not fabricated."), "",
-            "**Run:** " + _md(model["run_id"]) + "  ",
-            "**Analysis:** " + _md(model["analysis_id"]) + "  ",
-            "**Report revision:** " + _md(model.get("report_revision", "not supplied")), "",
-            "**Method version:** " + _md(model.get("provenance", {}).get("formula_version", "unknown")), "",
+            "**Traceability:** " + _md(_traceability_text(model)), "",
             "```{=html}", '<p class="report-footer">Local artifacts: '
             '<a href="report_model.json">report model and embedded evidence</a> · '
             '<a href="build_manifest.json">build manifest</a> · '
             '<a href="exports/points.csv">issued point results CSV</a> · '
             '<a href="exports/points.meta.json">CSV conditions and columns</a> '
-            '<span id="canonical-pdf-link"></span></p>', "```", ""]
+            + ('· <a href="exports/deviations.json">deviation sheet JSON</a> ' if model.get("best_effort") else "")
+            + '<span id="canonical-pdf-link"></span></p>', "```", ""]
     return "\n".join(out)
 
 
@@ -944,16 +1254,19 @@ def _controls_html(model: dict) -> str:
                    if any(figure["x_key"] == "elapsed_s" for figure in model["figures"]) else '')
     temperature = (' Temperatures: not acquired; no temperature channel is bound in this bench profile.'
                    if _temperature_note(model) else '')
+    # The axis and hover options follow the evidence label, as the embedded script's axis titles do.
+    kind = _result_kind(model)
+    lower = kind.lower()
     return ('<div class="exploratory-print">EXPLORATORY CURRENT VIEW — issued findings remain unchanged.</div>'
         '<section class="report-controls" aria-labelledby="controls-title"><h3 id="controls-title">Explore recorded results</h3>'
-        f'<div class="identity-strip">{html.escape(_identity(model))} · {html.escape(model["run_id"])} · '
+        f'<div class="identity-strip">{html.escape(_identity(model))} · Run {html.escape(model["run_id"])} · '
         f'{html.escape(model.get("evidence_label", ""))}</div>'
         '<div class="control-grid"><label>Metric<select id="metric-select"><option value="all">All result figures</option></select></label>'
         '<label>Horizontal axis<select id="x-select"><option value="default">Figure default</option>'
-        '<option value="Iout_A">Measured output current (A)</option><option value="Pout_W">Measured output power (W)</option>'
-        '<option value="Vin_V">Measured input voltage (V)</option>' + time_option + '</select></label>'
-        '<label>Hover<select id="hover-select"><option value="closest">Nearest measured point</option>'
-        '<option value="x unified">Values at measured x</option></select></label>'
+        f'<option value="Iout_A">{kind} output current (A)</option><option value="Pout_W">{kind} output power (W)</option>'
+        f'<option value="Vin_V">{kind} input voltage (V)</option>' + time_option + '</select></label>'
+        f'<label>Hover<select id="hover-select"><option value="closest">Nearest {lower} point</option>'
+        f'<option value="x unified">Values at {lower} x</option></select></label>'
         '<label><span>Current scale</span><span><input id="log-current" type="checkbox"> Log current</span></label></div>'
         '<fieldset><legend class="scope-note">Test conditions — also synchronized with plot legends</legend>'
         '<div id="trace-options" class="trace-options"></div></fieldset>'
@@ -973,7 +1286,7 @@ def _controls_html(model: dict) -> str:
 EXPORT_FIELDS = ("run_id", "analysis_id", "evidence_type", "point_id", "test_id", "vin_target_V",
                  "programmed_input_V", "input_condition_label", "iout_target_A",
                  "Vin_V", "Iin_A", "Vout_V", "Iout_A", "Pin_W", "Pout_W", "loss_W",
-                 "efficiency_pct", "vout_error_pct", "qualification", "reason")
+                 "efficiency_pct", "vout_error_pct", "qualification", "quality_flags", "reason")
 EXPORT_TIMING_FIELDS = ("phase_label", "elapsed_start_s", "elapsed_s", "elapsed_end_s")
 EXPORT_COLUMNS: dict[str, tuple[str, str | None]] = {
     "run_id": ("Acquisition run identifier", None),
@@ -995,6 +1308,8 @@ EXPORT_COLUMNS: dict[str, tuple[str, str | None]] = {
     "efficiency_pct": ("Path efficiency = 100 × Pout / Pin", "%"),
     "vout_error_pct": ("Output deviation = 100 × (Vout − Vnominal) / Vnominal", "%"),
     "qualification": ("Point qualification: valid, inconclusive, setup-limited, not-run, …", None),
+    "quality_flags": ("Analysis flags that demoted the point (semicolon-separated, e.g. implausible_power_ratio); "
+                      "empty when none", None),
     "reason": ("Recorded qualification reason", None),
     "phase_label": ("Sequence stage label, when the run records stages", None),
     "elapsed_start_s": ("Start of the accepted query span, relative to the first accepted query", "s"),
@@ -1117,8 +1432,32 @@ def write_exports(model: dict, out_dir: Path) -> dict[str, dict]:
     }
     meta_path = exports / "points.meta.json"
     _write_atomic(meta_path, _json(metadata))
+    written = {"points.csv": csv_path, "points.meta.json": meta_path}
+    sheet = model.get("best_effort")
+    if sheet:
+        # Best-effort proposal §2.3 item 4: the deviation sheet as recorded (entries verbatim,
+        # with the report's derived cells), its counts, basis legend, the templated summary
+        # sentence and the mandatory statement travel with the issued exports.
+        entries = sheet.get("deviations") or []
+        deviations_path = exports / "deviations.json"
+        _write_atomic(deviations_path, _json({
+            "schema_version": "1.0", "kind": "best-effort-deviation-sheet",
+            "run_id": model["run_id"], "analysis_id": model["analysis_id"],
+            "report_revision": model.get("report_revision"), "evidence_type": model.get("evidence_label"),
+            "dut": _identity(model),
+            "standard": sheet.get("standard") or "ISO 16750-2", "clause": sheet.get("clause"),
+            "variant": sheet.get("variant"), "variants": list(sheet.get("variants") or []), "test_type": sheet.get("test_type"),
+            "summary_sentence": sheet.get("summary_sentence"),
+            "statement": BEST_EFFORT_STATEMENT, "procedure_statement": sheet.get("procedure_statement"),
+            "poll_note": sheet.get("poll_note") or BEST_EFFORT_POLL_NOTE,
+            "classification_counts": sheet.get("counts") or {
+                name: sum(1 for entry in entries if entry.get("classification") == name) for name in BEST_EFFORT_CLASSIFICATIONS},
+            "bases": sheet.get("bases") or {},
+            "columns": [{"name": name, "header": header} for name, header in zip(DEVIATION_COLUMNS, DEVIATION_HEADERS)],
+            "deviations": entries}))
+        written["deviations.json"] = deviations_path
     return {name: {"path": str(path), "sha256": _sha(path), "bytes": path.stat().st_size}
-            for name, path in (("points.csv", csv_path), ("points.meta.json", meta_path))}
+            for name, path in written.items()}
 
 
 def _quarto() -> str:
@@ -1164,6 +1503,27 @@ def _record_pdf_check(manifest: dict, artifact: Path, model: dict) -> None:
         missing = [str(f.get("code")) for f in manifest["pdf_check"].get("findings", []) if f.get("severity") == "unverified"]
         manifest["artifacts"]["pdf"].update(status="unverified",
             note="PDF not verified: tool missing (" + ", ".join(missing) + "); the pagination check (PDF-02) could not run")
+
+
+def _print_header(identity: dict[str, str], paper: str = "letter") -> str:
+    """Typst header include for the PDF: the identity dictionary, the datasheet theme and the table rules.
+
+    ``identity`` comes from ``_report_identity``; its strings are emitted as Typst
+    string literals, never as code. The theme (templates/theme/print-theme.typ)
+    reads them for the header band, footer and title block and defines the
+    ``dcdc-report`` function that the ``typst-show.typ`` template partial applies
+    in place of Quarto's article block. print-tables.typ follows: tables up to
+    half a page never split; taller ones keep their last two rows together and
+    never open with a single row at the bottom of a page (a table that fits on
+    one page moves whole, with its sticky heading, when its header and first
+    two rows would not fit).
+    """
+    if paper not in PAPER_SIZES:
+        raise ValueError("Report paper must be letter or a4")
+    fields = {**identity, "paper": PAPER_SIZES[paper]}
+    lines = ["#let dcdc-id = (", *(f"  {key}: {_typst_string(value)}," for key, value in fields.items()), ")", ""]
+    return ("\n".join(lines) + (TEMPLATES / "theme/print-theme.typ").read_text(encoding="utf-8")
+            + (TEMPLATES / "theme/print-tables.typ").read_text(encoding="utf-8"))
 
 
 def _version(package: str) -> str | None:
@@ -1351,35 +1711,42 @@ def _static_figures(model: dict, figures_dir: Path, tool_versions: dict | None =
     return {"key": key, "reused": valid, "verified_files": len(filenames)}
 
 
-def render_report(report_model: dict, out_dir: Path, formats=("html", "pdf")) -> dict:
+def render_report(report_model: dict, out_dir: Path, formats=("html", "pdf"), *, paper: str = "letter") -> dict:
     from ..activity import bench_activity
     with bench_activity("report", timeout=0):
-        return _render_report(report_model, out_dir, formats)
+        return _render_report(report_model, out_dir, formats, paper=paper)
 
 
-def _render_report(report_model: dict, out_dir: Path, formats=("html", "pdf")) -> dict:
+def _render_report(report_model: dict, out_dir: Path, formats=("html", "pdf"), *, paper: str = "letter") -> dict:
     """Render requested formats, recording truthful successes and failures.
 
     On any requested-format failure, write build_manifest.json and raise
     ReportRenderError with that manifest. Acquisition may succeed independently.
+    ``paper`` selects the PDF page size (ReportProfile.paper; Letter by default).
     """
     model = copy.deepcopy(validate_report_model(report_model))
     requested = tuple(dict.fromkeys(formats))
     if not requested or any(fmt not in ("html", "pdf") for fmt in requested):
         raise ValueError("Report formats must be html and/or pdf")
+    if paper not in PAPER_SIZES:
+        raise ValueError("Report paper must be letter or a4")
     out = Path(out_dir).resolve()
     out.mkdir(parents=True, exist_ok=True)
     manifest: dict = {"schema_version": "1.0", "run_id": model["run_id"],
         "analysis_id": model["analysis_id"], "report_revision": model.get("report_revision"),
         "created_utc": datetime.now(timezone.utc).isoformat(), "requested_formats": list(requested),
-        "status": "building", "artifacts": {}, "figures": [], "exports": {},
+        "status": "building", "artifacts": {}, "figures": [], "exports": {}, "paper": paper,
         "versions": {name: _version(name) for name in ("plotly", "kaleido", "dcdc-bench")},
         "model_sha256": hashlib.sha256(_json(model).encode()).hexdigest(),
         "template_sha256": _sha(TEMPLATES / "characterization.qmd"),
         "render_sources_sha256": {
             "renderer.py": _sha(Path(__file__).resolve()),
             "report.css": _sha(TEMPLATES / "theme/report.css"),
+            "print-theme.typ": _sha(TEMPLATES / "theme/print-theme.typ"),
+            "print-tables.typ": _sha(TEMPLATES / "theme/print-tables.typ"),
+            "typst-show.typ": _sha(TEMPLATES / "theme/typst-show.typ"),
             "report.js": _sha(TEMPLATES / "web/report.js"),
+            "report-head.js": _sha(TEMPLATES / "web/report-head.js"),
         }}
     gate_record = out / "memory_gate.json"
     if gate_record.is_file():
@@ -1431,7 +1798,10 @@ def _render_report(report_model: dict, out_dir: Path, formats=("html", "pdf")) -
                 "pdf_sha256": _sha(figures_dir / f"{spec['id']}.pdf")})
         (out / "report_model.json").write_text(_json(model), encoding="utf-8")
         shutil.copyfile(TEMPLATES / "theme/report.css", out / "report.css")
-        (out / "metadata.html").write_text('<meta name="robots" content="noindex,nofollow">', encoding="utf-8")
+        head_script = (TEMPLATES / "web/report-head.js").read_text(encoding="utf-8")
+        (out / "metadata.html").write_text(
+            '<meta name="robots" content="noindex,nofollow">\n'
+            '<script id="dcdc-report-head">' + head_script + '</script>\n', encoding="utf-8")
         script = (TEMPLATES / "web/report.js").read_text(encoding="utf-8")
         payload = {"model": model, "colors": COLORS, "condition_colors": _condition_colors(model),
                    "condition_styles": _condition_styles(model),
@@ -1446,18 +1816,16 @@ def _render_report(report_model: dict, out_dir: Path, formats=("html", "pdf")) -
             + '<script type="application/json" id="dcdc-report-data">' + _embedded_json(payload) + '</script>\n' \
             + '<script>' + script + '</script>'
         (out / "interactions.html").write_text(runtime_slot + '\n', encoding="utf-8")
-        identity = f"{model.get('evidence_label','')} · {_identity(model)} · {model['run_id']}"
-        # JSON string syntax is also a valid Typst quoted string; user text is never raw code.
-        print_header = ('#set page(numbering: "1 / 1", header: text(size: 7pt, fill: rgb("516677"), '
-            + json.dumps(identity, ensure_ascii=False) + '))\n'
-            '#set text(font: ("DejaVu Sans", "Liberation Sans"), fill: rgb("183047"))\n'
-            '#show heading: it => { block(above: 1.2em, below: 0.5em, it) }\n'
-            '#set par(justify: false)\n')
-        (out / "print-header.typ").write_text(print_header, encoding="utf-8")
+        identity = _report_identity(model)
+        (out / "print-header.typ").write_text(_print_header(identity, paper), encoding="utf-8")
+        # The partial replaces Quarto's `#show: doc => article(...)`; see print-theme.typ.
+        shutil.copyfile(TEMPLATES / "theme/typst-show.typ", out / "typst-show.typ")
         source = (TEMPLATES / "characterization.qmd").read_text(encoding="utf-8")
         source = source.replace("__TITLE__", json.dumps(_md(model.get("title", f"{_identity(model)} characterization"))))
-        source = source.replace("__SUBTITLE__", json.dumps(_md(identity + " · " + model["analysis_id"])))
-        source = source.replace("__BODY__", with_sensor_placement(_body(model), out, _md))
+        source = source.replace("__SUBTITLE__", json.dumps(_md(identity["subtitle"])))
+        source = source.replace("__PAPER__", PAPER_SIZES[paper])
+        body = _body(model, sensor_placement_present=load_annotations(out) is not None)
+        source = source.replace("__BODY__", with_sensor_placement(body, out, _md))
         (out / "report.qmd").write_text(source, encoding="utf-8")
         for fmt in requested:
             print(f"Building {fmt.upper()} document…", file=sys.stderr, flush=True)

@@ -65,7 +65,9 @@ Bench-level fields:
 Schema rules that reject inconsistent entries: an `unknown` specification
 cannot carry numbers; a quoted or calibrated one must cite a source; a
 synthetic one must say "synthetic" in its source; `percent_of_range` needs
-`range_value`; the unit must match the bound channel.
+`range_value`; the unit must match the bound channel. Correlation pairs must
+be unique and the complete correlation matrix must be positive semidefinite;
+coefficients individually inside [-1, 1] are not sufficient.
 
 ## Formulas
 
@@ -84,11 +86,14 @@ u_c(x̄)  = sqrt(u_B² + u_A²)                # u_A included only per policy
 ```
 
 Derived quantities use the declared model with first-order sensitivity
-coefficients `c_i` and the declared covariance `u(x_i, x_j) = r_ij u_i u_j`
+coefficients `c_i` and the declared systematic covariance
+`u(x_i, x_j) = r_ij u_Bi u_Bj` for different channels
 [R11]:
 
 ```text
 u_c² = Σ_i Σ_j c_i c_j u(x_i, x_j)
+u(x_i, x_i) = u_c(x̄_i)²       # total channel variance on the diagonal
+u(x_i, x_j) = r_ij*u_Bi*u_Bj   # systematic covariance; i != j
 
 Pin  = Vin*Iin                  c = {Vin: Iin, Iin: Vin}
 Pout = Vout*Iout                c = {Vout: Iout, Iout: Vout}
@@ -97,6 +102,10 @@ eta  = 100*Vout*Iout/(Vin*Iin)  c = {Vout: 100*Iout/Pin, Iout: 100*Vout/Pin,
 loss = Vin*Iin - Vout*Iout      c = {Vin: Iin, Iin: Vin, Vout: -Iout, Iout: -Vout}  # watts
 U    = k * u_c
 ```
+
+Repeatability remains independent between channels in this model. A shared
+systematic error cannot cancel its contribution. A materially negative
+propagated variance is rejected rather than reported as zero.
 
 Independence (`r_ij = 0`) is recorded as an assumption whenever no
 correlation is declared. `difference_uncertainty(a, b, correlation=r)` gives
@@ -111,7 +120,7 @@ evaluator. That fixture is a calculation check, not the first DUT's budget.
 
 ```text
 schema_version        "uncertainty-budget-1.0"
-method_version        "readback-budget-1.0"
+method_version        "readback-budget-1.1"
 status                evaluated | partially_evaluated | not_evaluated
 metrology             quantified uncertainty | specification-bound only[ (…)] | unquantified
 coverage_factor, coverage_factor_note, policy

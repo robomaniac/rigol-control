@@ -152,6 +152,13 @@ mismatched run ID/revision, or an allowlisted attachment ID that is not in
 the run are refusals. The copy is written to `<out>/<run_id>/<revision>/`,
 never inside the run folder, and never over an existing copy.
 
+Before creating that destination, publication verifies the finalized acquisition
+manifest and every recorded hash of the issued HTML/PDF, model, exports, figures
+and stylesheet. Artifact locations are resolved within the selected revision,
+so an archived run can move to another computer. Changed bytes require a new
+report revision; `allow_unverified` never bypasses a recorded-hash mismatch.
+The publication manifest records which source files were verified.
+
 ### What redaction does
 
 From `reports/<revision>/` it copies, as text with redaction: `report.html`,

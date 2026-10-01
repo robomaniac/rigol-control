@@ -63,7 +63,7 @@ Your computer also needs an SSH tunnel to that port:
    - `/Runs/12t12-extended/report.pdf`
    - `/Runs/12t12-source-limit/report.html` — the newer test near the supply limit
    - `/Runs/12t12-source-limit/report.pdf`
-   - `/Runs/dcdc-mock-demo/index.html` — the three synthetic DC–DC examples
+   - `/Runs/dcdc-mock-demo/index.html` — the four synthetic DC–DC examples (three load sweeps and the ISO 16750-2 §4.3.1.2 best-effort jump start with its deviation sheet)
 
 For example, if Forwarded Address is `localhost:8083`, the interactive report
 is at `http://localhost:8083/Runs/12t12-first-test/report.html`. VS Code may

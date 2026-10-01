@@ -24,6 +24,64 @@ def _run_node(harness: str, payload: dict) -> dict:
     return json.loads(result.stdout)
 
 
+def test_report_head_keeps_accessible_native_storage_unchanged():
+    result = _run_node(r"""
+const {script} = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+const native = {length: 1, getItem: () => 'saved preference'};
+global.window = {};
+const getter = () => native;
+Object.defineProperty(window, 'localStorage', {configurable:true, get:getter});
+eval(script);
+process.stdout.write(JSON.stringify({same: window.localStorage === native,
+    getterUnchanged: Object.getOwnPropertyDescriptor(window, 'localStorage').get === getter}));
+""", {"script": (TEMPLATES / "web/report-head.js").read_text()})
+    assert result == {"same": True, "getterUnchanged": True}
+
+
+def test_report_head_fallback_storage_semantics_and_document_lifetime():
+    result = _run_node(r"""
+const {script} = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+const blockedDocument = () => {
+    global.window = {};
+    Object.defineProperty(window, 'localStorage', {configurable:true, get() {
+        const error = new Error('opaque sandbox origin'); error.name = 'SecurityError'; throw error;
+    }});
+    eval(script);
+    return window.localStorage;
+};
+const storage = blockedDocument(), observed = {};
+observed.empty = [storage.length, storage.getItem('missing'), storage.key(0)];
+observed.undefinedReturns = [storage.setItem(12, 34), storage.setItem(null, undefined),
+    storage.setItem('__proto__', 'safe')].every(value => value === undefined);
+observed.strings = [storage.getItem('12'), storage.getItem(null), storage.getItem('__proto__')];
+observed.keys = [storage.length, storage.key(0), storage.key('1'), storage.key(2.9),
+    storage.key(3), storage.key(-1)];
+storage.setItem(12, 'updated');
+observed.replace = [storage.length, storage.key(0), storage.getItem(12)];
+observed.removeUndefined = storage.removeItem(null) === undefined;
+storage.removeItem('missing');
+observed.removed = [storage.length, storage.getItem(null), storage.key(1)];
+observed.invalid = [() => storage.key(), () => storage.getItem(), () => storage.setItem('key'),
+    () => storage.removeItem(), () => storage.getItem(Symbol()), () => storage.setItem('key', Symbol())]
+    .every(action => { try { action(); return false; } catch (error) { return error instanceof TypeError; } });
+eval(script);
+observed.reentryRetains = window.localStorage === storage && storage.getItem(12) === 'updated';
+observed.reloadEmpty = blockedDocument().length === 0;
+observed.clearUndefined = storage.clear() === undefined;
+observed.cleared = [storage.length, storage.getItem('__proto__'), storage.key(0)];
+process.stdout.write(JSON.stringify(observed));
+""", {"script": (TEMPLATES / "web/report-head.js").read_text()})
+    assert result == {
+        "empty": [0, None, None], "undefinedReturns": True,
+        "strings": ["34", "undefined", "safe"],
+        "keys": [3, "12", "null", "__proto__", None, None],
+        "replace": [3, "12", "updated"], "removeUndefined": True,
+        "removed": [2, None, "__proto__"], "invalid": True,
+        "reentryRetains": True, "reloadEmpty": True, "clearUndefined": True,
+        "cleared": [0, None, None],
+    }
+
+
 # Slices of the shipped script, taken between stable function boundaries, run
 # against a minimal document/Plotly stand-in. A moved boundary fails loudly.
 SLICE_SUPPORT = r"""
@@ -223,10 +281,12 @@ def test_issued_csv_export_matches_interactive_export_byte_for_byte(tmp_path):
                               vout_error_pct=1e-05, Pin_W=None)
     model["points"][1].update(reason='=HYPERLINK("x") load-off offset', loss_W=2.5e-7, Vin_V=123456789012.5)
     model["points"][2].update(reason="-0.4 mA offset noted", Pout_W=1.2045445821896251)
-    model["points"][3].update(phase_label="Increasing demand", elapsed_start_s=0., elapsed_s=4.5175, elapsed_end_s=9.035)
+    model["points"][3].update(phase_label="Increasing demand", elapsed_start_s=0., elapsed_s=4.5175, elapsed_end_s=9.035,
+                              qualification="inconclusive", quality_flags=["implausible_power_ratio", "unexpected_sign"])
+    model["points"][2]["quality_flags"] = []
     model["figures"].append({**model["figures"][0], "id": "fig-demand-time", "x_key": "elapsed_s"})
     renderer.write_exports(model, tmp_path)
-    issued = (tmp_path / "exports/points.csv").read_text(encoding="utf-8", newline="")
+    issued = (tmp_path / "exports/points.csv").open(encoding="utf-8", newline="").read()
     harness = r"""
 const {script, model} = JSON.parse(require('fs').readFileSync(0, 'utf8'));
 """ + SLICE_SUPPORT + r"""
@@ -254,3 +314,150 @@ process.stdout.write(JSON.stringify(execute(model)));
     assert rows[1]["reason"].startswith("'=") and rows[2]["reason"] == "'-0.4 mA offset noted"
     assert rows[0]["input_condition_label"] == '24 V input, "set"'
     assert rows[0]["Pin_W"] == "" and rows[3]["elapsed_s"] == "4.5175" and rows[0]["elapsed_s"] == ""
+    # Flag lists: absent, empty and multi-valued all serialize identically in both exports.
+    assert [row["quality_flags"] for row in rows] == ["", "", "", "implausible_power_ratio;unexpected_sign"]
+
+
+def _efficiency_fixture(points: list[dict]) -> dict:
+    return {"run_id": "run", "analysis_id": "analysis", "report_revision": "r0001", "evidence_label": "MEASURED",
+            "boundary": "source-to-load path", "dut": {"model": "PASS-THROUGH"}, "points": points,
+            "figures": [{"id": "fig-efficiency", "title": "Efficiency", "x_key": "Iout_A", "y_key": "efficiency_pct",
+                         "x_label": "Output Current (A)", "y_label": "Efficiency (%)", "caption": "fixture",
+                         "series": [{"id": "load-v0", "label": "12 V input", "vin_target_V": 12.,
+                                     "point_ids": [point["point_id"] for point in points]}]}],
+            "metrics": [], "raw_samples": {}, "summary": []}
+
+
+FLAGGED_DRAW_HARNESS = r"""
+const {script, model} = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+""" + SLICE_SUPPORT + r"""
+const shipped = [
+  slice('  const quantityLabels', '  const hoverLabels'),
+  slice('  const hoverLabels', '  function stageTransitions'),
+  slice('  function stageTransitions', '  function syncControls'),
+  slice('  function draw()', '  function setView'),
+  slice('  function bounds(spec)', '  function download'),
+].join('\n');
+const execute = new Function('model', "'use strict';\n" + helpers + `
+  const payload = {model, colors: ['#0072B2'], figure_references: {}};
+  const specs = model.figures;
+  const points = new Map(model.points.map(p => [p.point_id, p]));
+  const graphs = new Map(), conditions = new Map(), identity = 'DUT';
+  specs.forEach(spec => spec.series.forEach(series => { const key = keyOf(series);
+    if (!conditions.has(key)) conditions.set(key, {label: series.label, color: '#0072B2', dash: 'solid', symbol: 'circle'}); }));
+  let state = {selected_series: [...conditions.keys()], metric: 'all', x_key: 'default', log_current: false,
+    hovermode: 'closest', ranges: {}};
+  let updating = false, pending = Promise.resolve();
+  const elements = new Map();
+  const document = {
+    getElementById: id => { if (!elements.has(id)) elements.set(id, {id, textContent: '', style: {}, hidden: false,
+      children: [], append(...items) { this.children.push(...items); }}); return elements.get(id); },
+    createElement: () => ({})};
+  const drawn = new Map();
+  const Plotly = {react: async (graph, traces, layout) => { drawn.set(graph.id, {traces, layout}); }, Plots: {resize() {}}};
+  function syncControls() {}
+  for (const spec of specs) graphs.set(spec.id, {id: 'plot-' + spec.id, style: {}});
+` + shipped + `
+  const figure = specs[0].id;
+  return (async () => {
+    await draw();
+    const traces = drawn.get('plot-' + figure).traces.filter(t => !t.meta?.isTransition).map(t => ({
+      x: t.x, y: t.y, mode: t.mode, symbol: t.marker?.symbol, line: t.marker?.line ?? null, showlegend: t.showlegend ?? null,
+      name: t.name, flagged: t.meta?.isFlagged ?? false, hover: t.text}));
+    return {traces, status: document.getElementById('status-' + figure).textContent,
+      axis_range: drawn.get('plot-' + figure).layout.xaxis.range ?? null,
+      selected: getSelectedPoints('selected', figure).map(p => p.point_id),
+      visible: getSelectedPoints('visible', figure).map(p => p.point_id),
+      csv: exportCSV('selected', figure).csv, visible_export: exportCSV('visible', figure)};
+  })();
+`);
+execute(model).then(result => process.stdout.write(JSON.stringify(result)));
+"""
+
+
+def test_flagged_implausible_points_are_drawn_open_excluded_from_qualified_results_and_announced():
+    """Brief 9.1 / 12.4: an efficiency above 100 % is drawn as flagged, never clamped or silently dropped."""
+    script = (TEMPLATES / "web/report.js").read_text()
+    common = {"test_id": "load", "vin_target_V": 12., "Vin_V": 12.01, "Vout_V": 11.99}
+    reason = ("Implausible power ratio: computed efficiency 112.3 % exceeds 100 % (output power 1.191 W > input power "
+              "1.061 W); readings preserved, point not qualified. Input and output current readbacks differ by +11.0 mA.")
+    points = [
+        {**common, "point_id": "p1", "iout_target_A": .1, "Iout_A": .0994, "Iin_A": .12, "efficiency_pct": 82.7,
+         "qualification": "valid", "quality_flags": []},
+        {**common, "point_id": "p2", "iout_target_A": .25, "Iout_A": .2493, "Iin_A": .2381, "efficiency_pct": 112.3,
+         "qualification": "inconclusive", "quality_flags": ["implausible_power_ratio"], "reason": reason},
+        {**common, "point_id": "p3", "iout_target_A": .5, "Iout_A": .4995, "Iin_A": .58, "efficiency_pct": 86.,
+         "qualification": "valid", "quality_flags": []},
+    ]
+    observed = _run_node(FLAGGED_DRAW_HARNESS, {"script": script, "model": _efficiency_fixture(points)})
+    qualified, flagged = observed["traces"]
+    # The qualified curve leaves a gap at the flagged point: no segment joins it (12.4 item 8).
+    assert qualified["y"] == [82.7, None, 86.] and qualified["x"] == [.0994, None, .4995]
+    assert qualified["mode"] == "lines+markers" and qualified["symbol"] == "circle" and not qualified["flagged"]
+    assert flagged["y"] == [None, 112.3, None] and flagged["x"] == [None, .2493, None]
+    assert flagged["mode"] == "markers" and flagged["symbol"] == "circle-open" and flagged["line"]["width"] == 2
+    assert flagged["showlegend"] is False and flagged["name"] == "12 V input · flagged, not qualified"
+    assert flagged["flagged"] is True
+    assert flagged["hover"][1].endswith("<br>Path efficiency: <b>112.30%</b><br>Not qualified: implausible power ratio")
+    assert "Not qualified" not in flagged["hover"][0] and "Not qualified" not in qualified["hover"][2]
+    assert observed["status"] == ("3 point result(s) in selected test curves. 1 point(s) flagged implausible are drawn "
+                                  "with open markers and excluded from qualified results. Raw observations remain unchanged.")
+    assert observed["axis_range"] is None, "three drawn currents keep ordinary autoscaling"
+    # Exports: the selected-curves CSV keeps the flagged reading, marked by its columns;
+    # the visible-range (qualified) selection never contains it.
+    assert observed["selected"] == ["p1", "p2", "p3"] and observed["visible"] == ["p1", "p3"]
+    rows = list(csv.DictReader(io.StringIO(observed["csv"])))
+    assert [(row["point_id"], row["qualification"], row["quality_flags"]) for row in rows] == [
+        ("p1", "valid", ""), ("p2", "inconclusive", "implausible_power_ratio"), ("p3", "valid", "")]
+    assert rows[1]["efficiency_pct"] == "112.3" and rows[1]["reason"] == reason
+    assert observed["visible_export"]["metadata"]["point_count"] == 2
+    assert "flagged (not qualified) points excluded" in observed["visible_export"]["metadata"]["scope_description"]
+
+
+def test_figure_with_only_flagged_points_shows_them_with_a_legend_entry_and_says_nothing_is_qualified():
+    script = (TEMPLATES / "web/report.js").read_text()
+    common = {"test_id": "load", "vin_target_V": 12., "qualification": "inconclusive",
+              "quality_flags": ["implausible_power_ratio"]}
+    points = [{**common, "point_id": pid, "iout_target_A": target, "Iout_A": iout, "efficiency_pct": eta}
+              for pid, target, iout, eta in (("p2", .1, .0994, 112.3), ("p3", .25, .2493, 104.4), ("p4", .5, .4995, 101.9))]
+    observed = _run_node(FLAGGED_DRAW_HARNESS, {"script": script, "model": _efficiency_fixture(points)})
+    (flagged,) = observed["traces"]
+    assert flagged["y"] == [112.3, 104.4, 101.9] and flagged["symbol"] == "circle-open"
+    assert flagged["showlegend"] is True, "the only drawn trace carries the legend entry so the series stays toggleable"
+    assert observed["status"] == ("3 point result(s) in selected test curves. 3 point(s) flagged implausible are drawn "
+                                  "with open markers and excluded from qualified results. No qualified point is plotted "
+                                  "on this figure; only flagged points are shown. Raw observations remain unchanged.")
+    assert observed["visible"] == [] and observed["visible_export"]["metadata"]["point_count"] == 0
+    assert observed["selected"] == ["p2", "p3", "p4"]
+
+
+def test_figure_with_no_plottable_points_says_so_instead_of_staying_silent():
+    script = (TEMPLATES / "web/report.js").read_text()
+    points = [{"point_id": pid, "test_id": "load", "vin_target_V": 12., "iout_target_A": target, "Iout_A": target,
+               "efficiency_pct": None, "qualification": "inconclusive", "quality_flags": []}
+              for pid, target in (("p2", .1), ("p3", .25))]
+    observed = _run_node(FLAGGED_DRAW_HARNESS, {"script": script, "model": _efficiency_fixture(points)})
+    assert observed["traces"] == []
+    assert observed["status"] == ("2 point result(s) in selected test curves. No qualified point is plotted on this "
+                                  "figure. Raw observations remain unchanged.")
+
+
+@pytest.mark.parametrize("evidence_label, kind", [("SYNTHETIC", "Simulated"), ("MEASURED", "Measured")])
+def test_axis_title_follows_the_evidence_label(evidence_label, kind):
+    """Codex review item 4: the horizontal-axis title for a chosen quantity says Simulated or Measured as the
+    evidence label does; the time axis and the figure default are unchanged."""
+    script = (TEMPLATES / "web/report.js").read_text()
+    harness = r"""
+const {script, model} = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+""" + SLICE_SUPPORT + r"""
+const shipped = slice('  const quantityLabels', '  const hoverLabels');
+const execute = new Function('model', "'use strict';\n" + helpers + `
+  const state = {x_key: 'default', log_current: false};
+  const points = new Map();
+` + shipped + `
+  return ['Iout_A', 'Pout_W', 'Vin_V', 'elapsed_s', 'default'].map(key => quantityLabel(key) ?? null);`);
+process.stdout.write(JSON.stringify(execute(model)));
+"""
+    observed = _run_node(harness, {"script": script, "model": {"evidence_label": evidence_label}})
+    assert observed == [kind + " output current (A)", kind + " output power (W)", kind + " input voltage (V)",
+                        "Time since first accepted query (s)", None]

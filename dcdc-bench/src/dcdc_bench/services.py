@@ -12,7 +12,7 @@ from pathlib import Path
 
 from .analysis import analyze_run, build_report_model
 from .annotations import annotations_file
-from .domain import UVLO_TEST_TYPE, BenchProfile, DutProfile, Plan, ReportProfile, TestRecipe
+from .domain import SUPPLY_PROFILE_TEST_TYPES, UVLO_TEST_TYPE, BenchProfile, DutProfile, Plan, ReportProfile, TestRecipe
 from .planning import build_plan, load_profile
 from .storage import atomic_json, verify_integrity
 
@@ -30,6 +30,35 @@ def default_plan() -> Plan:
         raise ValueError("Profiles not found. Use a source checkout or supply --dut, --bench and --recipe.")
     return load_plan_inputs(profiles / "dut/12t12-4a.yaml", profiles / "bench/mock.yaml",
                             profiles / "recipes/12t12-4a-quick.yaml")
+
+
+BEST_EFFORT_DEMO_POLICY_ID = "demo-synthetic-guards-v1"
+
+
+def best_effort_demo_plan() -> Plan:
+    """The simulated ISO 16750-2 clause 4.3.1.2 jump start of the demonstration set.
+
+    The catalog's generated recipe (10.8 V base, 26 V held 60 s, 120 s rest) is
+    approved here for the demonstration only: software, synthetic plant,
+    synthetic guard values on a copy of the saved mock bench. On a bench the
+    approval and the guard values are the owner's, written into the saved
+    recipe and bench profile; nothing here touches those files.
+    """
+    from .planning import recipe_deviations_sha256
+    from .standard_recipes import build_recipe
+    base = default_plan()
+    dut, bench = base.dut.model_copy(deep=True), base.bench.model_copy(deep=True)
+    controls = bench.protective_controls
+    controls.policy_id = BEST_EFFORT_DEMO_POLICY_ID
+    controls.source_current_limit_A = 0.5
+    controls.dut_input_overvoltage_V = 28.0
+    controls.dut_output_overvoltage_V = 13.2
+    controls.output_overcurrent_A = 0.15
+    recipe = TestRecipe.model_validate(build_recipe("4.3.1.2", "12V", dut, bench))
+    recipe.authorization.best_effort_approved = True
+    recipe.authorization.accepted_deviations_sha256 = recipe_deviations_sha256(recipe)
+    recipe.authorization.protective_policy_id = controls.policy_id
+    return build_plan(dut, bench, recipe)
 
 
 def _validate_analysis_identity(run_dir: Path, plan: Plan, run: dict,
@@ -143,7 +172,7 @@ def report_run(run_dir: Path, *, formats: tuple[str, ...] | None = None,
     # The renderer copies this verdict into build_manifest.json.
     atomic_json(directory / "memory_gate.json", {"ok": gate_ok, "reason": gate_reason,
                                                  "thresholds": gate.thresholds(), "snapshot": gate_snapshot})
-    render_report(model.model_dump(), directory, formats=formats)
+    render_report(model.model_dump(), directory, formats=formats, paper=profile.paper)
     return directory
 
 
@@ -166,6 +195,28 @@ def acquire_mock(plan: Plan, out: Path, *, scenario: str = "normal", operator_ob
     if UVLO_TEST_TYPE in types:
         raise ValueError("A recipe that mixes uvlo_input_ramp with other test types cannot be executed; "
                          "plan the ramp as its own recipe")
+    if len(types) == 1 and types <= set(SUPPLY_PROFILE_TEST_TYPES):
+        # ISO 16750-2 slow ramp / reset staircase: the phase-scoped supply-profile procedure (synthetic plant only).
+        if scenario != "normal":
+            raise ValueError("The supply-profile procedures have no failure-injection scenarios; use scenario 'normal'")
+        from .supply_profiles import run_supply_profile_mock
+        return run_supply_profile_mock(plan, out, operator_observations=operator_observations,
+                                       attachment_descriptors=attachment_descriptors)
+    if types & set(SUPPLY_PROFILE_TEST_TYPES):
+        raise ValueError("A recipe that mixes a supply profile (slow_supply_ramp, reset_staircase) with other test types "
+                         "cannot be executed; plan each profile as its own recipe")
+    if types - {"steady_state_load_sweep"}:
+        # Best-effort ISO 16750-2 procedures (transient_hold, momentary_drop, micro_interruption, line_interruption):
+        # phase-scoped, synthetic plant only. Imported here, like the other procedures, only when a plan needs it.
+        from .best_effort_procedures import BEST_EFFORT_TEST_TYPES, run_best_effort_mock
+        if len(types) == 1 and types <= set(BEST_EFFORT_TEST_TYPES):
+            if scenario != "normal":
+                raise ValueError("The best-effort ISO 16750-2 procedures have no failure-injection scenarios; use scenario 'normal'")
+            return run_best_effort_mock(plan, out, operator_observations=operator_observations,
+                                        attachment_descriptors=attachment_descriptors)
+        if types & set(BEST_EFFORT_TEST_TYPES):
+            raise ValueError("A recipe that mixes a best-effort ISO 16750-2 procedure with other test types cannot be executed; "
+                             "plan each clause as its own recipe")
     from .runner import run_mock
     return run_mock(plan, out, scenario=scenario, operator_observations=operator_observations,
                     attachment_descriptors=attachment_descriptors)
@@ -183,17 +234,19 @@ def demo(out: Path, *, formats: tuple[str, ...] = ("html", "pdf"),
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     plan = default_plan()
-    results = []
-    for scenario in ("normal", "setup-limited", "aborted"):
-        progress(f"Mock {scenario}: acquiring and rendering…", flush=True)
-        results.append(execute(plan, out / scenario, scenario=scenario, formats=formats))
-        progress(f"Saved {results[-1]}", flush=True)
-    links = []
-    for run in results:
+    demonstrations = [("normal", plan, "normal", "Normal test"),
+                      ("setup-limited", plan, "setup-limited", "Supply reaches its current limit"),
+                      ("aborted", plan, "aborted", "Test stopped early"),
+                      ("best-effort", best_effort_demo_plan(), "normal",
+                       "ISO 16750-2 §4.3.1.2 jump start — best effort (deviations recorded)")]
+    results, links = [], []
+    for folder, demo_plan, scenario, label in demonstrations:
+        progress(f"Mock {folder}: acquiring and rendering…", flush=True)
+        run = execute(demo_plan, out / folder, scenario=scenario, formats=formats)
+        progress(f"Saved {run}", flush=True)
+        results.append(run)
         report = sorted((run / "reports").glob("r*"))[-1]
         relative = report.relative_to(out).as_posix()
-        label = {"normal": "Normal test", "setup-limited": "Supply reaches its current limit",
-                 "aborted": "Test stopped early"}[run.parent.name]
         links.append(f'<li><h2>{html.escape(label)}</h2><a href="{relative}/report.html">Interactive report</a>'
                      + (f' · <a href="{relative}/report.pdf">Canonical PDF</a>' if "pdf" in formats else "") + "</li>")
     (out / "index.html").write_text('<!doctype html><html lang="en"><meta charset="utf-8">'
@@ -201,9 +254,12 @@ def demo(out: Path, *, formats: tuple[str, ...] = ("html", "pdf"),
         '<title>DC–DC mock demonstrations</title><style>body{font:18px system-ui;max-width:850px;margin:4rem auto;padding:1rem;'
         'color:#172e42;background:#f5f8fb}a{color:#075aa0}li{margin:2rem 0}h1{line-height:1.2}</style>'
         '<h1>DC–DC converter characterization</h1><p><strong>SYNTHETIC — software demonstration only.</strong></p>'
-        '<p>Each run requests 12, 24 and 30 V input, with output loads from zero to 1 A. '
+        '<p>The first three runs request 12, 24 and 30 V input, with output loads from zero to 1 A. '
         'Explore the simulated voltage, efficiency and power loss, inspect individual readings, and export the selected data.</p>'
         '<p>The limited example injects source current limiting; the aborted example stops early and preserves its partial evidence.</p>'
+        '<p>The fourth run is the ISO 16750-2 §4.3.1.2 jump start as this bench can command it (10.8 V, then 26 V held 60 s, then '
+        '10.8 V): its deviation sheet records what the clause asks against what the simulated supply did, timing by the host clock, '
+        'edges not measured. Its approval is part of the demonstration; on a bench that approval is the owner\'s.</p>'
         '<ul>' + "".join(links) + '</ul><p>No real equipment was connected. These are not measurements of your converter.</p></html>',
         encoding="utf-8")
     return results

@@ -1,4 +1,5 @@
 """Durable local job orchestration; no hardware or document renderer is run."""
+from datetime import datetime
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -6,7 +7,7 @@ import uuid
 
 import pytest
 
-from dcdc_bench.job_service import JobService, worker, _latest_cycle
+from dcdc_bench.job_service import JobService, worker, _latest_cycle, _read
 from dcdc_bench.storage import atomic_json, RunStore
 
 
@@ -372,3 +373,289 @@ def test_failed_pdf_validation_still_fails_the_job_but_keeps_the_pdf_reachable(s
     rows = report_link_rows(snapshot)
     assert [relative for _, relative in rows] == ["report/report.html", "report/report.pdf"]
     assert "failed the layout check" in rows[1][0]
+
+
+def test_operator_stop_during_acquisition_survives_into_the_cancelled_record(service, monkeypatch):
+    """Job 20260929T213318Z_6290205b ended 'cancelled' with error None and nothing saying when or why:
+    run_mock swallows the SIGINT that cancel() sends, so the worker's 'Operator cancelled' message never
+    lands for a mock job, and dispatch_reports deletes cancel.request before the report worker runs.
+    The stop request time must reach job.json in the acquisition worker and survive both later workers."""
+    from dcdc_bench.resources import MemoryGate
+    p = mock_preview(service)
+    monkeypatch.setattr("dcdc_bench.job_service.subprocess.Popen", lambda *a, **k: SimpleNamespace(pid=None))
+    job_id = service.start(p["plan_hash"])["job_id"]
+    job = service._job(job_id)
+
+    def acquire_then_stop(plan, out, **kwargs):
+        # The worker has published its pid and 'acquiring' by now; the operator presses Stop.
+        assert service.status(job_id)["state"] == "acquiring"
+        assert service.cancel(job_id)["cancel_requested"] is True
+        return finalized_fixture(job, p["plan"])  # verified OFF, as an interrupted mock run still ends
+
+    monkeypatch.setattr("dcdc_bench.services.acquire_mock", acquire_then_stop)
+    worker(job)
+    queued = service.status(job_id)
+    assert queued["state"] == "report-queued" and queued["acquisition_cancelled"] is True and queued["error"] is None
+    stamp = queued["acquisition_cancelled_utc"]
+    assert stamp == (job / "cancel.request").read_text().strip()
+    assert datetime.fromisoformat(stamp) >= datetime.fromisoformat(queued["created_utc"])
+    service.gate = MemoryGate(0, 0)
+    assert service.dispatch_reports() == {"job_id": job_id, "state": "queued"}
+    assert not (job / "cancel.request").exists(), "the dispatcher clears the marker; the time must already be in job.json"
+    monkeypatch.setattr("dcdc_bench.job_service._render_process", fake_render("success", "success"))
+    worker(job, report_only=True)
+    final = service.status(job_id)
+    assert final["state"] == "cancelled" and final["error"] is None
+    assert final["acquisition_cancelled_utc"] == stamp
+
+
+# --- One-page bench: plain names, card planning, delete/rename ------------------------------------------
+
+def test_seeded_profiles_carry_plain_names_and_saved_ones_are_migrated_once(tmp_path, monkeypatch):
+    """The owner's benches and recipes predate titles; _seed fills the known ones in, idempotently, and
+    never invents a bench name (the page falls back to the identifier) or overwrites a saved title."""
+    from dcdc_bench.job_service import DEFAULT_CATEGORY, PLAIN_TITLES
+    monkeypatch.setenv("DCDC_ACTIVITY_LOCK", str(tmp_path / "activity.lock"))
+    root = tmp_path / "workspace"
+    first = JobService(root)
+    quick, bench = first.load_profile("recipe", "12t12-4a-quick"), first.load_profile("bench", "rigol-local-limited")
+    assert quick["title"] == "Quick sweep — 12 / 24 / 30 V × 0–1 A" and quick["category"] == DEFAULT_CATEGORY
+    assert bench["title"] == "24 V converter tests" and first.load_profile("bench", "mock-dp821-envelope")["title"] == "Simulated DP821A envelope"
+    assert first.load_profile("recipe", "real-24v-small-grid")["title"] == PLAIN_TITLES["recipe"]["real-24v-small-grid"]
+    # Profiles written before titles existed: the owner's no-load recipe, pass-through check and wide-input bench.
+    legacy_recipe = {k: v for k, v in first.load_profile("recipe", "real-24v-small-grid").items() if k not in ("title", "category", "description", "standard_clause")}
+    legacy_recipe.update(recipe_id="real-24v-noload-then-0p1A", execution_mode="real")
+    legacy_recipe["tests"][0]["output_current_targets_A"] = [0., .1]
+    passthrough = {**legacy_recipe, "recipe_id": "passthrough-12v-check"}
+    unknown = {**legacy_recipe, "recipe_id": "my-own-grid"}
+    legacy_bench = {k: v for k, v in bench.items() if k != "title"}
+    legacy_bench["bench_id"] = "rigol-local-wide-input"
+    unknown_bench = {**legacy_bench, "bench_id": "somebody-elses-bench"}
+    for kind, data in (("recipe", legacy_recipe), ("recipe", passthrough), ("recipe", unknown), ("bench", legacy_bench), ("bench", unknown_bench)):
+        atomic_json(root / "profiles" / kind / (data[{"recipe": "recipe_id", "bench": "bench_id"}[kind]] + ".json"), data)
+    titled = first.load_profile("recipe", "12t12-4a-quick")
+    titled["title"] = "My renamed sweep"
+    first.save_profile("recipe", titled)
+    second = JobService(root)
+    assert second.load_profile("recipe", "real-24v-noload-then-0p1A")["title"] == "24 V — no-load window, then 0.1 A"
+    assert second.load_profile("recipe", "real-24v-noload-then-0p1A")["execution_mode"] == "real", "the migration touches names only"
+    wire = second.load_profile("recipe", "passthrough-12v-check")
+    assert wire["title"] == "Pass-through wire check — 12 V × 0 / 0.1 / 0.25 / 0.5 A" and wire["category"] == "Bench checks"
+    own = second.load_profile("recipe", "my-own-grid")
+    assert own["title"] is None and own["category"] == DEFAULT_CATEGORY, "unknown recipes get a category; the page titles them from the grid"
+    assert second.load_profile("bench", "rigol-local-wide-input")["title"] == "Wide input up to 36 V"
+    assert second.load_profile("bench", "somebody-elses-bench")["title"] is None, "a bench name is not derivable"
+    assert second.load_profile("recipe", "12t12-4a-quick")["title"] == "My renamed sweep", "a saved title is never overwritten"
+    before = {kind: {name: (root / "profiles" / kind / (name + ".json")).read_bytes() for name in names}
+              for kind, names in second.list_profiles().items()}
+    JobService(root)
+    after = {kind: {name: (root / "profiles" / kind / (name + ".json")).read_bytes() for name in names}
+             for kind, names in second.list_profiles().items()}
+    assert after == before, "idempotent: a second start rewrites nothing"
+    catalog = second.catalog()
+    assert set(catalog) == {"dut", "bench", "recipe"} and "my-own-grid" in catalog["recipe"] and catalog["dut"]["12t12-4a"]["identity"]["model"] == "12T12-4A"
+
+
+def test_feasibility_plans_a_card_on_each_bench_without_approvals_or_the_inventory(service):
+    from dcdc_bench.real_backend import acquisition_seconds
+    from dcdc_bench.domain import PlannedPoint, TestRecipe
+    dut = service.list_profiles()["dut"][0]
+    simulated = service.feasibility(dut, "mock-dp821-envelope", "12t12-4a-quick")
+    assert simulated == {"points": 21, "executable": 19, "runnable": True, "reason": None, "estimated_seconds": None, "mode": "mock"}
+    real = service.feasibility(dut, "rigol-local-limited", "real-24v-small-grid")
+    assert real["runnable"] and real["executable"] == 3 and real["mode"] == "real", "saved approvals gate Start, not the card"
+    recipe = TestRecipe.model_validate(service.load_profile("recipe", "real-24v-small-grid"))
+    eligible = [PlannedPoint(point_id=f"p{i}", test_id="increasing-load", vin_target_V=24., iout_target_A=a, status="executable", reason="")
+                for i, a in enumerate((.1, .25, .5))]
+    assert real["estimated_seconds"] == acquisition_seconds(recipe, eligible) == 62., "3 x (5 s dwell + 8 s acquisition + 3 s) + 14 s startup"
+    # The card recipe is planned against the selected converter even when its saved dut_profile_id differs.
+    other = service.load_profile("dut", dut)
+    other.update(profile_id="other-board")
+    other["identity"]["model"] = "Other"
+    service.save_profile("dut", other)
+    assert service.feasibility("other-board", "mock-dp821-envelope", "12t12-4a-quick")["runnable"]
+    # Not runnable: the planner's first reason, one clause, no clipping.
+    hundred = service.load_profile("recipe", "12t12-4a-quick")
+    hundred.update(recipe_id="hundred", execution_mode=None)
+    hundred["tests"][0]["input_voltage_targets_V"] = [100.]
+    service.save_profile("recipe", hundred)
+    greyed = service.feasibility(dut, "mock-dp821-envelope", "hundred")
+    assert not greyed["runnable"] and greyed["executable"] == 0 and greyed["estimated_seconds"] is None
+    assert greyed["reason"] == "Requested input voltage is outside the DUT operating rating"
+    slow = service.load_profile("recipe", "real-24v-small-grid")
+    slow.update(recipe_id="slow-poll")
+    slow["acquisition"]["target_poll_interval_s"] = .5
+    service.save_profile("recipe", slow)
+    on_real = service.feasibility(dut, "rigol-local-limited", "slow-poll")
+    assert not on_real["runnable"] and on_real["reason"].startswith("Acquisition requires 5–15 s, 1–2 s polling")
+    assert service.feasibility(dut, "mock-dp821-envelope", "slow-poll")["runnable"], "the same test is fine on the simulated bench"
+
+
+def test_delete_and_rename_profiles_are_atomic_and_refuse_active_jobs(service, monkeypatch):
+    dut = service.list_profiles()["dut"][0]
+    with pytest.raises(ValueError, match="No saved recipe"):
+        service.delete_profile("recipe", "missing")
+    with pytest.raises(ValueError, match="Invalid local identifier"):
+        service.rename_profile("recipe", "12t12-4a-quick", "no spaces allowed")
+    with pytest.raises(ValueError, match="already exists"):
+        service.rename_profile("recipe", "12t12-4a-quick", "real-24v-small-grid")
+    p = service.preview(dut, "mock-dp821-envelope", "12t12-4a-quick")
+    monkeypatch.setattr("dcdc_bench.job_service.subprocess.Popen", lambda *a, **k: SimpleNamespace(pid=None))
+    job_id = service.start(p["plan_hash"])["job_id"]
+    record = json.loads((service._job(job_id) / "job.json").read_text())
+    assert record["recipe_id"] == "12t12-4a-quick" and record["recipe_title"] == "Quick sweep — 12 / 24 / 30 V × 0–1 A"
+    assert record["profiles"] == {"dut": dut, "bench": "mock-dp821-envelope", "recipe": "12t12-4a-quick"}
+    assert service.status(job_id)["state"] == "queued"
+    for kind, name in record["profiles"].items():
+        with pytest.raises(ValueError, match="active job"):
+            service.delete_profile(kind, name)
+        with pytest.raises(ValueError, match="active job"):
+            service.rename_profile(kind, name, "renamed-" + kind)
+    assert service.load_profile("recipe", "12t12-4a-quick")["recipe_id"] == "12t12-4a-quick", "nothing moved"
+    service.cancel(job_id)
+    worker(service._job(job_id))
+    assert service.status(job_id)["state"] == "cancelled"
+    assert service.rename_profile("recipe", "12t12-4a-quick", "quick-sweep") == "quick-sweep"
+    names = service.list_profiles()["recipe"]
+    assert "quick-sweep" in names and "12t12-4a-quick" not in names
+    renamed = service.load_profile("recipe", "quick-sweep")
+    assert renamed["recipe_id"] == "quick-sweep" and renamed["title"] == "Quick sweep — 12 / 24 / 30 V × 0–1 A"
+    # Renaming a converter re-points the saved recipes that reference it.
+    assert service.rename_profile("dut", dut, "board-a") == "board-a"
+    assert service.list_profiles()["dut"] == ["board-a"]
+    assert all(service.load_profile("recipe", name)["dut_profile_id"] == "board-a" for name in service.list_profiles()["recipe"])
+    assert service.delete_profile("recipe", "quick-sweep") == "quick-sweep"
+    assert "quick-sweep" not in service.list_profiles()["recipe"]
+    assert not (service.root / "profiles" / "recipe" / "quick-sweep.json").exists()
+    # The finished job keeps its own plan snapshot and stays listed.
+    assert service.status(job_id)["recipe_id"] == "12t12-4a-quick" and (service._job(job_id) / "plan.json").is_file()
+    with pytest.raises(ValueError, match="renamed or deleted"):
+        service.start(p["plan_hash"]), "a cached preview of a renamed profile is a clear refusal, not a missing-file error"
+
+
+def test_cancel_is_idempotent_and_never_sends_a_second_interrupt(service, monkeypatch):
+    """QA M3: a second cancel() keeps the first stop time and re-signals nothing; only a first call that could not
+    signal (the worker had not published its pid yet) lets a later call signal, once."""
+    import os
+    import signal
+    p = mock_preview(service)
+    monkeypatch.setattr("dcdc_bench.job_service.subprocess.Popen", lambda *a, **k: SimpleNamespace(pid=None))
+    job_id = service.start(p["plan_hash"])["job_id"]
+    job = service._job(job_id)
+    signals = []
+    monkeypatch.setattr("dcdc_bench.job_service._pid_matches", lambda pid, job_dir: pid == 4242)
+    monkeypatch.setattr(os, "pidfd_open", lambda pid: os.open("/dev/null", os.O_RDONLY))
+    monkeypatch.setattr(signal, "pidfd_send_signal", lambda fd, sig: signals.append(sig))
+    # Queued, no pid yet: the marker is written, nothing can be signalled.
+    first = service.cancel(job_id)
+    assert first["cancel_requested"] is True and signals == [] and not (job / "cancel.signalled").exists()
+    stamp = (job / "cancel.request").read_text()
+    assert datetime.fromisoformat(stamp)
+    # The worker publishes its pid; the next cancel signals once and records it.
+    record = json.loads((job / "job.json").read_text())
+    record.update(state="acquiring", pid=4242)
+    atomic_json(job / "job.json", record)
+    second = service.cancel(job_id)
+    assert second["cancel_requested"] is True and signals == [signal.SIGINT]
+    assert (job / "cancel.request").read_text() == stamp, "the first stop time is kept"
+    assert (job / "cancel.signalled").read_text() == "4242"
+    # A double click, or a second tab: nothing more is sent, nothing is rewritten.
+    third = service.cancel(job_id)
+    assert third["cancel_requested"] is True and signals == [signal.SIGINT]
+    assert (job / "cancel.request").read_text() == stamp
+
+
+def test_save_profile_refuses_to_overwrite_unless_asked_and_replaces_a_renamed_file(service, monkeypatch):
+    """QA M4: '+ Add' never writes over a saved profile; Edit with a new file name moves it (recipes follow a converter)."""
+    dut_name = service.list_profiles()["dut"][0]
+    path = service.root / "profiles" / "dut" / f"{dut_name}.json"
+    before = path.read_bytes()
+    impostor = service.load_profile("dut", dut_name)
+    impostor["ratings"]["input_voltage_min_V"] = 20.
+    with pytest.raises(ValueError, match=f"A converter with the file name '{dut_name}' already exists; choose another file name"):
+        service.save_profile("dut", impostor, overwrite=False)
+    assert path.read_bytes() == before, "nothing was overwritten"
+    assert service.save_profile("dut", impostor) == dut_name, "an explicit Edit still saves"
+    with pytest.raises(ValueError, match="A test with the file name"):
+        service.save_profile("recipe", service.load_profile("recipe", "12t12-4a-quick"), overwrite=False)
+    # replaces: the new file is written, the old one removed, and the recipes that referenced the converter follow it.
+    moved = {**service.load_profile("dut", dut_name), "profile_id": "board-a"}
+    assert service.save_profile("dut", moved, replaces=dut_name) == "board-a"
+    assert service.list_profiles()["dut"] == ["board-a"] and not path.exists()
+    assert all(service.load_profile("recipe", name)["dut_profile_id"] == "board-a" for name in service.list_profiles()["recipe"])
+    service.save_profile("dut", {**moved, "profile_id": "board-b"})
+    with pytest.raises(ValueError, match="already exists"):
+        service.save_profile("dut", {**moved, "profile_id": "board-b"}, replaces="board-a")
+    with pytest.raises(ValueError, match="No saved dut profile named 'ghost'"):
+        service.save_profile("dut", {**moved, "profile_id": "board-c"}, replaces="ghost")
+    assert service.save_profile("dut", {**moved, "profile_id": "board-b"}, replaces="board-b") == "board-b", "same name: an ordinary save"
+    assert sorted(service.list_profiles()["dut"]) == ["board-a", "board-b"]
+    # Refused while an active job was started from the old name.
+    p = service.preview("board-a", "mock-dp821-envelope", "12t12-4a-quick")
+    monkeypatch.setattr("dcdc_bench.job_service.subprocess.Popen", lambda *a, **k: SimpleNamespace(pid=None))
+    service.start(p["plan_hash"])
+    with pytest.raises(ValueError, match="active job"):
+        service.save_profile("dut", {**moved, "profile_id": "board-z"}, replaces="board-a")
+    assert sorted(service.list_profiles()["dut"]) == ["board-a", "board-b"]
+
+
+def test_active_job_follows_the_bench_and_a_deferral_records_the_memory_numbers(service, monkeypatch):
+    """QA M1 / C37: the page's 2 s probe names the working or queued job; a memory-gate deferral stores the numbers
+    the gate saw so the page can say '96 MiB available, 150 MiB needed'; dequeuing marks the job as such."""
+    from dcdc_bench.resources import MemoryGate
+    from dcdc_bench.ui_models import deferred_text, state_label
+    assert service.active_job() is None
+    p = mock_preview(service)
+    monkeypatch.setattr("dcdc_bench.job_service.subprocess.Popen", lambda *a, **k: SimpleNamespace(pid=None))
+    job_id = service.start(p["plan_hash"])["job_id"]
+    assert service.active_job() == {"job_id": job_id, "state": "queued", "mode": "mock"}
+    job = service._job(job_id)
+    path = finalized_fixture(job, p["plan"])
+    record = json.loads((job / "job.json").read_text())
+    record.update(state="report-queued", pid=None, run_dir=str(path), queued_utc="2026-09-30T10:00:00+00:00")
+    atomic_json(job / "job.json", record)
+    assert service.active_job() == {"job_id": job_id, "state": "report-queued", "mode": "mock"}
+    meminfo = "MemTotal:        1899548 kB\nMemFree:          20000 kB\nMemAvailable:      98304 kB\nSwapTotal:        900000 kB\nSwapFree:         409600 kB\n"
+    service.gate = MemoryGate(150, 600, reader=lambda _path: meminfo)
+    assert service.dispatch_reports() == {"job_id": job_id, "state": "report-queued",
+                                          "deferred_reason": "MemAvailable below 150 MiB; MemAvailable+SwapFree below 600 MiB"}
+    deferred = service.status(job_id)
+    assert deferred["deferred_memory"] == {"available_mib": 96.0, "available_plus_swap_free_mib": 496.0}
+    assert deferred_text(deferred) == ("Waiting for free memory: 96 MiB available, 150 MiB needed; "
+                                       "Waiting for free memory and swap: 496 MiB free memory and swap together, 600 MiB needed")
+    removed = service.cancel(job_id)
+    assert removed["state"] == "cancelled" and removed["dequeued"] is True and removed["deferred_memory"] is None
+    assert state_label(removed) == "Removed from the report queue"
+    assert service.active_job() is None
+    assert not (job / "cancel.request").exists(), "dequeuing signals no process and leaves no marker"
+
+
+def test_uncancelled_job_records_no_stop_time_and_an_empty_marker_is_tolerated(service, monkeypatch):
+    p = mock_preview(service)
+    monkeypatch.setattr("dcdc_bench.job_service.subprocess.Popen", lambda *a, **k: SimpleNamespace(pid=None))
+    job_id = service.start(p["plan_hash"])["job_id"]
+    job = service._job(job_id)
+    monkeypatch.setattr("dcdc_bench.services.acquire_mock", lambda plan, out, **kwargs: finalized_fixture(job, p["plan"]))
+    worker(job)
+    assert service.status(job_id)["acquisition_cancelled_utc"] is None
+    from dcdc_bench.job_service import _stop_requested_utc
+    (job / "empty").touch()
+    (job / "junk").write_text("not a time")
+    assert _stop_requested_utc(job / "empty") is None and _stop_requested_utc(job / "junk") is None
+    assert _stop_requested_utc(job / "missing") is None
+
+
+def test_report_only_retry_renders_a_job_whose_saved_plan_predates_the_schema(service, monkeypatch):
+    """A plan saved under an older schema no longer re-hashes identically; that must block arming,
+    never the regeneration of a report from finalized evidence."""
+    job_id, job = report_only_job(service, monkeypatch)
+    plan_json = _read(job / "plan.json")
+    plan_json["plan_hash"] = "0" * 64              # stands for a hash computed before new default fields existed
+    atomic_json(job / "plan.json", plan_json)
+    monkeypatch.setattr("dcdc_bench.job_service._render_process", fake_render("success", "success"))
+    worker(job, report_only=True)
+    assert service.status(job_id)["state"] == "completed", service.status(job_id)
+    state = _read(job / "job.json"); state.update(state="queued"); atomic_json(job / "job.json", state)
+    worker(job)                                     # acquisition still refuses the changed plan
+    snapshot = service.status(job_id)
+    assert snapshot["state"] == "failed" and "Job plan changed" in snapshot["error"]

@@ -11,6 +11,7 @@ import hashlib
 import io
 import json
 import math
+import re
 from collections import Counter, defaultdict
 from pathlib import Path
 from statistics import mean
@@ -18,16 +19,27 @@ from typing import Any
 
 from pydantic import Field, model_validator
 
-from .domain import UVLO_TEST_TYPE, AcquisitionPolicy, Contract, Plan, RawSample, SettlingPolicy, uvlo_ramp_phases
+from .domain import (PHASE_SCOPED_TEST_TYPES, SLOW_SUPPLY_RAMP_TEST_TYPE, SUPPLY_PROFILE_TEST_TYPES, UVLO_TEST_TYPE,
+                     AcquisitionPolicy, Contract, Plan, RawSample, SettlingPolicy, staircase_level_kinds, uvlo_ramp_phases)
 from .storage import atomic_json, verify_integrity
 from .uncertainty import DERIVED as UNCERTAINTY_DERIVED, evaluate_run_budget, evaluated_quantity
 from .thermal import annotate_thermal_points, thermal_report_contribution
 
-FORMULA_VERSION = "settled-dc-1.2"
+FORMULA_VERSION = "settled-dc-1.4"
 QUANTITIES = ("Vin_V", "Iin_A", "Vout_V", "Iout_A")
+# Enabled no-load (brief 9.1, plan Gap E): input consumption with the load input OFF.
+NO_LOAD_METRIC_PREFIX = "enabled-no-load-input-consumption-"
+# Brief 9.1: an efficiency above 100 % or a negative loss is preserved and flagged,
+# never clamped. The flag names travel with the point into every export.
+IMPLAUSIBLE_RATIO_FLAG = "implausible_power_ratio"
+UNEXPECTED_SIGN_FLAG = "unexpected_sign"
+# Pass-through checks (DUT topology "none ..."): differences between the two
+# instruments' readbacks along the declared path. Not a calibration.
+READBACK_METRIC_PREFIX = "readback-cross-check-"
+READBACK_LABEL = "Readback cross-check (pass-through, not calibration)"
 CSV_FIELDS = ["run_id", "analysis_id", "test_id", "point_id", "vin_target_V",
               "iout_target_A", *QUANTITIES, "Pin_W", "Pout_W", "loss_W",
-              "efficiency_pct", "vout_error_pct", "qualification", "reason"]
+              "efficiency_pct", "vout_error_pct", "qualification", "quality_flags", "reason"]
 
 
 class EvidenceRef(Contract):
@@ -162,6 +174,10 @@ class ReportModel(Contract):
         "status": "not_evaluated", "metrology": "unquantified", "evaluated_point_ids": [],
         "note": "No readback uncertainty budget was evaluated for this analysis; no bands or resolved-difference verdicts are shown."})
     thermal: dict[str, Any] | None = None
+    # Best-effort ISO 16750-2 run: the deviation sheet as built by build_best_effort_sheet
+    # (entries verbatim plus display cells, counts, basis legend, summary sentence and
+    # the mandatory no-compliance statement). Absent for every other run.
+    best_effort: dict[str, Any] | None = None
 
     @model_validator(mode="after")
     def references_exist(self) -> ReportModel:
@@ -229,7 +245,9 @@ def dc_metrics(values: dict[str, float | None], nominal_V: float,
     result.update(Pin_W=pin, Pout_W=pout, loss_W=pin-pout,
                   vout_error_pct=100*(vout-nominal_V)/nominal_V)
     reason = None
-    if vin < 0 or iin < 0 or vout < 0 or iout < 0:
+    # With the load input OFF, Iout is the load's zero-current readback offset of
+    # either sign (evidence, not delivered output current), so its sign is exempt.
+    if vin < 0 or iin < 0 or vout < 0 or (iout < 0 and not no_load):
         flags.append("unexpected_sign")
     if no_load:
         reason = "not applicable: enabled with no external load"
@@ -238,7 +256,8 @@ def dc_metrics(values: dict[str, float | None], nominal_V: float,
         # output power or a converter/path loss estimate.
         result.update(Pout_W=None, loss_W=None)
         result["output_power_reason"] = "not evaluated: no external load; load-off current is not delivered output current"
-        result["loss_reason"] = "not evaluated: output power is unavailable with no external load"
+        result["loss_reason"] = ("not evaluated: output power is unavailable with no external load; the input consumption "
+                                 "is a path quantity at the declared boundary and is not attributed to the module alone")
     elif pin <= 0:
         reason = "nonpositive input power"
         flags.append("nonpositive_input_power")
@@ -343,9 +362,44 @@ def uvlo_ramp_brackets(steps: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _safe_cell(value: Any) -> Any:
+    if isinstance(value, (list, tuple)):
+        # Flag lists become one semicolon-joined text cell (the interactive
+        # export joins the same way, so the two CSV files stay byte-identical).
+        value = ";".join(str(item) for item in value)
     if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@", "\t", "\r")):
         return "'" + value
     return "" if value is None else value
+
+
+def flag_reason(values: dict[str, Any], derived: dict[str, Any], flags: list[str]) -> str:
+    """Computed statement for a point demoted by metric flags. Quotes the readings; adjusts nothing."""
+    vin, iin, vout, iout = (values.get(q) for q in QUANTITIES)
+    finite = {q: _finite_number(values.get(q)) for q in QUANTITIES}
+    parts = []
+    eta, pin, pout = (_finite_number(derived.get(k)) for k in ("efficiency_pct", "Pin_W", "Pout_W"))
+    if IMPLAUSIBLE_RATIO_FLAG in flags and eta is not None and pin is not None and pout is not None:
+        if eta > 100:
+            parts.append(f"Implausible power ratio: computed efficiency {eta:.1f} % exceeds 100 % "
+                         f"(output power {pout:.3f} W > input power {pin:.3f} W); readings preserved, point not qualified.")
+        else:
+            parts.append(f"Implausible power ratio: computed efficiency {eta:.1f} % is below 0 % "
+                         f"(output power {pout:.3f} W with input power {pin:.3f} W); readings preserved, point not qualified.")
+        if finite["Iin_A"] is not None and finite["Iout_A"] is not None:
+            parts.append(f"Input and output current readbacks differ by {1000 * (iout - iin):+.1f} mA.")
+    if "nonpositive_input_power" in flags and pin is not None:
+        parts.append(f"Nonpositive input power ({pin:.4g} W): efficiency suppressed; readings preserved, point not qualified.")
+    if UNEXPECTED_SIGN_FLAG in flags:
+        negative = [f"{q} = {finite[q]:.6g}" for q in QUANTITIES if finite[q] is not None and finite[q] < 0]
+        parts.append("Unexpected sign: " + (", ".join(negative) if negative else "a negative channel mean")
+                     + " at a loaded point; readings preserved, point not qualified.")
+    if not parts:
+        parts.append("Metric flags " + ", ".join(flags) + ": readings preserved, point not qualified.")
+    return " ".join(parts)
+
+
+def is_flagged_implausible(point: dict[str, Any]) -> bool:
+    """A demoted point whose readings give output power above input power (or a negative ratio)."""
+    return point.get("qualification") == "inconclusive" and IMPLAUSIBLE_RATIO_FLAG in (point.get("quality_flags") or [])
 
 
 def points_csv(points: list[dict[str, Any]]) -> str:
@@ -371,8 +425,9 @@ def _evidence_label(plan: Plan, run: dict) -> str:
     expected_mode = {"simulated": "mock", "measured": "real"}.get(source)
     if expected_mode is None:
         raise ValueError(f"Unknown acquisition data_source: {source!r}")
-    if plan.bench.mode != expected_mode or plan.recipe.execution_mode != expected_mode:
-        raise ValueError("Acquisition data_source does not match bench and recipe execution modes")
+    # The bench decides real vs simulated; a legacy recipe execution_mode is planning metadata.
+    if plan.bench.mode != expected_mode:
+        raise ValueError("Acquisition data_source does not match the bench execution mode")
     if "real_hardware_opened" in run and run["real_hardware_opened"] is not (source == "measured"):
         raise ValueError("Acquisition data_source disagrees with real_hardware_opened")
     if source == "measured" and run.get("clock", {}).get("mode") == "virtual":
@@ -417,7 +472,8 @@ def _uvlo_analysis(plan: Plan, run: dict, points: list[dict]) -> dict[str, Any]:
             if state == "on" and point.get("metric_flags"):
                 # An operating step is an efficiency point: the generic metric-flag
                 # demotion (skipped for UVLO steps in analyze_evidence) applies here.
-                point.update(qualification="inconclusive")
+                point.update(qualification="inconclusive", quality_flags=list(point["metric_flags"]),
+                             reason=flag_reason(point, point, list(point["metric_flags"])))
                 point["requirements"].update(output_voltage="not-evaluated", efficiency="not-evaluated")
             if state is not None and state != "on":
                 point.update(efficiency_pct=None,
@@ -433,6 +489,184 @@ def _uvlo_analysis(plan: Plan, run: dict, points: list[dict]) -> dict[str, Any]:
                           "output_state": state, "qualification": point["qualification"]})
         result[test.id] = {"policy": test.uvlo.model_dump(), "load_A": test.output_current_targets_A[0],
                            "steps": steps, **uvlo_ramp_brackets(steps)}
+    return result
+
+
+SUPPLY_PROFILE_LABELS = {SLOW_SUPPLY_RAMP_TEST_TYPE: "slow supply ramp (clause 4.5 profile)",
+                         "reset_staircase": "reset staircase (clause 4.6.2 profile)"}
+SUPPLY_PROFILE_CADENCE = ("levels are commanded as bounded DC steps at the ~1 s command cadence; the source's own slew "
+                          "between steps is not characterised and no edge, drop or transient is measured")
+
+
+def level_observation(level_kind: str, state: str | None, previous_state: str | None, off_expected: bool) -> str:
+    """One computed phrase per supply-profile level: in band / reset / recovered / not recovered, from classified states only."""
+    if state is None:
+        return "no qualified observation"
+    if state == "indeterminate":
+        return "output indeterminate (between the off ceiling and the on floor)"
+    if state == "on":
+        return "recovered: output back in band" if previous_state in ("off", "indeterminate") else "output in band"
+    if level_kind == "recovery":
+        phrase = "not recovered: output off at a recovery level"
+    elif level_kind == "up":
+        phrase = "output still off on the increase"
+    else:
+        phrase = "reset: output off"
+    return phrase + (" (documented expectation below the declared boundary)" if off_expected
+                     else " where the policy expects it on; cause unclassified")
+
+
+def _state_runs(levels: list[dict[str, Any]]) -> list[tuple[str | None, float, float]]:
+    """Consecutive levels with the same classified state as (state, first V, last V)."""
+    runs: list[tuple[str | None, float, float]] = []
+    for level in levels:
+        state, vin = level["output_state"], level["vin_target_V"]
+        if runs and runs[-1][0] == state:
+            runs[-1] = (state, runs[-1][1], vin)
+        else:
+            runs.append((state, vin, vin))
+    return runs
+
+
+def _describe_run(state: str | None, first: float, last: float) -> str:
+    words = {"on": "in band", "off": "off (reset)", "indeterminate": "indeterminate", None: "not qualified"}[state]
+    return f"{words} at {first:g} V" if first == last else f"{words} from {first:g} V to {last:g} V"
+
+
+def supply_profile_statements(test_type: str, levels: list[dict[str, Any]], policy: dict[str, Any],
+                              stop: dict[str, Any] | None, *, synthetic: bool) -> list[str]:
+    """Plain sentences computed from the classified levels; nothing here is inferred beyond the recorded states."""
+    prefix = "Synthetic plant: " if synthetic else ""
+    statements = []
+    if test_type == SLOW_SUPPLY_RAMP_TEST_TYPE:
+        down = [level for level in levels if level["level_kind"] == "down"]
+        up = [level for level in levels if level["level_kind"] == "up"]
+        if down:
+            statements.append(prefix + f"decreasing from {down[0]['vin_target_V']:g} V, the output was "
+                              + "; ".join(_describe_run(*run) for run in _state_runs(down)) + ".")
+        if up:
+            statements.append(f"Increasing to {up[-1]['vin_target_V']:g} V, the output was "
+                              + "; ".join(_describe_run(*run) for run in _state_runs(up)) + ".")
+        recovered = next((level for level in up if level["observation"].startswith("recovered")), None)
+        if recovered:
+            statements.append(f"The output was back in band at {recovered['vin_target_V']:g} V on the increase "
+                              "(the first qualified in-band level after an off level; the return lies between it and the previous level).")
+        elif any(level["output_state"] == "off" for level in down) and up:
+            statements.append("The output had not returned by the last increasing level.")
+        rate, step, interval = policy.get("ramp_rate_V_per_min"), policy.get("step_V"), policy.get("step_interval_s")
+        if step is not None and interval is not None:
+            rate = rate if rate is not None else step / interval * 60
+            statements.append(f"Levels were reached in {step * 1000:g} mV live steps held {interval:g} s ({rate:g} V/min); "
+                              f"{SUPPLY_PROFILE_CADENCE}; states are established at the {len(levels)} observation levels only.")
+    else:
+        lows = [level for level in levels if level["level_kind"] == "low"]
+        recoveries = [level for level in levels if level["level_kind"] == "recovery"]
+        in_band = [level["vin_target_V"] for level in lows if level["output_state"] == "on"]
+        reset = [level["vin_target_V"] for level in lows if level["output_state"] == "off"]
+        unqualified = [level["vin_target_V"] for level in lows if level["output_state"] is None]
+        parts = []
+        if in_band:
+            parts.append("in band at the " + ", ".join(f"{v:g} V" for v in in_band) + (" low" if len(in_band) == 1 else " lows"))
+        if reset:
+            parts.append("off (reset) at the " + ", ".join(f"{v:g} V" for v in reset) + (" low" if len(reset) == 1 else " lows"))
+        if unqualified:
+            parts.append("not qualified at " + ", ".join(f"{v:g} V" for v in unqualified))
+        statements.append(prefix + "at the low levels the output was " + ("; ".join(parts) if parts else "not qualified") + ".")
+        judged = [level for level in recoveries[1:] if level["output_state"] is not None]
+        back = [level for level in judged if level["output_state"] == "on"]
+        failed = [level for level in judged if level["output_state"] != "on"]
+        if recoveries:
+            text = f"At the {recoveries[0]['vin_target_V']:g} V recovery level after a low the output was back in band {len(back)} of {len(judged)} times"
+            if failed:
+                text += "; it was " + ", ".join(f"{level['output_state']} after the {lows[index]['vin_target_V']:g} V low"
+                                                 for index, level in ((recoveries.index(f) - 1, f) for f in failed) if 0 <= index < len(lows))
+            statements.append(text + ".")
+        low_hold, recovery_hold = policy.get("low_hold_s"), policy.get("recovery_hold_s")
+        if low_hold is not None:
+            statements.append(f"Each low was held {low_hold:g} s and each recovery {recovery_hold:g} s before acquisition; "
+                              f"{SUPPLY_PROFILE_CADENCE}.")
+    lowest = min(level["vin_target_V"] for level in levels)
+    statements.append(f"The lowest requested level was {lowest:g} V; the standard's profile continues to 0 V, which is not a "
+                      "positive source setpoint on this bench.")
+    if stop and any(level["point_id"] == stop.get("point_id") for level in levels):
+        level = next(level for level in levels if level["point_id"] == stop["point_id"])
+        statements.append(f"The run stopped at the {level['vin_target_V']:g} V {level['level_kind']} level "
+                          f"({stop.get('classification')}): {stop.get('reason')}. Later levels were not run.")
+    return statements
+
+
+def _supply_profile_analysis(plan: Plan, run: dict, points: list[dict]) -> dict[str, Any]:
+    """Recompute each ISO 16750-2 supply-profile level's state from accepted means; state per level what was observed.
+
+    Same rules as the UVLO ramp: off/indeterminate levels are recorded states,
+    not efficiency points; an off level where the policy expects the output on
+    is inconclusive; a worker claim that disagrees with the accepted mean is
+    rejected. The per-level statement (in band / reset / recovered / not
+    recovered) is computed here from the classified states and labelled as the
+    synthetic plant when the run is simulated.
+    """
+    outcomes = {p["point_id"]: p for p in run.get("points", [])}
+    by_point = {p["point_id"]: p for p in points}
+    method = (run.get("method") or {}).get("supply_profile") or {}
+    synthetic = run.get("data_source", "simulated") == "simulated"
+    result: dict[str, Any] = {}
+    for test in plan.recipe.tests:
+        if test.type not in SUPPLY_PROFILE_TEST_TYPES or test.supply_profile is None:
+            continue
+        policy = test.supply_profile
+        kinds = (uvlo_ramp_phases(test.input_voltage_targets_V) if test.type == SLOW_SUPPLY_RAMP_TEST_TYPE
+                 else staircase_level_kinds(test.input_voltage_targets_V))
+        requests = [p for p in plan.points if p.test_id == test.id]
+        if [p.vin_target_V for p in requests] != list(test.input_voltage_targets_V):
+            raise ValueError("Supply-profile plan points do not match the declared levels")
+        levels, previous = [], None
+        for request, kind in zip(requests, kinds):
+            point = by_point[request.point_id]
+            state = policy.classify_output(point["Vout_V"]) if point["qualification"] == "valid" else None
+            if point["qualification"] == "valid" and state is None:
+                raise ValueError(f"Valid supply-profile level {request.point_id} has no accepted Vout mean to classify")
+            recorded = outcomes.get(request.point_id, {}).get("output_state")
+            if state is not None and recorded is not None and recorded != state:
+                raise ValueError(f"Worker recorded output state {recorded!r} for {request.point_id}; "
+                                 f"the accepted Vout mean classifies as {state!r}")
+            off_expected = policy.off_expected(request.vin_target_V, kind)
+            point.update(level_kind=kind, ramp_phase=kind if kind in ("down", "up") else None, output_state=state,
+                         output_off_expected=off_expected, minimum_vout_rule_applied=not off_expected)
+            if state == "on" and point.get("metric_flags"):
+                point.update(qualification="inconclusive", quality_flags=list(point["metric_flags"]),
+                             reason=flag_reason(point, point, list(point["metric_flags"])))
+                point["requirements"].update(output_voltage="not-evaluated", efficiency="not-evaluated")
+            if state is not None and state != "on":
+                point.update(efficiency_pct=None,
+                             efficiency_reason=f"output {state}: recorded supply-profile state, not an efficiency point",
+                             Pout_W=None, loss_W=None,
+                             output_power_reason=f"not evaluated: output {state}; a standby reading is not delivered output power",
+                             loss_reason=f"not evaluated: output {state}; output power is not applicable to a recorded profile state")
+                point["requirements"].update(output_voltage="not-applicable", efficiency="not-applicable")
+                if not off_expected:
+                    point.update(qualification="inconclusive",
+                                 reason=f"output {state} at a level where the declared policy expects it on; cause unclassified")
+            observation = level_observation(kind, state, previous, off_expected)
+            if state == "on" and point["requirements"].get("output_voltage") == "fail":
+                observation = (f"output on but outside the ±{plan.dut.acceptance.output_voltage_tolerance_pct:g} % acceptance band"
+                               + (" (after an off level)" if previous in ("off", "indeterminate") else ""))
+            point["level_observation"] = observation
+            levels.append({"point_id": request.point_id, "vin_target_V": request.vin_target_V, "level_kind": kind,
+                           "ramp_phase": point["ramp_phase"], "output_state": state, "output_off_expected": off_expected,
+                           "observation": observation, "qualification": point["qualification"]})
+            if state is not None:
+                previous = state
+        detail: dict[str, Any] = {"type": test.type, "label": SUPPLY_PROFILE_LABELS.get(test.type, test.type),
+                                  "clause": plan.recipe.standard_clause, "policy": policy.model_dump(),
+                                  "load_A": test.output_current_targets_A[0], "levels": levels,
+                                  "cadence": method.get("cadence"), "synthetic": synthetic}
+        if test.type == SLOW_SUPPLY_RAMP_TEST_TYPE:
+            detail.update(uvlo_ramp_brackets(levels))
+            detail["bracket_note"] = ("brackets lie between adjacent observation levels; the live steps between them were "
+                                      "guarded, not qualified")
+        policy_dump = {**policy.model_dump(), "ramp_rate_V_per_min": policy.ramp_rate_V_per_min}
+        detail["statements"] = supply_profile_statements(test.type, levels, policy_dump, run.get("stop"), synthetic=synthetic)
+        result[test.id] = detail
     return result
 
 
@@ -456,7 +690,8 @@ def analyze_evidence(plan: Plan, run: dict, samples: list[dict], *, version: str
             raise ValueError("Raw measurement does not match its declared role, unit or location")
         grouped[row["point_id"]].append(row)
     outcomes = {p["point_id"]: p for p in run.get("points", [])}
-    uvlo_tests = {t.id for t in plan.recipe.tests if t.type == UVLO_TEST_TYPE}
+    # UVLO steps and supply-profile levels are classified from the accepted Vout mean first.
+    uvlo_tests = {t.id for t in plan.recipe.tests if t.type in PHASE_SCOPED_TEST_TYPES}
     points = []
     accepted_values: dict[str, dict[str, list[float]]] = {}
     for request in plan.points:
@@ -485,6 +720,10 @@ def analyze_evidence(plan: Plan, run: dict, samples: list[dict], *, version: str
         accepted_values[request.point_id] = {q: [s["value"] for s in accepted if s["quantity"] == q] for q in QUANTITIES}
         derived = dc_metrics(values, plan.dut.ratings.output_voltage_nominal_V,
                              no_load=request.iout_target_A == 0)
+        # The worker's reason stands unless the analysis demotes the point; then
+        # the reason states what was computed (brief 9.1) and the flags that did it.
+        reason = outcome.get("reason", request.reason)
+        quality_flags: list[str] = []
         if qualification != "valid":
             derived.update(efficiency_pct=None, efficiency_reason=f"point {qualification}")
         elif derived["metric_flags"] and request.test_id not in uvlo_tests:
@@ -492,6 +731,22 @@ def analyze_evidence(plan: Plan, run: dict, samples: list[dict], *, version: str
             # (_uvlo_analysis); a near-zero, slightly negative off-state readback
             # must not demote a recorded off step. Operating steps are demoted there.
             qualification = "inconclusive"
+            quality_flags = list(derived["metric_flags"])
+            reason = flag_reason(values, derived, quality_flags)
+        no_load = request.iout_target_A == 0
+        load_states = {s["acquisition_settings"].get("load_enabled") for s in accepted}
+        readbacks = {s["acquisition_settings"].get("load_input_readback") for s in accepted}
+        if no_load and qualification == "valid" and (True in load_states or True in readbacks):
+            raise ValueError("Worker accepted an enabled no-load point with the load input enabled")
+        # Enabled no-load (brief 9.1, plan Gap E): the measurand is input consumption
+        # with the load input OFF; the load's current readback is kept as an offset,
+        # never as delivered output current.
+        observation = {"observation": "enabled_no_load" if no_load else "loaded",
+                       "load_input_state": ("not recorded" if not load_states or load_states == {None}
+                                            else "OFF" if load_states == {False} else "ON" if load_states == {True}
+                                            else "mixed"),
+                       "load_readback_offset_A": values["Iout_A"] if no_load else None,
+                       "enabled_no_load_consumption_W": derived["Pin_W"] if no_load and qualification == "valid" else None}
         requirements = {"output_voltage": "not-evaluated", "efficiency": "not-evaluated",
                         "surface_temperature": "not-evaluated"}
         acceptance = plan.dut.acceptance
@@ -502,9 +757,9 @@ def analyze_evidence(plan: Plan, run: dict, samples: list[dict], *, version: str
                 requirements["efficiency"] = "not-applicable"
             elif acceptance.minimum_efficiency_pct is not None and derived["efficiency_pct"] is not None:
                 requirements["efficiency"] = "pass" if derived["efficiency_pct"] >= acceptance.minimum_efficiency_pct else "fail"
-        points.append({**request.model_dump(), **values, **derived,
+        points.append({**request.model_dump(), **values, **derived, **observation,
                        "run_id": run["run_id"], "test_id": request.test_id,
-                       "qualification": qualification, "reason": outcome.get("reason", request.reason),
+                       "qualification": qualification, "quality_flags": quality_flags, "reason": reason,
                        "requirements": requirements, "metrology": "unquantified",
                        "accepted_cycle_count": len(by_cycle),
                        "accepted_sample_ids": [s["sample_id"] for s in accepted],
@@ -512,6 +767,8 @@ def analyze_evidence(plan: Plan, run: dict, samples: list[dict], *, version: str
     # UVLO steps are classified first so expected-off steps carry no efficiency
     # before the budget is evaluated on the final point set.
     uvlo = _uvlo_analysis(plan, run, points) if any(t.type == UVLO_TEST_TYPE for t in plan.recipe.tests) else None
+    profiles = (_supply_profile_analysis(plan, run, points)
+                if any(t.type in SUPPLY_PROFILE_TEST_TYPES for t in plan.recipe.tests) else None)
     annotate_thermal_points(plan, run, grouped, points)
     # Structured readback budget (section 9.2). Unknown terms yield not_evaluated
     # reasons, never zeros; the per-point qualification state follows the budget.
@@ -519,6 +776,9 @@ def analyze_evidence(plan: Plan, run: dict, samples: list[dict], *, version: str
                                  observed_conditions={"ambient_temperature_C": run.get("ambient_temperature_C")})
     for p in points:
         p["metrology"] = budget["points"][p["point_id"]]["metrology"]
+    # A best-effort ISO 16750-2 run records its deviation sheet in the method block;
+    # the analysis carries it verbatim so the report and the export read one copy.
+    best_effort = (run.get("method") or {}).get("best_effort")
     return {"schema_version": "1.0", "formula_version": version,
             "aggregation": "Metrics from qualified channel means over accepted complete acquisition cycles",
             "sign_convention": "Positive power enters input boundary and leaves output boundary; no absolute-value correction",
@@ -526,7 +786,9 @@ def analyze_evidence(plan: Plan, run: dict, samples: list[dict], *, version: str
             "boundary": run.get("measurement_boundary", plan.bench.measurement_boundary),
             "points": points, "coverage": coverage_by_test(points),
             "uncertainty": budget,
-            **({"uvlo_input_ramp": uvlo} if uvlo else {})}
+            **({"uvlo_input_ramp": uvlo} if uvlo else {}),
+            **({"supply_profiles": profiles} if profiles else {}),
+            **({"best_effort": copy.deepcopy(best_effort)} if best_effort else {})}
 
 
 def _finite_number(value: Any) -> float | None:
@@ -607,6 +869,13 @@ def _report_method(plan: Plan, run: dict, analysis: dict, raw_samples: list[dict
     clock = run.get("clock", {})
     recorded_method = run.get("method", {})
     notes = []
+    if plan.recipe.title:
+        notes.append(f"Recipe: {plan.recipe.title}.")
+    if plan.recipe.standard_clause:
+        notes.append(f"Referenced clause: {plan.recipe.standard_clause}. A clause reference identifies the source of "
+                     "the selected test conditions; it does not establish standards compliance.")
+    if plan.recipe.description:
+        notes.append(f"Declared recipe scope: {plan.recipe.description}")
     if recorded_method.get("configured_dc_sweep"):
         notes.append("This configured DC sweep cold-starts each input-voltage phase with both outputs OFF before reconfiguration. "
                      "Startup readings must establish output voltage before the load is enabled; a boundary or fault stops the run.")
@@ -698,6 +967,28 @@ def _report_method(plan: Plan, run: dict, analysis: dict, raw_samples: list[dict
         if recorded_method["uvlo_input_ramp"].get("synthetic_model"):
             notes.append("The synthetic plant's UVLO threshold, hysteresis and standby draw are simulation parameters, "
                          "not characteristics of the DUT.")
+    if recorded_method.get("supply_profile"):
+        profile = recorded_method["supply_profile"]
+        cadence = profile.get("cadence") or {}
+        label = SUPPLY_PROFILE_LABELS.get(profile.get("type"), str(profile.get("type")))
+        notes.append(f"ISO 16750-2 {label} run as bounded DC steps: {SUPPLY_PROFILE_CADENCE}. The source stays on from the "
+                     "first level to the last at a fixed light load.")
+        if profile.get("type") == SLOW_SUPPLY_RAMP_TEST_TYPE and cadence.get("live_step_V") is not None:
+            rate = cadence.get("rate_V_per_min")
+            notes.append(f"The {rate:g} V/min rate is realised as {cadence['live_step_V'] * 1000:g} mV live steps every "
+                         f"{cadence['live_step_interval_s']:g} s: a staircase, not a linear ramp. Readings between observation "
+                         "levels are guarded and preserved as raw samples but are not qualified points; each observation level "
+                         f"waits the {plan.recipe.settling.minimum_dwell_s:g} s dwell before acquisition.")
+        elif cadence.get("low_hold_s") is not None:
+            notes.append(f"Each low level is held {cadence['low_hold_s']:g} s and each recovery level "
+                         f"{cadence['recovery_hold_s']:g} s before acquisition.")
+        notes.append("The normal minimum-output and load-established rules apply only where output-off is not expected "
+                     "(descending or low levels at or above the expected-off boundary, ascending or recovery levels at or above "
+                     "the expected-on boundary); elsewhere output-off is recorded, not faulted. Absolute input-current, voltage "
+                     "and output-current limits apply at every level and every live step.")
+        if profile.get("synthetic_model"):
+            notes.append("The synthetic plant's UVLO threshold, hysteresis and standby draw are simulation parameters, "
+                         "not characteristics of the DUT; every statement about reset and recovery describes the mock plant.")
     if recorded_method.get("hold_settling"):
         notes.append(str(recorded_method["hold_settling"]) + f". The {plan.recipe.settling.minimum_dwell_s:g} s settling dwell applies to sweep steps; continuous hold bins do not restart it.")
     if recorded_method.get("sustained_load_actual_elapsed_s") is not None:
@@ -902,7 +1193,7 @@ def _apply_uncertainty(points: list[dict], figures: list[FigureSpec], metrics: l
                                "they are not validated 95 % confidence intervals, and points without a band were not evaluated.")
     metric_quantity = {"highest-observed-efficiency": "efficiency_pct", "highest-qualified-input-current": "Iin_A"}
     for metric in metrics:
-        name = metric_quantity.get(metric.id)
+        name = metric_quantity.get(metric.id) or ("Pin_W" if metric.id.startswith(NO_LOAD_METRIC_PREFIX) else None)
         pid = metric.selector.get("point_id")
         result = evaluated_quantity(budget, pid, name) if name and isinstance(pid, str) else None
         if result is not None:
@@ -926,6 +1217,522 @@ def _apply_uncertainty(points: list[dict], figures: list[FigureSpec], metrics: l
             "unquantified_aspects": list(budget.get("unquantified_aspects", [])), "note": note}
 
 
+def _implausible_ratio_statements(points: list[dict]) -> tuple[str | None, str | None]:
+    """Summary paragraph and limitation line for points flagged implausible; computed, never invented."""
+    flagged = [p for p in points if is_flagged_implausible(p)]
+    if not flagged:
+        return None, None
+    loaded = [p for p in points if p.get("iout_target_A") not in (None, 0)]
+    etas = [_finite_number(p.get("efficiency_pct")) for p in flagged]
+    above = [p for p, eta in zip(flagged, etas) if eta is not None and eta > 100]
+    if len(above) == len(flagged):
+        kind = "output power above input power"
+    elif not above:
+        kind = "negative output power"
+    else:
+        kind = "output power above input power or negative"
+    text = (f"{len(flagged)} of {len(loaded)} loaded points show a physically impossible power ratio ({kind}) "
+            "and are not qualified; the readings are preserved in the table and explorer.")
+    differences = [1000 * (p["Iout_A"] - p["Iin_A"]) for p in above
+                   if _finite_number(p.get("Iout_A")) is not None and _finite_number(p.get("Iin_A")) is not None]
+    if differences and (all(d > 0 for d in differences) or all(d < 0 for d in differences)):
+        text += (f" The input and output current readbacks differ by {min(differences):+.1f} mA to "
+                 f"{max(differences):+.1f} mA across these points, which points to instrument readback disagreement "
+                 "at the declared boundary rather than converter behaviour (output power cannot exceed input power).")
+    limitation = (f"Points flagged {IMPLAUSIBLE_RATIO_FLAG} ({', '.join(p['point_id'] for p in flagged)}) keep their "
+                  "readings and their unclamped computed efficiency and loss; they are not qualified, contribute to no "
+                  "issued metric, and are drawn with open markers in the figures.")
+    return text, limitation
+
+
+def _readback_cross_check(plan: Plan, points: list[dict]) -> dict[str, Any]:
+    """Pass-through DUT (topology 'none ...'): per-point and aggregate readback differences.
+
+    ``current_readback_difference_A = Iout_A − Iin_A`` and ``voltage_drop_V = Vin_V − Vout_V``
+    over loaded points with complete channel means, whatever their qualification.
+    These compare two instruments' readbacks along the declared path; they are
+    not a calibration and correct no stored value.
+    """
+    empty = {"metrics": [], "summary": None, "summary_metric_ids": [], "limitation": None}
+    if not str(plan.dut.construction.topology).strip().lower().startswith("none"):
+        return empty
+    loaded = [p for p in points if p.get("iout_target_A") not in (None, 0)
+              and all(_finite_number(p.get(q)) is not None for q in QUANTITIES)]
+    if not loaded:
+        return empty
+    quantities = {
+        "current-difference": ("current readback difference", "Iout_A − Iin_A", "A",
+                               lambda p: p["Iout_A"] - p["Iin_A"]),
+        "voltage-drop": ("voltage drop", "Vin_V − Vout_V", "V", lambda p: p["Vin_V"] - p["Vout_V"]),
+    }
+    basis = " (channel means over accepted cycles; a difference between two instrument readbacks along the declared path, not a correction)"
+    ids = [p["point_id"] for p in loaded]
+    inputs = sorted({p["vin_target_V"] for p in loaded})
+    loads = sorted({p["iout_target_A"] for p in loaded})
+    scope = (f"{len(loaded)} loaded points ({', '.join(ids)}); "
+             + _join_phrases([f"{v:g} V" for v in inputs]) + " requested input; requested loads "
+             + (f"{loads[0]:g} A" if len(loads) == 1 else f"{loads[0]:g}–{loads[-1]:g} A"))
+    metrics: list[MetricResult] = []
+    aggregates: dict[str, dict[str, float]] = {}
+    for name, (description, formula, unit, compute) in quantities.items():
+        values = [compute(p) for p in loaded]
+        for point, value in zip(loaded, values):
+            metrics.append(MetricResult(id=f"{READBACK_METRIC_PREFIX}{name}-{point['point_id']}",
+                label=f"{READBACK_LABEL}: {description}", value=float(value), unit=unit,
+                formula=formula + basis,
+                conditions=(f"{point['point_id']}: {point['vin_target_V']:g} V requested input, "
+                            f"{point['iout_target_A']:g} A requested load; point {point['qualification']}"),
+                selector={"point_id": point["point_id"]}, point_ids=[point["point_id"]], figure_ids=[]))
+        aggregates[name] = {"mean": float(mean(values)), "min": float(min(values)), "max": float(max(values))}
+        for statistic, value in aggregates[name].items():
+            metrics.append(MetricResult(id=f"{READBACK_METRIC_PREFIX}{name}-{statistic}",
+                label=f"{READBACK_LABEL}: {statistic} {description}", value=value, unit=unit,
+                formula=f"{statistic}({formula}) over loaded points{basis}",
+                conditions=scope, selector={"observation": "loaded", "topology": plan.dut.construction.topology},
+                point_ids=ids, figure_ids=[]))
+    current, drop = aggregates["current-difference"], aggregates["voltage-drop"]
+    summary = (f"{READBACK_LABEL}: across {len(loaded)} loaded points the load current readback minus the source "
+               f"current readback is {1000 * current['mean']:+.1f} mA on average ({1000 * current['min']:+.1f} to "
+               f"{1000 * current['max']:+.1f} mA), and the source-terminal voltage minus the load-terminal voltage is "
+               f"{1000 * drop['mean']:.1f} mV on average ({1000 * drop['min']:.1f} to {1000 * drop['max']:.1f} mV). "
+               "These are differences between two instruments' readbacks along the declared path; no stored value is corrected.")
+    limitation = ("The readback cross-check compares the source and load instruments' readbacks along the declared "
+                  "pass-through path. It is not a calibration, its uncertainty is unquantified, and it corrects no stored value.")
+    return {"metrics": metrics, "summary": summary,
+            "summary_metric_ids": [f"{READBACK_METRIC_PREFIX}{name}-mean" for name in quantities],
+            "limitation": limitation}
+
+
+SOURCE_LIMIT_FLAG = "source-current-limited"
+
+
+def _source_limited_phases(points: list[dict]) -> list[dict]:
+    """Each input-voltage phase whose source entered current limiting: the limited point and the higher
+    loads of that phase left not-run, in plan order. Computed from the retained outcomes, never invented."""
+    phases = []
+    for point in points:
+        if point.get("qualification") != "setup-limited":
+            continue
+        same_phase = [p for p in points if p["test_id"] == point["test_id"] and p["vin_target_V"] == point["vin_target_V"]]
+        skipped = [p for p in same_phase if p["iout_target_A"] > point["iout_target_A"] and p.get("qualification") == "not-run"]
+        phases.append({"point": point, "skipped": skipped})
+    return phases
+
+
+def _source_limit_statements(points: list[dict]) -> list[str]:
+    """One deterministic summary sentence per current-limited phase (brief 9.3: points unavailable because the
+    source budget was exceeded belong in the prose, not only in the coverage table)."""
+    statements = []
+    for phase in _source_limited_phases(points):
+        point, skipped = phase["point"], phase["skipped"]
+        vin, iout = point["vin_target_V"], point["iout_target_A"]
+        text = f"The source entered current limiting at {vin:g} V, {iout:g} A requested ({point['point_id']}); "
+        if skipped:
+            ids = ", ".join(p["point_id"] for p in skipped)
+            text += f"{len(skipped)} higher load{'s' if len(skipped) != 1 else ''} at {vin:g} V ({ids}) were not attempted."
+        else:
+            text += f"no higher load at {vin:g} V was requested."
+        statements.append(text)
+    return statements
+
+
+def _flag_figure_captions(figures: list[FigureSpec], points: list[dict]) -> None:
+    """Say what an open marker means on every figure that draws a flagged point, and where a curve ends
+    because the source entered current limiting."""
+    by_id = {p["point_id"]: p for p in points}
+    limited = _source_limited_phases(points)
+    for figure in figures:
+        drawn = [pid for series in figure.series for pid in series.point_ids
+                 if is_flagged_implausible(by_id[pid])
+                 and _finite_number(by_id[pid].get(figure.x_key)) is not None
+                 and _finite_number(by_id[pid].get(figure.y_key)) is not None]
+        if drawn:
+            figure.caption += (f" Open markers are {len(drawn)} point(s) flagged {IMPLAUSIBLE_RATIO_FLAG}; they are drawn "
+                               "unclamped for visibility, are not qualified, and are excluded from issued results.")
+        for phase in limited:
+            point = phase["point"]
+            if not any(point["point_id"] in series.point_ids for series in figure.series):
+                continue
+            vin, iout = point["vin_target_V"], point["iout_target_A"]
+            figure.caption += (f" The {vin:g} V series stops before {iout:g} A: the source entered current limiting there "
+                               f"(flag {SOURCE_LIMIT_FLAG}; {point['point_id']} is not drawn)"
+                               + (f" and {len(phase['skipped'])} higher load"
+                                  f"{'s' if len(phase['skipped']) != 1 else ''} at {vin:g} V were not attempted."
+                                  if phase["skipped"] else "."))
+
+
+# --- Best-effort ISO 16750-2 runs: the deviation sheet in the report -----------------------------------
+# docs/standards/best-effort-proposal.md §2.2–2.3 and §8. The procedure records
+# run["method"]["best_effort"] (clause, variant, one entry per clause parameter);
+# the analysis carries it verbatim and derives every sentence here from the
+# entries by template, never from free text. "Commanded, not measured" is the
+# accepted wording (§8, decision 3): host write timestamps are "host-timed" and
+# nothing at the converter terminals is called measured until a scope or DAQ exists.
+BEST_EFFORT_STANDARD = "ISO 16750-2"
+BEST_EFFORT_CLASSIFICATIONS = ("met", "approximated", "not_met_but_documented", "unknown_until_measured")
+BEST_EFFORT_CLASSIFICATION_LABELS = {"met": "met", "approximated": "approximated",
+                                     "not_met_but_documented": "not met, documented",
+                                     "unknown_until_measured": "unknown until measured"}
+BEST_EFFORT_COUNT_WORDS = {"met": "met", "approximated": "approximated",
+                           "not_met_but_documented": "not met", "unknown_until_measured": "not measured"}
+# Mandatory wherever a sheet exists: the first-page summary, the sheet section, the appendix and the export.
+BEST_EFFORT_STATEMENT = "No clause-compliance result is claimed; the sheet records deviations."
+BEST_EFFORT_POLL_NOTE = ("Observed output states come from about 1 s polling; states shorter than the poll "
+                         "interval are not visible to this bench.")
+# Basis tags (§2.2) with their legend; a tag outside this list is shown as recorded.
+BEST_EFFORT_BASES = {
+    "ISO": "ISO 16750-2 clause text or figure",
+    "DS5": "supply datasheet bound",
+    "PG": "instrument timer or delayer clock",
+    "LAN": "measured LAN command transport",
+    "DRV": "driver round-trip count",
+    "RB": "supply readback (about 1 s refresh)",
+    "SEED": "seeded bench profile or protective policy",
+    "DUT": "DUT profile rating",
+    "ENV": "bench envelope or duration policy",
+    "MOCK": "synthetic plant parameter",
+    "derived": "derived from the tagged bounds",
+    "UNV": "unverified; stated by no document read",
+    "host clock": "the bench computer's own command count and timestamps",
+}
+# A recorded basis names its tag(s) up front ("DS5: DP800 datasheet p. 5: ...", "LAN: ... and DS5: ..."); the table, the
+# sentence and the legend show the tags, the export keeps the full string. ISO is recognised by the standard's number.
+_BASIS_TAG_PATTERNS = (("ISO", r"ISO 16750-[12]"), ("DS5", r"\bDS5\b"), ("PG", r"\bPG\b"), ("LAN", r"\bLAN\b"), ("DRV", r"\bDRV\b"),
+                       ("RB", r"\bRB\b"), ("SEED", r"\bSEED\b"), ("DUT", r"\bDUT\b"), ("ENV", r"\bENV\b"), ("MOCK", r"\bMOCK\b"),
+                       ("derived", r"\bderived\b"), ("UNV", r"\bUNV\b"), ("host clock", r"\bhost clock\b"))
+# Mechanism vocabulary (§2.2): the sentence phrase and the table label.
+BEST_EFFORT_MECHANISMS = {
+    # domain.DeviationMechanism (the recorded sheets) and the proposal's earlier words (older fixtures) both read.
+    "lan_voltage_step": ("a voltage step over LAN", "LAN voltage step"),
+    "lan_output_off": ("an output OFF/ON interruption over LAN", "LAN output OFF/ON"),
+    "lan_output_off_on": ("an output OFF/ON interruption over LAN", "LAN output OFF/ON"),
+    "supply_timer": ("an instrument-timed Timer program", "supply Timer"),
+    "supply_delayer": ("an instrument-timed Delayer program", "supply Delayer"),
+    "timer_group": ("an instrument-timed Timer program", "Timer group"),
+    "delayer_group": ("an instrument-timed Delayer program", "Delayer group"),
+    "switch_box": ("a series switch box", "switch box"),
+    "steady_level": ("a steady level", "steady level"),
+    "supply_slew": ("the supply's own slew", "supply slew"),
+}
+BEST_EFFORT_MEASURED_BY = {"host_clock": "host clock (write timestamps)", "none": "not measured",
+                           "supply_readback": "supply readback (about 1 s refresh)"}
+DEVIATION_COLUMNS = ("parameter", "clause_asks", "this_bench", "mechanism", "measured_by", "classification", "note")
+DEVIATION_HEADERS = ("Parameter", "Clause asks", "This bench", "Mechanism", "Measured by", "Classification", "Note")
+_DEVIATION_UNIT_SUFFIXES = ("V", "s", "ms", "A", "W", "Hz", "ohm", "Ohm", "MOhm", "pct", "K", "C")
+
+
+def _deviation_number(value: float, unit: str) -> tuple[str, str]:
+    """('103', 'ms') from 0.103 s: seconds below one are shown in milliseconds; other units are kept."""
+    if unit == "s" and 0 < abs(value) < 1:
+        return f"{round(value * 1000, 9):g}", "ms"
+    return f"{value:g}", unit
+
+
+def _deviation_quantity(value: Any, unit: str) -> str:
+    """A recorded value as text: numbers with their unit, strings as recorded, nothing for None."""
+    number = _finite_number(value)
+    if number is not None:
+        text, shown = _deviation_number(number, unit)
+        return f"{text} {shown}".strip()
+    return str(value).strip() if isinstance(value, str) else ""
+
+
+def _deviation_bound(bound: Any, unit: str) -> str:
+    """A recorded bound as text: a string verbatim, a number as an upper bound, a pair as a range."""
+    if isinstance(bound, str):
+        return bound.strip()
+    if _finite_number(bound) is not None:
+        return "≤ " + _deviation_quantity(bound, unit)
+    pair = None
+    if isinstance(bound, (list, tuple)) and len(bound) == 2:
+        pair = bound
+    elif isinstance(bound, dict) and {"lower", "upper"} <= set(bound):
+        pair = (bound["lower"], bound["upper"])
+    if pair is not None and all(_finite_number(item) is not None for item in pair):
+        low, low_unit = _deviation_number(float(pair[0]), unit)
+        high, high_unit = _deviation_number(float(pair[1]), unit)
+        if low_unit == high_unit or float(pair[0]) == 0:
+            return f"{low}–{high} {high_unit}".strip()
+        return f"{low} {low_unit}–{high} {high_unit}".strip()
+    return ""
+
+
+def _deviation_requirement(required: dict | None, unit: str) -> str:
+    """'100 ± 5 ms', 'at most 10 ms', '3.4' from a recorded clause value and tolerance."""
+    if not isinstance(required, dict):
+        return ""
+    value, tolerance = required.get("value"), required.get("tolerance")
+    number = _finite_number(value)
+    tolerance_number = _finite_number(tolerance)
+    if number is not None and tolerance_number is not None:
+        # The tolerance follows the value's unit: '100 ± 5 ms', '10 ± 0.5 s'.
+        text, shown = _deviation_number(number, unit)
+        scale = 1000 if shown == "ms" and unit == "s" else 1
+        return f"{text} ± {round(tolerance_number * scale, 9):g} {shown}".strip()
+    quantity = _deviation_quantity(value, unit)
+    if isinstance(tolerance, str) and tolerance.strip():
+        word = tolerance.strip()
+        if word.lower() in ("max", "maximum", "<=", "≤", "at most"):
+            return f"at most {quantity}".strip()
+        if word.lower() in ("min", "minimum", ">=", "≥", "at least"):
+            return f"at least {quantity}".strip()
+        return f"{quantity} {word}".strip()
+    return quantity
+
+
+def _deviation_label(parameter: str) -> str:
+    """'drop duration' from 'drop_duration_s': the unit suffix is dropped, underscores become spaces."""
+    tokens = str(parameter).split("_")
+    if len(tokens) > 1 and tokens[-1] in _DEVIATION_UNIT_SUFFIXES:
+        tokens = tokens[:-1]
+    return " ".join(tokens).strip() or str(parameter)
+
+
+def _basis_tags(basis: str) -> list[str]:
+    """The tags a recorded basis names, in order of appearance; the string itself when it names none (shown as recorded)."""
+    if basis in BEST_EFFORT_BASES:
+        return [basis]
+    found = [(match.start(), tag) for tag, pattern in _BASIS_TAG_PATTERNS for match in [re.search(pattern, basis)] if match]
+    return [tag for _, tag in sorted(found)] or [basis]
+
+
+def _deviation_basis(record: dict | None) -> str:
+    """The basis tag(s) of a required or achievable record, for the table cells and the sentence."""
+    basis = record.get("basis") if isinstance(record, dict) else None
+    return ", ".join(_basis_tags(str(basis).strip())) if isinstance(basis, str) and basis.strip() else ""
+
+
+def _entry_label(entry: dict, several: bool = False) -> str:
+    """The row label; prefixed with the entry's variant when the sheet merges several variants of one clause."""
+    label = _deviation_label(entry["parameter"])
+    variant = entry.get("variant")
+    return f"{variant}: {label}" if several and isinstance(variant, str) and variant else label
+
+
+def _with_basis(text: str, record: dict | None) -> str:
+    basis = _deviation_basis(record)
+    return f"{text} ({basis})" if text and basis else text
+
+
+def _deviation_record(entry: dict, block: str) -> dict:
+    record = entry.get(block)
+    return record if isinstance(record, dict) else {}
+
+
+def _deviation_host_timed(entry: dict) -> str:
+    """'host-timed 103 ms' when the Pi timestamped the interval; '' otherwise (never 'measured')."""
+    achieved = _deviation_record(entry, "achieved")
+    if achieved.get("measured_by") == "host_clock" and _finite_number(achieved.get("value")) is not None:
+        return "host-timed " + _deviation_quantity(achieved["value"], str(entry.get("unit") or ""))
+    return ""
+
+
+def _deviation_not_measured(entry: dict) -> bool:
+    recorded = _deviation_record(entry, "achieved").get("measured_by", entry.get("measured_by"))
+    return recorded in (None, "none", False)
+
+
+def deviation_display(entry: dict, *, several_variants: bool = False) -> dict[str, str]:
+    """The seven table cells of one sheet entry (§2.3 item 1), derived from the record alone.
+
+    The verb "achieved" never appears: the bench commands a value, the host
+    clock times an interval, and anything at the converter is "not measured".
+    ``several_variants`` prefixes the parameter with the entry's variant.
+    """
+    unit = str(entry.get("unit") or "")
+    label = _entry_label(entry, several_variants)
+    achievable, achieved = _deviation_record(entry, "achievable"), _deviation_record(entry, "achieved")
+    bench: list[str] = []
+    commanded = _deviation_quantity(achievable.get("value"), unit)
+    if commanded:
+        bench.append(f"commanded {commanded}" if _finite_number(achievable.get("value")) is not None else commanded)
+    if host_timed := _deviation_host_timed(entry):
+        bench.append(host_timed)
+    if bound := _deviation_bound(achievable.get("bound"), unit):
+        bench.append(_with_basis(bound if isinstance(achievable.get("bound"), str) else "bounded " + bound, achievable))
+    if _deviation_not_measured(entry):
+        bench.append("not measured at the converter")
+    measured_by = achieved.get("measured_by", entry.get("measured_by"))
+    measured_text = (BEST_EFFORT_MEASURED_BY.get(measured_by, measured_by.replace("_", " "))
+                     if isinstance(measured_by, str) and measured_by else "not measured")
+    mechanism = entry.get("mechanism")
+    mechanism_text = (BEST_EFFORT_MECHANISMS[mechanism][1] if mechanism in BEST_EFFORT_MECHANISMS
+                      else mechanism.replace("_", " ") if isinstance(mechanism, str) and mechanism else "not recorded")
+    notes = [text.strip().rstrip(".") for text in (entry.get("note"), achieved.get("note"))
+             if isinstance(text, str) and text.strip()]
+    return {"parameter": f"{label} ({unit})" if unit else label,
+            "clause_asks": _with_basis(_deviation_requirement(entry.get("required"), unit), entry.get("required")) or "not recorded",
+            "this_bench": "; ".join(bench) or "not recorded",
+            "mechanism": mechanism_text, "measured_by": measured_text,
+            "classification": BEST_EFFORT_CLASSIFICATION_LABELS[entry["classification"]],
+            "note": "; ".join(notes) or "—"}
+
+
+def deviation_sheet_rows(sheet: dict) -> list[list[str]]:
+    """Table rows in the sheet's column order; stored display cells are used, missing ones are derived."""
+    rows = []
+    for entry in sheet.get("deviations", []):
+        display = entry.get("display") if isinstance(entry.get("display"), dict) else deviation_display(entry)
+        rows.append([str(display.get(column, "")) for column in DEVIATION_COLUMNS])
+    return rows
+
+
+def _best_effort_counts(entries: list[dict]) -> dict[str, int]:
+    return {name: sum(1 for entry in entries if entry["classification"] == name) for name in BEST_EFFORT_CLASSIFICATIONS}
+
+
+def _best_effort_clause_phrase(sheet: dict) -> str:
+    return f"{BEST_EFFORT_STANDARD} clause {sheet['clause']}"
+
+
+def best_effort_summary_sentence(sheet: dict) -> str:
+    """One deterministic first-page sentence (§2.3 item 2) built from the entries by template.
+
+    "ISO 16750-2 clause N asks for {each parameter with its clause value}; this
+    bench commanded {each commanded value, grouped by mechanism} ({variant};
+    {one status phrase per entry}; {counts}; see the deviation sheet)."
+    """
+    entries = sheet["deviations"]
+    variants = _sheet_variants(sheet)
+    several = len(variants) > 1
+    asks = []
+    for entry in entries:
+        requirement = _deviation_requirement(entry.get("required"), str(entry.get("unit") or ""))
+        if requirement:
+            asks.append(f"{_deviation_label(entry['parameter'])} {requirement}")
+    asks = list(dict.fromkeys(asks))  # the variants of one clause ask for the same parameters
+    commanded: dict[str, list[str]] = {}
+    for entry in entries:
+        value = _deviation_quantity(_deviation_record(entry, "achievable").get("value"), str(entry.get("unit") or ""))
+        if not value:
+            continue
+        mechanism = entry.get("mechanism")
+        phrase = (BEST_EFFORT_MECHANISMS[mechanism][0] if mechanism in BEST_EFFORT_MECHANISMS
+                  else mechanism.replace("_", " ") if isinstance(mechanism, str) and mechanism else "an unrecorded mechanism")
+        commanded.setdefault(phrase, []).append(f"{_entry_label(entry, several)} {value}")
+    produced = _join_phrases([f"{_join_phrases(values)} as {phrase}" for phrase, values in commanded.items()])
+    details = ([f"variants {_join_phrases(variants)}"] if several else
+               [f"variant {sheet['variant']}"] if sheet.get("variant") else [])
+    for entry in entries:
+        label = _entry_label(entry, several)
+        unit = str(entry.get("unit") or "")
+        achievable = _deviation_record(entry, "achievable")
+        classification = entry["classification"]
+        host_timed = _deviation_host_timed(entry)
+        if classification == "met":
+            details.append(f"{label} met" + (f", {host_timed}" if host_timed else ""))
+        elif classification == "approximated":
+            details.append(f"{label} approximated")
+        elif classification == "not_met_but_documented":
+            bound = _deviation_bound(achievable.get("bound"), unit) or _deviation_quantity(achievable.get("value"), unit)
+            details.append(f"{label} not met" + (f", {_with_basis(bound, achievable)}" if bound else ""))
+        else:
+            details.append(f"{label} " + (f"{host_timed}, " if host_timed else "") + "not measured at the converter")
+    counts = _best_effort_counts(entries)
+    details.append(", ".join(f"{counts[name]} {BEST_EFFORT_COUNT_WORDS[name]}" for name in BEST_EFFORT_CLASSIFICATIONS))
+    details.append("see the deviation sheet")
+    return (f"{_best_effort_clause_phrase(sheet)} asks for {_join_phrases(asks) or 'no recorded parameter'}; "
+            f"this bench commanded {produced or 'no recorded value'} ({'; '.join(details)}).")
+
+
+def best_effort_limitations(sheet: dict) -> list[str]:
+    """Appendix bullets (§2.3 item 3): every not-met and not-measured row, then the mandatory statement."""
+    variants = _sheet_variants(sheet)
+    several = len(variants) > 1
+    phrases = ([f"variants {_join_phrases(variants)}"] if several else
+               [f"variant {sheet['variant']}"] if sheet.get("variant") else [])
+    for entry in sheet["deviations"]:
+        if entry["classification"] not in ("not_met_but_documented", "unknown_until_measured"):
+            continue
+        label = _entry_label(entry, several)
+        unit = str(entry.get("unit") or "")
+        achievable = _deviation_record(entry, "achievable")
+        if entry["classification"] == "unknown_until_measured":
+            value = _deviation_quantity(achievable.get("value"), unit)
+            recorded = [text for text in (
+                f"commanded {value}" if value and _finite_number(achievable.get("value")) is not None else value,
+                _deviation_host_timed(entry)) if text]
+            phrases.append(f"{label} not measured at the converter" + (f" ({', '.join(recorded)})" if recorded else ""))
+        else:
+            bound = _deviation_bound(achievable.get("bound"), unit) or _deviation_quantity(achievable.get("value"), unit)
+            requirement = _deviation_requirement(entry.get("required"), unit)
+            phrases.append(f"{label} not met, documented" + (f": {_with_basis(bound, achievable)}" if bound else "")
+                           + (f" against {requirement}" if requirement else ""))
+    if len(phrases) == (1 if (several or sheet.get("variant")) else 0):
+        phrases.append("every recorded parameter is met or approximated; see the deviation sheet")
+    return [f"{_best_effort_clause_phrase(sheet)}: " + "; ".join(phrases) + ".", BEST_EFFORT_STATEMENT]
+
+
+def _sheet_variants(sheet: dict) -> list[str]:
+    """The distinct variants a sheet's entries name, in order (several when one recipe ran a clause's variants)."""
+    recorded = sheet.get("variants") if isinstance(sheet.get("variants"), list) else []
+    named = [entry.get("variant") for entry in sheet.get("deviations") or [] if isinstance(entry, dict)]
+    return [v for v in dict.fromkeys([*recorded, *named]) if isinstance(v, str) and v]
+
+
+def build_best_effort_sheet(raw: dict) -> dict[str, Any]:
+    """Validate the recorded sheet and add what the report needs: display cells, counts, legend, sentence, statement.
+
+    Entries are kept verbatim (the export holds the sheet as recorded) and gain a
+    ``display`` block. Malformed entries are refused rather than guessed at. A
+    recipe that ran several variants of one clause (4.6.1.1 B and A, the 4.6.1.2
+    cases) records one combined list whose entries name their variant: the rows
+    are labelled with it and the title names them all instead of one.
+    """
+    if not isinstance(raw, dict):
+        raise ValueError("A best-effort sheet must be a mapping")
+    clause = raw.get("clause")
+    if not isinstance(clause, str) or not clause.strip():
+        raise ValueError("A best-effort sheet must name its clause")
+    entries = raw.get("deviations")
+    if not isinstance(entries, list) or not entries:
+        raise ValueError("A best-effort sheet needs at least one deviation entry")
+    variant = raw.get("variant")
+    if variant is not None and not isinstance(variant, str):
+        raise ValueError("A best-effort variant must be text or null")
+    variants = _sheet_variants(raw)
+    several = len(variants) > 1
+    if several:
+        variant = None  # several variants in one sheet: the entries carry their own, the title names them all
+    normalised = []
+    used_bases: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, dict) or not isinstance(entry.get("parameter"), str) or not entry["parameter"].strip():
+            raise ValueError("Each deviation entry must name its parameter")
+        if entry.get("classification") not in BEST_EFFORT_CLASSIFICATIONS:
+            raise ValueError(f"Deviation {entry['parameter']!r} has no classification among {BEST_EFFORT_CLASSIFICATIONS}")
+        for block in ("required", "achievable", "achieved"):
+            record = entry.get(block)
+            if record is not None and not isinstance(record, dict):
+                raise ValueError(f"Deviation {entry['parameter']!r}: {block} must be a mapping or null")
+            for key, value in (record or {}).items():
+                if isinstance(value, float) and not math.isfinite(value):
+                    raise ValueError(f"Deviation {entry['parameter']!r}: {block}.{key} is not finite")
+            raw_basis = record.get("basis") if isinstance(record, dict) else None
+            if isinstance(raw_basis, str) and raw_basis.strip():
+                for tag in _basis_tags(raw_basis.strip()):
+                    if tag not in used_bases:
+                        used_bases.append(tag)
+        if entry["classification"] == "met" and not (_deviation_basis(entry.get("achievable")) or _deviation_host_timed(entry)):
+            raise ValueError(f"Deviation {entry['parameter']!r} is met without a bound or host-timed value that justifies it")
+        normalised.append({**copy.deepcopy(entry), "display": deviation_display(entry, several_variants=several)})
+    clause = clause.strip()
+    title = f"Deviations from {BEST_EFFORT_STANDARD} clause {clause}"
+    if several:
+        title += f", variants {_join_phrases(variants)}"
+    elif variant:
+        title += f", variant {variant}"
+    sheet = {"standard": BEST_EFFORT_STANDARD, "clause": clause, "variant": variant, "variants": variants,
+             "test_type": raw.get("test_type"), "title": title,
+             "columns": list(DEVIATION_HEADERS),
+             "deviations": normalised, "counts": _best_effort_counts(normalised),
+             "bases": {tag: BEST_EFFORT_BASES.get(tag, "as recorded") for tag in used_bases},
+             "poll_note": BEST_EFFORT_POLL_NOTE, "statement": BEST_EFFORT_STATEMENT,
+             "procedure_statement": raw.get("statement") if isinstance(raw.get("statement"), str) else None}
+    sheet["summary_sentence"] = best_effort_summary_sentence(sheet)
+    return sheet
+
+
 def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[dict],
                        revision: str = "r0001") -> ReportModel:
     evidence_label = _evidence_label(plan, run)
@@ -937,15 +1744,23 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
         raise ValueError("Analysis measurement boundary does not match its acquisition")
     # Presentation annotations never mutate the preserved analysis evidence.
     points = copy.deepcopy(analysis["points"])
+    for point in points:
+        # Analyses issued before settled-dc-1.3 carry no per-point flag list.
+        point.setdefault("quality_flags", [])
     sequence = _sequence_annotations(points, raw_samples)
     search = run.get("method", {}).get("source_limit_search")
     voltage_sweep = run.get("method", {}).get("voltage_efficiency_sweep")
     startup_descent = run.get("method", {}).get("startup_descent")
     uvlo = analysis.get("uvlo_input_ramp")
+    profiles = analysis.get("supply_profiles")
+    # The deviation sheet (best-effort proposal §2.3): the analysis copy first, the
+    # method block for analyses issued before it was carried; nothing is inferred.
+    recorded_sheet = analysis.get("best_effort") or run.get("method", {}).get("best_effort")
+    best_effort = build_best_effort_sheet(recorded_sheet) if recorded_sheet else None
     comparison = _voltage_comparison(points, voltage_sweep) if voltage_sweep else []
     if voltage_sweep or startup_descent:
         _accepted_point_times(points, raw_samples)
-    executed = run.get("executed_point_ids") if search or voltage_sweep or startup_descent or uvlo else None
+    executed = run.get("executed_point_ids") if search or voltage_sweep or startup_descent or uvlo or profiles else None
     if executed is not None:
         known_ids = {p["point_id"] for p in points}
         if (not isinstance(executed, list) or any(not isinstance(pid, str) for pid in executed)
@@ -1061,6 +1876,22 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
                         f"(descending, then ascending) at a fixed {load_mA:g} mA load. Output-off steps are recorded states "
                         "under the declared UVLO convention, not faults. Transitions are bracketed between adjacent steps; "
                         "no exact threshold is claimed."))
+    if profiles:
+        for test in plan.recipe.tests:
+            detail = profiles.get(test.id)
+            if not detail:
+                continue
+            load_mA = detail["load_A"] * 1000
+            order = ("descending, then ascending" if detail["type"] == SLOW_SUPPLY_RAMP_TEST_TYPE
+                     else "the recovery level alternating with each low")
+            figures.append(FigureSpec(id=f"fig-profile-{test.id}", title=f"Output Voltage vs Input Level (ISO 16750-2 {detail['label']})",
+                x_key="Vin_V", y_key="Vout_V", x_label="Input Voltage (V)", y_label="Output Voltage (V)",
+                series=[FigureSeries(id=f"profile-{test.id}", label=f"{load_mA:g} mA load · declared level order",
+                    vin_target_V=None, iout_target_A=detail["load_A"], selection_key=f"profile-{test.id}",
+                    point_ids=[level["point_id"] for level in detail["levels"]])],
+                caption=f"{evidence_label}. {boundary}. Accepted DC means at each declared level in execution order ({order}) "
+                        f"at a fixed {load_mA:g} mA load. Output-off levels are recorded states under the declared policy, not "
+                        f"faults. {SUPPLY_PROFILE_CADENCE[0].upper() + SUPPLY_PROFILE_CADENCE[1:]}."))
     metrics: list[MetricResult] = []
     efficiency = [p for p in valid if p["efficiency_pct"] is not None]
     if efficiency:
@@ -1071,10 +1902,23 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
                        + peak.get("input_condition_label", f"{peak['vin_target_V']:g} V requested input")
                        + f", {peak['iout_target_A']:g} A requested load",
             selector={"point_id": peak["point_id"]}, point_ids=[peak["point_id"]], figure_ids=["fig-efficiency"]))
+    for point in valid:
+        if point.get("observation") != "enabled_no_load" or point.get("enabled_no_load_consumption_W") is None:
+            continue
+        offset = point.get("load_readback_offset_A")
+        metrics.append(MetricResult(id=f"{NO_LOAD_METRIC_PREFIX}{point['point_id']}",
+            label="Enabled no-load path input consumption", value=point["enabled_no_load_consumption_W"], unit="W",
+            formula="mean(Vin) * mean(Iin) with the load input OFF",
+            conditions=point.get("input_condition_label", f"{point['vin_target_V']:g} V requested input")
+                       + f"; load input {point.get('load_input_state', 'not recorded')}"
+                       + (f"; load current readback {offset:.4f} A retained as a load-off offset, not output current"
+                          if isinstance(offset, (int, float)) and not isinstance(offset, bool) else "")
+                       + "; efficiency not applicable; path consumption at the declared boundary, not module-only loss",
+            selector={"point_id": point["point_id"]}, point_ids=[point["point_id"]], figure_ids=[]))
     nominal = plan.dut.ratings.output_voltage_nominal_V
     for test in plan.recipe.tests:
-        if test.type == UVLO_TEST_TYPE:
-            continue  # a ramp through an expected-off region is not a regulation sweep
+        if test.type in PHASE_SCOPED_TEST_TYPES:
+            continue  # a ramp or staircase through an expected-off region is not a regulation sweep
         for vin in dict.fromkeys(test.input_voltage_targets_V):
             rows = [p for p in valid if p["test_id"] == test.id and p["vin_target_V"] == vin]
             if len(rows) >= 2 and len({p["iout_target_A"] for p in rows}) >= 2:
@@ -1124,15 +1968,25 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
                            + f"; {limit:g} A supply setting",
                 selector={"point_id": endpoint["point_id"]}, point_ids=[endpoint["point_id"]],
                 figure_ids=["fig-source-current"]))
+    cross_check = _readback_cross_check(plan, points)
+    metrics.extend(cross_check["metrics"])
     uncertainty = _apply_uncertainty(points, figures, metrics, analysis.get("uncertainty"))
     # Bound temperature channels contribute separate figures (no secondary axes).
     thermal_section = thermal_report_contribution(plan, run, points, raw_samples, series, evidence_label, boundary)
     figures.extend(thermal_section["figures"])
     metrics.extend(thermal_section["metrics"])
+    _flag_figure_captions(figures, points)
     for metric in metrics:
         metric.qualification = f"{observation} observation"
     summary = [f"{len(valid)} of {len(points)} requested operating points produced qualified {observation} DC results."]
+    summary.extend(_source_limit_statements(points))
     summary_evidence = []
+    implausible_summary, implausible_limitation = _implausible_ratio_statements(points)
+    if implausible_summary:
+        summary.append(implausible_summary)
+    if cross_check["summary"]:
+        summary_evidence.append(SummaryEvidence(paragraph_index=len(summary), metric_ids=cross_check["summary_metric_ids"]))
+        summary.append(cross_check["summary"])
     if uvlo:
         for test_id, detail in uvlo.items():
             off, on, hysteresis = detail["turn_off"], detail["turn_on"], detail["hysteresis"]
@@ -1148,6 +2002,23 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
             summary.append(" ".join(parts))
             for note in detail["notes"]:
                 summary.append(f"UVLO input ramp '{test_id}': {note}.")
+    if profiles:
+        for test_id, detail in profiles.items():
+            summary.append(f"ISO 16750-2 {detail['label']} '{test_id}' at {detail['load_A'] * 1000:g} mA. "
+                           + " ".join(detail["statements"]))
+            if detail["type"] == SLOW_SUPPLY_RAMP_TEST_TYPE:
+                off, on = detail.get("turn_off"), detail.get("turn_on")
+                parts = [(f"On the observation grid the output went off between {off['upper_V']:g} V (last in band) and "
+                          f"{off['lower_V']:g} V (first off) on the decrease." if off else
+                          "No off level was observed on the decrease, so no turn-off is bracketed."),
+                         (f"It came back between {on['lower_V']:g} V (last off) and {on['upper_V']:g} V (first in band) on the increase."
+                          if on else "No return to band is bracketed on the increase.")]
+                parts.append("These are observation-grid intervals; no threshold value is claimed.")
+                summary.append(" ".join(parts))
+    if best_effort:
+        # One templated sentence per best-effort clause and the mandatory statement (§2.3 item 2).
+        summary.append(best_effort["summary_sentence"])
+        summary.append(best_effort["statement"])
     if startup_descent:
         summary.append(f"This run checks continued operation after starting at {start_text}: the source is kept on while "
                        f"input voltage decreases in steps, with a {load_phrase}. It does not test cold start at the lower input voltages.")
@@ -1238,6 +2109,15 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
                            f"{m.uncertainty['status']}) at {m.conditions}.")
         else:
             summary.append(f"Highest observed path efficiency: {m.value:.2f}% at {m.conditions}.")
+    for m in metrics:
+        if not m.id.startswith(NO_LOAD_METRIC_PREFIX):
+            continue
+        summary_evidence.append(SummaryEvidence(paragraph_index=len(summary), metric_ids=[m.id]))
+        if m.uncertainty.get("expanded") is not None and m.uncertainty.get("label"):
+            summary.append(f"Enabled no-load path input consumption: {m.uncertainty['label']} (k = {m.uncertainty['k']:g}, "
+                           f"{m.uncertainty['status']}) at {m.conditions}.")
+        else:
+            summary.append(f"Enabled no-load path input consumption: {m.value:.4g} W (uncertainty unquantified) at {m.conditions}.")
     line_metrics = [m for m in metrics if m.id.startswith("line-span-")]
     if line_metrics:
         m = max(line_metrics, key=lambda item: item.value)
@@ -1268,17 +2148,24 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
         (f"MEASURED: these observations were acquired from the connected {plan.dut.identity.model}; scope is limited to this run."
          if evidence_label == "MEASURED" else
          f"SYNTHETIC: these observations come from a deterministic plant model, not the physical {plan.dut.identity.model}."),
-        "DUT ratings were supplied by the owner and are not verified against the sample label.",
+        (f"DUT ratings source: {plan.dut.ratings.origin.replace('_', ' ')}. "
+         + ("The DUT profile records sample-label verification by the operator."
+            if plan.dut.ratings.verified_from_sample_label else "Sample-label verification is not recorded.")),
         f"Measurement locations — {locations}. The declared boundary is {boundary}; path loss is not solely module heat.",
         uncertainty["note"],
-        "Topology, controller, isolation, calibration and protection behavior are unknown.",
-        ("No schematic or board photograph was supplied; bound temperature channels are described below."
-         if plan.bench.temperature_sensors else "No schematic, board photograph or temperature channels were supplied."),
+        "Construction details are recorded from the DUT profile; these DC observations do not verify topology, "
+        "controller identity or isolation. Protection behavior is not established by this run.",
+        ("Bound temperature channels and sensor metadata are described in the temperature section."
+         if plan.bench.temperature_sensors else "No temperature channels were bound for this acquisition."),
         f"This DC grid does not by itself qualify the claimed {plan.dut.ratings.output_power_rated_W:g} W rating, ripple, transient or thermal behavior.",
         ("At qualified no-load points, input consumption is reported; output power, path loss and efficiency are not evaluated because load-off current readback can contain an offset."
          if any(p["qualification"] == "valid" and p["iout_target_A"] == 0 for p in points) else
          "No qualified no-load point was acquired; enabled no-load input consumption was not measured in this run."),
     ]
+    if implausible_limitation:
+        limitations.append(implausible_limitation)
+    if cross_check["limitation"]:
+        limitations.append(cross_check["limitation"])
     provenance = {"formula_version": analysis["formula_version"],
                   "plan_hash": plan.plan_hash, "evidence_hash": analysis.get("evidence_hash"),
                   "software": run.get("software", {}), "data_source": run.get("data_source", "simulated"),
@@ -1299,16 +2186,25 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
     for note in run.get("metrology_limitations", []):
         limitations.append(str(note))
     limitations.extend(thermal_section["limitations"])
+    if best_effort:
+        # Every not-met and not-measured row reaches the appendix (§2.3 item 3), then the statement.
+        for note in best_effort_limitations(best_effort):
+            if note not in limitations:
+                limitations.append(note)
     return ReportModel(run_id=run["run_id"], analysis_id=analysis["analysis_id"], report_revision=revision,
         title=f"{plan.dut.identity.model} · DC–DC characterization", boundary=boundary,
         evidence_label=evidence_label,
         dut=plan.dut.model_dump(), bench=plan.bench.model_dump(),
         execution={"status": run.get("execution_status", "unknown"),
                    "shutdown": run.get("shutdown", {}), "scenario": run.get("scenario", "unknown"),
+                   # Acquisition span for the report's "Recorded" line, UTC as written in run.json.
+                   "created_utc": run.get("created_utc"),
+                   "finished_utc": run.get("finished_utc") or run.get("completed_utc"),
                    **({"source_limit_search": copy.deepcopy(search)} if search else {}),
                    **({"voltage_efficiency_sweep": copy.deepcopy(voltage_sweep), "voltage_comparison": comparison} if voltage_sweep else {}),
                    **({"startup_descent": copy.deepcopy(startup_descent)} if startup_descent else {}),
                    **({"uvlo_input_ramp": copy.deepcopy(uvlo)} if uvlo else {}),
+                   **({"supply_profiles": copy.deepcopy(profiles)} if profiles else {}),
                    **({"executed_point_ids": list(executed)} if executed is not None else {})},
         coverage=analysis["coverage"], points=points, metrics=metrics, figures=figures,
         tables=[TableSpec(id="table-points", title="All requested operating points", columns=CSV_FIELDS,
@@ -1318,7 +2214,7 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
         method=_report_method(plan, run, analysis, raw_samples),
         prose=[analysis["aggregation"], analysis["sign_convention"]],
         limitations=limitations, raw_samples=dict(grouped), provenance=provenance, uncertainty=uncertainty,
-        thermal=thermal_section["model"])
+        thermal=thermal_section["model"], best_effort=best_effort)
 
 
 def analyze_run(run_dir: Path, *, version: str = FORMULA_VERSION) -> Path:

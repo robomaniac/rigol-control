@@ -1,20 +1,50 @@
 """Publication gate (PUB-01): approval record, redaction, noindex, no git/gh/network, source untouched."""
+import base64
 import hashlib
+import io
 import json
 import os
+import re
 import socket
 import subprocess
+from pathlib import Path
 
 import pytest
 import yaml
+from PIL import Image
 
 from dcdc_bench import cli
-from dcdc_bench.publish import PRIVATE_IPV4, Redactor, load_approval, publish_run
+from dcdc_bench.attachments import AssetStore
+from dcdc_bench.publish import LOCAL_HOSTNAME, PRIVATE_IPV4, Redactor, load_approval, publish_run
 from dcdc_bench.storage import RunStore, verify_integrity
 
 RUN_ID = "20260927T120000.000000Z_real_abc123"
 IP, HOST, SERIAL_S, SERIAL_L = "192.168.77.42", "load-bench.local", "DP8G0000FAKE1", "DL3A0000FAKE2"
 PRIVATE_PATH = "/home/tester/rigol-control/dcdc-bench/runs/real-extended/" + RUN_ID
+# A real Plotly bundle excerpt: every ``.local``/``.home`` here is JavaScript member access.
+PLOTLY_EXCERPT = ('!function(){function bse(e){this.local=this.regionalOptions[e]||this.regionalOptions[""]}'
+                  'var i=this._validate(e,t,r,ua.local.invalidDate||ua.regionalOptions[""].invalidDate);'
+                  'Xa.zoomReset={name:"reset",attr:"zoom",val:"reset",icon:Ya.home,click:Tf};'
+                  'this.removeAttributeNS(z.space,z.local);if(t.calendar()!==this)throw hc.local.invalidFormat}();')
+
+
+def raster(kind="png", size=(8, 6), *, gps=False) -> bytes:
+    """A small real PNG/JPEG; with ``gps`` an EXIF block carrying a GPS IFD, camera model and body serial."""
+    image = Image.new("RGB", size, (200, 40, 20) if kind == "png" else (10, 120, 200))
+    params = {}
+    if gps:
+        exif = Image.Exif()
+        exif[0x8825] = {1: "N", 2: (37.0, 47.0, 30.0), 3: "W", 4: (122.0, 25.0, 0.0)}
+        exif[0x0110] = "Pixel 9 Pro"
+        exif[0xA431] = "CAMSERIAL0042"
+        params["exif"] = exif.tobytes()
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG" if kind == "png" else "JPEG", **params)
+    return buffer.getvalue()
+
+
+BOARD_PNG = raster("png")
+LAB_JPG = raster("jpg", gps=True)
 
 
 def tree_hash(folder):
@@ -23,6 +53,26 @@ def tree_hash(folder):
         digest.update(str(path.relative_to(folder)).encode())
         digest.update(path.read_bytes())
     return digest.hexdigest()
+
+
+def issue_test_report(report):
+    """Finalize fixture output hashes after constructing its intended document.
+
+    Tests that deliberately corrupt issued files do not call this helper.
+    """
+    path = report / "build_manifest.json"
+    manifest = json.loads(path.read_text())
+    sha = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
+    for fmt in ("html", "pdf"):
+        artifact = report / f"report.{fmt}"
+        if artifact.is_file():
+            manifest.setdefault("artifacts", {}).setdefault(fmt, {})["sha256"] = sha(artifact)
+    manifest["model_sha256"] = sha(report / "report_model.json")
+    manifest["exports"] = {p.name: {"sha256": sha(p)} for p in (report / "exports").iterdir() if p.is_file()}
+    manifest["figures"] = [{"id": p.stem, "svg_sha256": sha(p),
+                             **({"pdf_sha256": sha(p.with_suffix('.pdf'))} if p.with_suffix('.pdf').exists() else {})}
+                            for p in (report / "figures").glob("*.svg")]
+    path.write_text(json.dumps(manifest))
 
 
 def synthetic_run(tmp_path, *, revision="r0001", with_pdf=True, build_status="success"):
@@ -36,12 +86,12 @@ def synthetic_run(tmp_path, *, revision="r0001", with_pdf=True, build_status="su
                      {"bench": {"source": {"endpoint": None}, "load": {"endpoint": f"TCPIP0::{HOST}::INSTR"}}}, run)
     store.append("samples", {"sample_id": "s1", "value": 12.1})
     originals = run_dir / "attachments" / "originals"
-    (originals / "board.png").write_bytes(b"\x89PNG fake board photo")
-    (originals / "private-lab.jpg").write_bytes(b"\xff\xd8 fake private photo")
+    (originals / "board.png").write_bytes(BOARD_PNG)
+    (originals / "private-lab.jpg").write_bytes(LAB_JPG)
     manifest = {"assets": [
-        {"asset_id": "board-photo", "path": "originals/board.png", "sha256": hashlib.sha256(b"\x89PNG fake board photo").hexdigest(),
+        {"asset_id": "board-photo", "path": "originals/board.png", "sha256": hashlib.sha256(BOARD_PNG).hexdigest(),
          "caption": f"Board photo taken at {PRIVATE_PATH}/attachments", "role": "board_photo"},
-        {"asset_id": "lab-photo", "path": "originals/private-lab.jpg", "sha256": hashlib.sha256(b"\xff\xd8 fake private photo").hexdigest(),
+        {"asset_id": "lab-photo", "path": "originals/private-lab.jpg", "sha256": hashlib.sha256(LAB_JPG).hexdigest(),
          "caption": "Private lab photo", "role": "setup_photo"}]}
     (run_dir / "attachments" / "manifest.json").write_text(json.dumps(manifest))
     (run_dir / "scpi.jsonl").write_text(
@@ -72,6 +122,7 @@ def synthetic_run(tmp_path, *, revision="r0001", with_pdf=True, build_status="su
     (report / "figures" / "fig-efficiency.pdf").write_bytes(b"%PDF-1.4 fake")
     if with_pdf:
         (report / "report.pdf").write_bytes(b"%PDF-1.4 fake report " + SERIAL_S.encode())
+    issue_test_report(report)
     return run_dir
 
 
@@ -173,13 +224,18 @@ def test_redacted_copy_strips_endpoints_paths_serials_and_keeps_numbers(tmp_path
     assets = json.loads(published["attachments/manifest.json"].read_text())["assets"]
     assert [a["asset_id"] for a in assets] == ["board-photo"] and assets[0]["path"] == "attachments/board.png"
     assert PRIVATE_PATH not in assets[0]["caption"]
-    assert published["attachments/board.png"].read_bytes() == b"\x89PNG fake board photo"
+    copy = Image.open(io.BytesIO(published["attachments/board.png"].read_bytes()))
+    assert list(copy.getdata()) == list(Image.open(io.BytesIO(BOARD_PNG)).getdata()) and dict(copy.getexif()) == {}
+    assert manifest["files"]["attachments/board.png"]["metadata_stripped"] is True
+    assert manifest["files"]["attachments/board.png"]["listed_in"] == "attachments/manifest.json"
+    assert assets[0]["listed_in"] == "attachments/manifest.json" and assets[0]["metadata_stripped"] is True
 
 
 def test_noindex_retained_by_default_and_injected_if_missing(tmp_path):
     run_dir = synthetic_run(tmp_path)
     html = run_dir / "reports/r0001/report.html"
     html.write_text(html.read_text().replace('<meta name="robots" content="noindex,nofollow">', ""))
+    issue_test_report(html.parent)
     # The synthetic fixture edits its own report before publishing; re-finalize is not needed since reports are not in integrity.
     target = publish_run(run_dir, "r0001", tmp_path / "public", approval_file(tmp_path))
     published = (target / "report.html").read_text()
@@ -288,3 +344,207 @@ def test_successful_build_publishes_without_the_override_and_records_it(tmp_path
     target = publish_run(synthetic_run(tmp_path), "r0001", tmp_path / "public", approval_file(tmp_path))
     manifest = json.loads((target / "publication_manifest.json").read_text())
     assert manifest["approval"]["allow_unverified"] is False and manifest["build_status"] == "success"
+    assert manifest["source_verification"]["acquisition_integrity"] == "verified"
+    assert {"report.html", "report.pdf", "report_model.json", "exports/points.csv", "figures/fig-efficiency.svg"} <= set(
+        manifest["source_verification"]["issued_hashes_verified"])
+
+
+@pytest.mark.parametrize("relative", ["raw/samples.jsonl", "run.json", "reports/r0001/report.html",
+    "reports/r0001/report.pdf", "reports/r0001/report_model.json", "reports/r0001/exports/points.csv",
+    "reports/r0001/figures/fig-efficiency.svg", "reports/r0001/figures/fig-efficiency.pdf"])
+@pytest.mark.parametrize("allow_unverified", [False, True])
+def test_publication_rejects_changed_evidence_and_issued_artifacts_before_writing(tmp_path, relative, allow_unverified):
+    run_dir = synthetic_run(tmp_path)
+    source = run_dir / relative
+    source.write_bytes(source.read_bytes() + b"\nchanged after issuance\n")
+    before = tree_hash(run_dir)
+    with pytest.raises(ValueError, match="integrity mismatch"):
+        publish_run(run_dir, "r0001", tmp_path / "public", approval_file(tmp_path, allow_unverified=allow_unverified))
+    assert not (tmp_path / "public").exists()
+    assert tree_hash(run_dir) == before
+
+
+def test_successful_build_without_issued_html_hash_requires_explicit_unverified_override(tmp_path):
+    run_dir = synthetic_run(tmp_path)
+    path = run_dir / "reports/r0001/build_manifest.json"
+    manifest = json.loads(path.read_text())
+    del manifest["artifacts"]["html"]["sha256"]
+    path.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="no recorded HTML hash"):
+        publish_run(run_dir, "r0001", tmp_path / "public", approval_file(tmp_path))
+    assert not (tmp_path / "public").exists()
+    target = publish_run(run_dir, "r0001", tmp_path / "public", approval_file(tmp_path, allow_unverified=True))
+    record = json.loads((target / "publication_manifest.json").read_text())
+    assert "report.html" not in record["source_verification"]["issued_hashes_verified"]
+
+
+def sensor_placement_revision(tmp_path, photo, name="private-lab-photo.png"):
+    """A finalized run whose r0001 carries sensor markers on a photograph uploaded after finalization,
+    with the real assets/ copy, print SVG and HTML section the renderer produces."""
+    from dcdc_bench.annotations import annotation_document, annotations_file
+    from dcdc_bench.reporting.sensor_placement import with_sensor_placement
+    run_dir = synthetic_run(tmp_path)
+    entry = AssetStore(run_dir).add(photo, name, caption="Case top, sensors under tape; bench at rigol.local")
+    report = run_dir / "reports" / "r0001"
+    document = annotation_document(entry["sha256"], [{"sensor_id": "TC1", "x_norm": 0.25, "y_norm": 0.5, "label": "Case top"}])
+    (report / "annotations.json").write_text(json.dumps(annotations_file(run_dir, document)))
+    body = with_sensor_placement("## Summary\n\ntext\n\n**Traceability:** Run ID x\n", report, str)
+    section = body.split("```{=html}", 1)[1].split("```", 1)[0]
+    html = report / "report.html"
+    html.write_text(html.read_text().replace("</body>", section + "</body>"))
+    issue_test_report(report)
+    return run_dir, entry
+
+
+def test_sensor_placement_photograph_follows_the_attachment_allowlist(tmp_path):
+    photo = raster("png", gps=True)
+    run_dir, entry = sensor_placement_revision(tmp_path, photo)
+    sha, prefix = entry["sha256"], base64.b64encode(photo)[:96]
+    before = tree_hash(run_dir)
+    # Empty allowlist: the photograph is in no published file; the section keeps its markers and table.
+    target = publish_run(run_dir, "r0001", tmp_path / "withheld", approval_file(tmp_path, attachments=[]))
+    assert tree_hash(run_dir) == before
+    published = {p.relative_to(target).as_posix(): p for p in target.rglob("*") if p.is_file()}
+    assert not any(sha in name for name in published) and "figures/sensor-placement.svg" not in published
+    assert not (target / "assets").exists()
+    for name, path in published.items():
+        data = path.read_bytes()
+        assert prefix not in data and photo not in data and b"CAMSERIAL0042" not in data, name
+    html = published["report.html"].read_text()
+    block = html.split('class="sensor-placement-block"', 1)[1].split("</figure>", 1)[0]
+    assert f"assets/{sha}" not in html and "<img" not in block
+    assert "Photograph withheld from publication" in block and 'data-withheld="attachment"' in block
+    assert 'class="sensor-marker-table"' in html and 'data-sensor-id="TC1"' in html and 'class="sensor-marker"' in html
+    assert "rigol.local" not in html and "[REDACTED:hostname]" in html
+    manifest = json.loads(published["publication_manifest.json"].read_text())
+    excluded_files = {e.get("file") for e in manifest["excluded"]}
+    assert {"reports/r0001/figures/sensor-placement.svg", f"reports/r0001/assets/{sha}.png"} <= excluded_files
+    assert manifest["attachments"]["withheld_images"] == sorted([f"assets/{sha}.png", "figures/sensor-placement.svg"])
+    assert manifest["files"]["report.html"]["images_withheld"] == 1
+    assert "figures/sensor-placement.svg" not in manifest["files"]
+    assert any(e.get("attachment_id") == entry["asset_id"] and e["listed_in"] == "attachments/revisions/1.json"
+               for e in manifest["excluded"])
+    # Allowlisting the documentation-revision asset publishes it everywhere, without its metadata.
+    target = publish_run(run_dir, "r0001", tmp_path / "allowed", approval_file(tmp_path, attachments=[entry["asset_id"]]))
+    assert tree_hash(run_dir) == before
+    published = {p.relative_to(target).as_posix(): p for p in target.rglob("*") if p.is_file()}
+    assert {f"assets/{sha}.png", "figures/sensor-placement.svg", f"attachments/{sha}.png"} <= set(published)
+    source_pixels = list(Image.open(io.BytesIO(photo)).getdata())
+    for name in (f"assets/{sha}.png", f"attachments/{sha}.png"):
+        copy = Image.open(io.BytesIO(published[name].read_bytes()))
+        assert dict(copy.getexif()) == {} and list(copy.getdata()) == source_pixels, name
+    svg = published["figures/sensor-placement.svg"].read_text()
+    payload = re.search(r"base64,([A-Za-z0-9+/=]+)", svg).group(1)
+    inner = Image.open(io.BytesIO(base64.b64decode(payload)))
+    assert dict(inner.getexif()) == {} and list(inner.getdata()) == source_pixels and prefix.decode() not in svg
+    html = published["report.html"].read_text()
+    assert f'src="assets/{sha}.png"' in html and "withheld" not in html
+    manifest = json.loads(published["publication_manifest.json"].read_text())
+    assert manifest["attachments"]["withheld_images"] == [] and "images_withheld" not in manifest["files"]["report.html"]
+    for name in (f"assets/{sha}.png", f"attachments/{sha}.png", "figures/sensor-placement.svg"):
+        assert manifest["files"][name]["metadata_stripped"] is True, name
+    assert manifest["files"][f"attachments/{sha}.png"]["listed_in"] == "attachments/revisions/1.json"
+    assert manifest["files"]["figures/sensor-placement.svg"]["embedded_attachments"] == [sha]
+    revision_file = run_dir / "attachments/revisions/1.json"
+    assert manifest["source_hashes"]["attachments/revisions/1.json"] == hashlib.sha256(revision_file.read_bytes()).hexdigest()
+
+
+def test_published_photographs_carry_no_exif_gps_and_originals_stay_untouched(tmp_path):
+    run_dir = synthetic_run(tmp_path)
+    original_path = run_dir / "attachments/originals/private-lab.jpg"
+    original = original_path.read_bytes()
+    assert 0x8825 in Image.open(io.BytesIO(original)).getexif() and b"CAMSERIAL0042" in original
+    target = publish_run(run_dir, "r0001", tmp_path / "public", approval_file(tmp_path, attachments=["board-photo", "lab-photo"]))
+    copy = (target / "attachments/private-lab.jpg").read_bytes()
+    image = Image.open(io.BytesIO(copy))
+    assert dict(image.getexif()) == {} and b"CAMSERIAL0042" not in copy and image.size == (8, 6)
+    assert original_path.read_bytes() == original
+    manifest = json.loads((target / "publication_manifest.json").read_text())
+    record = manifest["files"]["attachments/private-lab.jpg"]
+    assert record["metadata_stripped"] is True and "EXIF" in record["warning"]
+    assert record["sha256_published"] == hashlib.sha256(copy).hexdigest() != record["sha256_source"]
+    assert "EXIF" in manifest["attachments"]["metadata_policy"]
+
+
+def test_plotly_runtime_is_left_intact_while_prose_hostnames_are_redacted(tmp_path):
+    run_dir = synthetic_run(tmp_path)
+    report = run_dir / "reports/r0001"
+    html = report / "report.html"
+    html.write_text(html.read_text().replace(
+        "</body>", '<figcaption>Load at rigol.local, source at bench.rigol.local; docs at sub.example.com</figcaption>'
+        f'<script id="dcdc-plotly-runtime">{PLOTLY_EXCERPT}</script></body>'))
+    built = json.loads((report / "build_manifest.json").read_text())
+    built["plotly_js_sha256"] = hashlib.sha256(PLOTLY_EXCERPT.encode()).hexdigest()
+    built["artifacts"]["html"]["sha256"] = hashlib.sha256(html.read_bytes()).hexdigest()
+    (report / "build_manifest.json").write_text(json.dumps(built))
+    target = publish_run(run_dir, "r0001", tmp_path / "verified", approval_file(tmp_path))
+    published = (target / "report.html").read_text()
+    assert PLOTLY_EXCERPT in published, "the vendor runtime is byte-identical"
+    assert "rigol.local" not in published and "sub.example.com" in published
+    assert published.count("[REDACTED:hostname]") == 2
+    manifest = json.loads((target / "publication_manifest.json").read_text())
+    record = manifest["files"]["report.html"]
+    assert record["plotly_runtime"] == {"sha256": built["plotly_js_sha256"], "verified": True, "redacted": False}
+    assert record["redactions"]["hostname"] == 2 and manifest["redaction"]["totals"]["hostname"] == 2
+    # Without a matching recorded hash the block is not trusted: redacted like any text, and flagged.
+    del built["plotly_js_sha256"]
+    (report / "build_manifest.json").write_text(json.dumps(built))
+    target = publish_run(run_dir, "r0001", tmp_path / "unverified", approval_file(tmp_path))
+    manifest = json.loads((target / "publication_manifest.json").read_text())
+    assert manifest["files"]["report.html"]["plotly_runtime"]["verified"] is False
+    assert PLOTLY_EXCERPT not in (target / "report.html").read_text()
+
+
+def test_local_hostname_pattern_skips_javascript_member_access():
+    for text in ("ua.local.invalidDate", "this.local=this.regionalOptions", "$m.local.invalidYear", "z.local?ne:Z",
+                 "hc.local.unexpectedText||x", "this.local(1)", "a.home[0]", "x-.local", "foo.local-bar"):
+        assert LOCAL_HOSTNAME.search(text) is None, text
+    for text in ("at rigol.local,", "rigol.local", "TCPIP0::rigol.local::INSTR", '"bench.rigol.local"', ">dp832.lan<",
+                 "load-bench.home.", "host=rigol.internal;", "(rigol.localdomain)"):
+        assert LOCAL_HOSTNAME.search(text) is not None, text
+    cleaned, counts = Redactor(endpoints=set(), serials=set(), paths=set()).text("at bench.rigol.local, not sub.example.com")
+    assert cleaned == "at [REDACTED:hostname], not sub.example.com" and counts == {"hostname": 1}
+
+
+def test_symlinked_report_files_are_refused_not_followed(tmp_path):
+    run_dir = synthetic_run(tmp_path)
+    secret = tmp_path / "id_ed25519"
+    secret.write_text("PRIVATE KEY MATERIAL")
+    planted = run_dir / "reports/r0001/figures/planted.svg"
+    planted.symlink_to(secret)
+    with pytest.raises(ValueError, match="symbolic link"):
+        publish_run(run_dir, "r0001", tmp_path / "public", approval_file(tmp_path))
+    assert not [p for p in (tmp_path / "public").rglob("*") if p.is_file() and b"PRIVATE KEY" in p.read_bytes()]
+    planted.unlink()
+    (run_dir / "reports/r0001/report_profile.json").symlink_to(secret)
+    with pytest.raises(ValueError, match="symbolic link"):
+        publish_run(run_dir, "r0001", tmp_path / "public2", approval_file(tmp_path))
+
+
+@pytest.mark.parametrize("text,match", [
+    ("run_id: &a x\nreport_revision: r0001\napprover: *a\ndate: '2026-09-27'\npublic: false\n", "anchors"),
+    ("attachments: [*a]\nrun_id: x\n", "aliases"),
+    ("a: &a [x, x, x, x, x, x, x, x, x]\nb: &b [*a, *a, *a, *a, *a, *a, *a, *a, *a]\nattachments: *b\n", "anchors"),
+    ("x: " + "[" * 40 + "]" * 40 + "\n", "deeper"),
+    ("run_id: x\nreport_revision: r0001\napprover: A\ndate: 2026-09-27T10:00:00\npublic: false\n", "invalid"),
+])
+def test_approval_yaml_anchors_aliases_deep_nesting_and_datetimes_are_refused(tmp_path, text, match):
+    path = tmp_path / "approval.yaml"
+    path.write_text(text)
+    with pytest.raises(ValueError, match=match):
+        load_approval(path)
+
+
+def test_documented_approval_example_loads_with_its_unquoted_date(tmp_path):
+    doc = (Path(__file__).resolve().parents[1] / "docs" / "doctor-and-publication.md").read_text()
+    block = doc.split("```yaml", 1)[1].split("```", 1)[0]
+    assert "date: 2026-09-27" in block, "the documented example keeps an unquoted calendar date"
+    path = tmp_path / "approval.yaml"
+    path.write_text(block)
+    approval = load_approval(path)
+    assert approval.date == "2026-09-27" and approval.report_revision == "r0002"
+    assert approval.attachments == ["board-photo"] and approval.public is False
+    path.write_text("run_id: x\nreport_revision: r0001\napprover: A\ndate: 2026-09-27\npublic: false\nattachments: "
+                    + json.dumps([f"a{i}" for i in range(101)]) + "\n")
+    with pytest.raises(ValueError, match="at most 100"):
+        load_approval(path)

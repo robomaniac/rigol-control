@@ -153,9 +153,9 @@ def test_rendered_section_escapes_untrusted_text_and_positions_markers_from_norm
     report_dir = finalized / "reports/r0002"
     report_dir.mkdir(parents=True)
     (report_dir / "annotations.json").write_text(json.dumps(annotations_file(finalized, doc)))
-    body = "## Summary\n\nissued text\n\n**Run:** fixture  \n**Analysis:** a-1\n"
+    body = "## Summary\n\nissued text\n\n**Traceability:** Run ID fixture; analysis a-1\n"
     result = with_sensor_placement(body, report_dir, _md)
-    assert result.index("## Sensor placement") < result.index("**Run:** fixture")
+    assert result.index("## Sensor placement") < result.index("**Traceability:** Run ID fixture")
     assert result.startswith("## Summary")
     html_block = result.split("```{=html}", 1)[1].split("```", 1)[0]
     for forbidden in ("<script>", "<img src=x", 'onerror="alert', "</script>"):

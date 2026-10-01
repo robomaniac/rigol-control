@@ -11,7 +11,7 @@ from PIL import Image
 
 from dcdc_bench import annotation_editor
 from dcdc_bench.annotation_editor import (asset_summary, asset_url, eligible_jobs, existing_annotations,
-                                          image_assets)
+                                          image_assets, typed_marker)
 from dcdc_bench.annotations import (AnnotationError, annotation_document, marker_overlay_svg, nearest_marker,
                                     new_sensor_id, normalized_point, nudge_marker)
 from dcdc_bench.attachments import AssetHashMismatch, AssetStore, AttachmentRejected
@@ -184,9 +184,11 @@ class Widget:
         self.kind, self.args, self.kwargs = kind, args, kwargs
         self.text = args[0] if args and isinstance(args[0], str) else ""
         self.value, self.content, self.options, self.enabled = kwargs.get("value"), kwargs.get("content"), None, True
+        self.css = ""
         registry.append(self)
 
     def classes(self, *args, **kwargs):
+        self.css = " ".join(part for part in (self.css, *(arg for arg in args if isinstance(arg, str))) if part)
         return self
 
     def props(self, *args, **kwargs):
@@ -224,6 +226,12 @@ class Widget:
 
     def disable(self):
         self.enabled = False
+
+    def set_visibility(self, visible):
+        self.visible = visible
+
+    def tooltip(self, text):
+        return self
 
 
 class FakeUI:
@@ -270,6 +278,25 @@ class FakeFile:
         return self._data
 
 
+class SizedFile(FakeFile):
+    """Upload object that also reports its size and streams chunks, like NiceGUI's FileUpload."""
+
+    def __init__(self, name, data, size=None, chunk=1024):
+        super().__init__(name, data)
+        self._size, self._chunk = size, chunk
+
+    def size(self):
+        return len(self._data) if self._size is None else self._size
+
+    def iterate(self, *, chunk_size=None):
+        step = chunk_size or self._chunk
+
+        async def chunks():
+            for start in range(0, len(self._data), step):
+                yield self._data[start:start + step]
+        return chunks()
+
+
 def test_editor_page_drives_select_upload_place_nudge_and_save_without_a_server(service, monkeypatch):
     """The page's callbacks against the real JobService; NiceGUI is replaced by a recording stub."""
     import asyncio
@@ -285,8 +312,14 @@ def test_editor_page_drives_select_upload_place_nudge_and_save_without_a_server(
         await ui.pages["/annotations"]()
         jobs = [w for w in ui.widgets if w.kind == "select" and w.kwargs.get("label") == "Finished run"][-1]
         assert job_id in jobs.args[0]
+        # UX M11: every option says whether the run is simulated; the uploader waits for a chosen run; no empty notice box.
+        assert jobs.args[0][job_id].count("Simulation · synthetic data") == 1 and jobs.args[0][job_id].endswith("Complete")
+        notice_box = [w for w in ui.widgets if w.kind == "label" and w.text == ""][-1]
+        assert notice_box.visible is False and ui.last("upload").enabled is False
         await jobs.kwargs["on_change"](SimpleNamespace(value=job_id))
-        assert any("No saved sensor markers" in w.text for w in ui.widgets if w.kind == "label")
+        assert ui.last("upload").enabled is True
+        assert notice_box.visible is True and notice_box.text.startswith("Simulation run — photographs describe a physical setup")
+        assert "No saved sensor markers" in notice_box.text
         assert ui.last("button", "Save as new report revision").enabled is False
         # Upload: validated by content, stored by hash, offered in the photograph list.
         await ui.last("upload").kwargs["on_upload"](SimpleNamespace(file=FakeFile("Case top.PNG", png())))
@@ -295,6 +328,12 @@ def test_editor_page_drives_select_upload_place_nudge_and_save_without_a_server(
         await ui.last("upload").kwargs["on_upload"](SimpleNamespace(file=FakeFile("evil.svg",
             b'<svg xmlns="http://www.w3.org/2000/svg" width="9" height="9"><script>1</script></svg>')))
         assert ui.notifications[-1][1] == "negative" and "svg_active_content" in ui.notifications[-1][0]
+        # The byte limit is enforced on the server before the body is assembled; a rejected upload leaves no revision.
+        monkeypatch.setattr(annotation_editor, "UPLOAD_LIMIT", 64)
+        await ui.last("upload").kwargs["on_upload"](SimpleNamespace(file=SizedFile("huge.png", png(), size=10 ** 9)))
+        assert ui.notifications[-1][1] == "negative" and "too_large" in ui.notifications[-1][0]
+        monkeypatch.setattr(annotation_editor, "UPLOAD_LIMIT", 4 * len(png()))
+        assert not (path / "attachments/revisions/2.json").exists()
         picker.kwargs["on_change"](SimpleNamespace(value=picker.value))
         image = ui.last("interactive_image")
         assert image.args[0].startswith(f"/jobs/{job_id}/files/run/attachments/originals/")
@@ -330,4 +369,141 @@ def test_editor_page_drives_select_upload_place_nudge_and_save_without_a_server(
     assert service.status(job_id)["state"] == "report-queued"
     service.dispatch_reports()
     assert service.status(job_id)["state"] == "queued" and service.status(job_id).get("action") == "report-only"
+    verify_integrity(path)
+
+
+def test_upload_size_is_enforced_server_side_before_the_body_is_assembled():
+    import asyncio
+    from dcdc_bench.annotation_editor import read_upload
+    data = png()
+
+    class Untouchable(SizedFile):
+        async def read(self):
+            pytest.fail("read() must not run for an upload that declares an oversized body")
+
+        def iterate(self, **kwargs):
+            pytest.fail("iterate() must not run for an upload that declares an oversized body")
+
+    with pytest.raises(AttachmentRejected) as info:
+        asyncio.run(read_upload(Untouchable("big.png", data, size=len(data) + 1), limit=len(data)))
+    assert info.value.reason == "too_large"
+    delivered = []
+
+    class Streaming(SizedFile):
+        def size(self):
+            return 0  # an untrustworthy size: the stream itself is bounded
+
+        def iterate(self, *, chunk_size=None):
+            async def chunks():
+                for index in range(100):
+                    delivered.append(index)
+                    yield b"x" * 1024
+            return chunks()
+
+    with pytest.raises(AttachmentRejected) as info:
+        asyncio.run(read_upload(Streaming("big.png", b""), limit=4096))
+    assert info.value.reason == "too_large" and len(delivered) == 5, "aborted at the first chunk past the limit"
+    assert asyncio.run(read_upload(SizedFile("ok.png", data, chunk=7), limit=len(data))) == data
+    assert asyncio.run(read_upload(FakeFile("plain.png", data), limit=len(data))) == data
+    with pytest.raises(AttachmentRejected):
+        asyncio.run(read_upload(FakeFile("plain.png", data), limit=len(data) - 1))
+    assert asyncio.run(read_upload(FakeFile("plain.png", data))) == data, "the default limit is the attachment ceiling"
+
+
+def test_attachment_validation_runs_outside_the_service_lock(service, monkeypatch):
+    from dcdc_bench import attachments
+    job_id, job, path = finished_job(service, monkeypatch)
+    observed, real = [], attachments.validate_asset
+
+    def spy(data, name):
+        observed.append(service.lock.is_locked)
+        return real(data, name)
+    monkeypatch.setattr(attachments, "validate_asset", spy)
+    entry = service.add_attachment(job_id, "photo.png", png())
+    assert observed == [False], "validated exactly once, before the service lock is taken"
+    assert entry["added_in_revision"] == 1 and (path / "attachments/revisions/1.json").exists()
+    verify_integrity(path)
+    # The store re-binds a pre-validated result by hash: a result for other bytes is ignored and re-validated.
+    other = png(41, 30)
+    observed.clear()
+    second = AssetStore(path).add(other, "other.png", validated={**entry, "original_name": "other.png"})
+    assert observed == [False] and second["sha256"] == hashlib.sha256(other).hexdigest()
+    observed.clear()
+    again = AssetStore(path).add(other, "other.png", validated=dict(second))
+    assert observed == [] and again == second, "a matching pre-validation is trusted without a second parse"
+
+
+def test_typed_marker_validates_coordinates_in_operator_words_and_numbers_the_sensor():
+    """Codex review item 3, the pure part: typed coordinates become a marker exactly as a saved one would be."""
+    assert typed_marker([], 0.5, 0.5) == {"sensor_id": "S1", "x_norm": 0.5, "y_norm": 0.5, "label": ""}
+    assert typed_marker([], "0.25", 1) == {"sensor_id": "S1", "x_norm": 0.25, "y_norm": 1.0, "label": ""}
+    assert typed_marker([{"sensor_id": "S1"}, {"sensor_id": "TC2"}], 0.1234567, 0)["sensor_id"] == "S3"
+    assert typed_marker([], 0.1234567, 0)["x_norm"] == 0.123457, "rounded like a pointer placement"
+    for x, y, fragment in ((None, 0.5, "Type the x coordinate"), ("abc", 0.5, "Type the x coordinate"),
+                           (0.5, "", "Type the y coordinate"), (1.5, 0.5, "x coordinate must be from 0 to 1; 1.5"),
+                           (0.5, -0.01, "y coordinate must be from 0 to 1"), (float("nan"), 0.5, "x coordinate must be from 0 to 1")):
+        with pytest.raises(AnnotationError, match=fragment):
+            typed_marker([], x, y)
+
+
+def test_add_marker_button_creates_and_selects_a_marker_from_typed_coordinates(service, monkeypatch):
+    """Codex review item 3: the editor could nudge existing markers by keyboard but needed a pointer for the first one.
+    "Add marker" with typed x and y (0–1) creates a selected marker without any pointer; the row is built once with
+    the page (pressing its button never moves the focus) and is shown only once a photograph is chosen."""
+    import asyncio
+    from dcdc_bench.annotation_editor import register_annotation_editor
+    job_id, job, path = finished_job(service, monkeypatch)
+    monkeypatch.setattr(service, "_launch", lambda directory, **kwargs: None)
+    monkeypatch.setattr("dcdc_bench.runner.run_mock", lambda *a, **k: pytest.fail("the editor must never acquire"))
+    ui = FakeUI()
+    register_annotation_editor(ui, FakeRun, service, "body{}")
+
+    async def drive():
+        await ui.pages["/annotations"]()
+        add_row = [w for w in ui.widgets if "bench-marker-add" in w.css.split()][-1]
+        add_button = ui.last("button", "Add marker")
+        x_field = [w for w in ui.widgets if w.kind == "number" and w.args[0] == "Marker x (0–1)"][-1]
+        y_field = [w for w in ui.widgets if w.kind == "number" and w.args[0] == "Marker y (0–1)"][-1]
+        assert add_row.visible is False and x_field.value == 0.5 and y_field.value == 0.5
+        assert "Add marker" in ui.last("label", annotation_editor.HELP).text
+        jobs = [w for w in ui.widgets if w.kind == "select" and w.kwargs.get("label") == "Finished run"][-1]
+        await jobs.kwargs["on_change"](SimpleNamespace(value=job_id))
+        assert add_row.visible is False, "no photograph yet"
+        add_button.kwargs["on_click"]()
+        assert ui.notifications == [] or ui.notifications[-1][1] != "positive", "nothing to add to without a photograph"
+        await ui.last("upload").kwargs["on_upload"](SimpleNamespace(file=FakeFile("Case top.png", png())))
+        picker = [w for w in ui.widgets if w.kind == "select" and w.kwargs.get("label") == "Photograph for markers"][-1]
+        picker.kwargs["on_change"](SimpleNamespace(value=picker.value))
+        assert add_row.visible is True
+        assert "press Add marker" in [w for w in ui.widgets if w.kind == "label" and w.text.startswith("No markers yet")][-1].text
+        # Defaults: the centre of the photograph. The marker is selected, so the arrow keys act on it at once.
+        add_button.kwargs["on_click"]()
+        assert ui.notifications[-1][1] == "positive" and "S1" in ui.notifications[-1][0]
+        overlay = ui.last("interactive_image").content
+        assert overlay.count("<circle") == 1 and 'fill="#15608f"' in overlay, "one marker, drawn as selected"
+        # Out-of-image, blank and non-numeric coordinates are refused in operator words; nothing is added.
+        x_field.kwargs["on_change"](SimpleNamespace(value=1.5))
+        add_button.kwargs["on_click"]()
+        assert ui.notifications[-1][1] == "warning" and "1.5 lies outside the photograph" in ui.notifications[-1][0]
+        x_field.kwargs["on_change"](SimpleNamespace(value=None))
+        add_button.kwargs["on_click"]()
+        assert ui.notifications[-1][1] == "warning" and "Type the x coordinate" in ui.notifications[-1][0]
+        assert ui.last("interactive_image").content.count("<circle") == 1
+        # A second marker at typed coordinates, then nudged by keyboard.
+        x_field.kwargs["on_change"](SimpleNamespace(value=0.25))
+        y_field.kwargs["on_change"](SimpleNamespace(value=0.75))
+        add_button.kwargs["on_click"]()
+        assert ui.last("interactive_image").content.count("<circle") == 2
+        key = ui.last("keyboard").kwargs["on_key"]
+        key(SimpleNamespace(action=SimpleNamespace(keydown=True), key=SimpleNamespace(name="ArrowRight"),
+                            modifiers=SimpleNamespace(shift=False)))
+        assert ui.last("button", "Add marker") is add_button, "the row is never rebuilt"
+        assert [w for w in ui.widgets if w.kind == "number" and w.args[0] == "Marker x (0–1)"][-1] is x_field
+        await ui.last("button", "Save as new report revision").kwargs["on_click"]()
+        return json.loads((job / "annotations.request.json").read_text())
+    saved = asyncio.run(drive())
+    assert saved["markers"] == [
+        {"sensor_id": "S1", "x_norm": 0.5, "y_norm": 0.5, "label": ""},
+        {"sensor_id": "S2", "x_norm": 0.255, "y_norm": 0.75, "label": ""}]
+    assert service.status(job_id)["state"] == "report-queued"
     verify_integrity(path)

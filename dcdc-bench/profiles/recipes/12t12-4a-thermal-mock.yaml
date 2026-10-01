@@ -23,15 +23,20 @@ tests:
   - Tcase_C
   - Tambient_C
   optional_quantities: []
+  # Synthetic case with an 8 C/W rise and a 600 s time constant (first-order-case-2.0): a slope-only
+  # criterion is met while slope x tau of rise remains. 0.5 C/min over 60 s would declare "met" near
+  # 416 s with half of the ~10 C rise still to come; 0.05 C/min over a 300 s window leaves about 0.5 C
+  # (5 %) and is reached near 1950 s of model time. The virtual clock makes that free; on a real
+  # sensor these numbers need validation against the actual module and attachment.
   thermal_settling:
     policy: thermal_rise_slope_window
     settings_origin: draft_requires_validation_for_module_sensor_and_setup
     surface_quantity: Tcase_C
     ambient_quantity: Tambient_C
-    slope_threshold_C_per_min: 0.5
-    window_s: 60.0
-    minimum_observation_s: 60.0
-    timeout_s: 900.0
+    slope_threshold_C_per_min: 0.05
+    window_s: 300.0
+    minimum_observation_s: 600.0
+    timeout_s: 2700.0
     minimum_samples: 4
     poll_interval_s: 5.0
     requires_electrical_validity: true

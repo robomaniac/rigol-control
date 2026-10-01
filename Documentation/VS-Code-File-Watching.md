@@ -5,20 +5,20 @@
 A read-only inspection on 2026-09-27 found this entry in the active VS Code server's log:
 
 ```text
-2026-09-27 00:57:41.047 [error] [File Watcher ('parcel')] Inotify limit reached (ENOSPC) (path: /home/jerome)
+2026-09-27 00:57:41.047 [error] [File Watcher ('parcel')] Inotify limit reached (ENOSPC) (path: /home/<user>)
 ```
 
-Log: `/home/jerome/.vscode-server/data/logs/20260927T004558/remoteagent.log`.
+Log: `~/.vscode-server/data/logs/20260927T004558/remoteagent.log`.
 
 This confirms that VS Code attempted to watch the home directory recursively. That includes this repository, downloaded tools, virtual environments, application caches, and generated reports.
 
-At the later inspection, the kernel limit was 8,192 watches per user. The VS Code file-watcher process had 2,000 watches, so the earlier limit error does **not** mean the limit was still exhausted. PID 3778 was the remote extension host, with its working directory at `/home/jerome`; it was in disk sleep with approximately 174 MiB resident memory and 323 MiB swapped out. The temporary report-rendering swap file also had approximately 311 MiB in use, alongside nearly full zram.
+At the later inspection, the kernel limit was 8,192 watches per user. The VS Code file-watcher process had 2,000 watches, so the earlier limit error does **not** mean the limit was still exhausted. PID 3778 was the remote extension host, with its working directory at `/home/<user>`; it was in disk sleep with approximately 174 MiB resident memory and 323 MiB swapped out. The temporary report-rendering swap file also had approximately 311 MiB in use, alongside nearly full zram.
 
 These observations establish a broad watcher scope and memory/disk pressure. They do not prove that file watching caused every SSH disconnection or all report-rendering delays.
 
 ## Applied remote settings
 
-Prefer opening `/home/jerome/rigol-control` as the VS Code folder instead of the entire home directory. For the current home-directory workspace, the following was applied to **Remote [SSH: rigol.local]** settings on 27 September 2026:
+Prefer opening `~/rigol-control` as the VS Code folder instead of the entire home directory. For the current home-directory workspace, the following was applied to **Remote [SSH: <pi-hostname>]** settings on 27 September 2026:
 
 ```json
 {
@@ -37,7 +37,7 @@ Prefer opening `/home/jerome/rigol-control` as the VS Code folder instead of the
 }
 ```
 
-Host file: `/home/jerome/.vscode-server/data/Machine/settings.json`. The change merged the ten `files.watcherExclude` entries, preserved other settings, replaced the file atomically, and read it back to verify every entry. No process was restarted. This is local machine configuration, not a prerequisite imposed on contributors.
+Host file: `~/.vscode-server/data/Machine/settings.json`. The change merged the ten `files.watcherExclude` entries, preserved other settings, replaced the file atomically, and read it back to verify every entry. No process was restarted. This is local machine configuration, not a prerequisite imposed on contributors.
 
 This configuration excludes generated run trees, embedded-plot HTML, downloaded binaries, Python environments, caches, and the temporary swap file under `test-artifacts`. It does not hide files in Explorer or prevent opening reports directly. No `files.exclude` changes are proposed.
 

@@ -48,35 +48,251 @@ restore the tunnel after reconnecting.
 
 ## Run a test
 
-1. **Bench:** choose the simulated or real saved bench and review its limits.
-2. **DUT and recipe:** choose the converter, confirm its ratings, then enter
-   input voltages and output loads as comma-separated numbers. For example,
-   `24, 35.8` and `0.1, 0.25, 0.5`. Every voltage is paired with every load.
-3. Choose **Preview test and limits**. This saves your profiles locally and
-   shows every requested point, including points excluded by the bench limits
-   or planning assumptions. Preview never enables an output.
-4. For real equipment, review the limits, confirm the wiring/channel and enter
-   the configured instrument serial numbers. Choose **Start test**. The worker
-   verifies the connected identities before it enables outputs.
-5. **Run** shows measured voltage/current, progress, measurement age and shutdown
-   status. **Stop test safely** requests shutdown; wait for both outputs to be
-   reported as verified OFF before changing wiring.
-6. After acquisition the worker exits with both outputs verified OFF and the
-   job shows **Measurements saved — report queued**. The page starts a
-   separate report process automatically when no test is running and enough
-   memory is free; while it waits, the reason (for example
-   `MemAvailable below 150 MiB`) is shown on the Run tab. A new test may be
-   started while reports are queued; they are generated afterwards. Open
-   **interactive HTML** to inspect points and export plots, or **PDF** for a
-   printable report. **Reports** retains completed and interrupted runs. If
-   rendering fails, **Retry report generation** queues the preserved
-   measurements for a new report without running the instruments again. See
-   [the process model](pi-process-model.md) for the thresholds and logs.
+The page is one column with three questions, then **Preview** and **Start** in
+a bar fixed to the bottom of the window. There are no tabs.
 
-Changing any setting clears the preview and its confirmation. Preview again
-before starting. Enter a different profile name to save a reusable variant.
-Existing profile names update that saved configuration; issued run evidence
-keeps its original snapshot.
+1. **Which converter?** One card per saved converter: model, ratings
+   (`9–36 V in, 12 V / 4 A out`), sample id, and whether it is approved for the
+   real bench. The card face is one button: click it, or focus it and press
+   Enter or Space, to select it. Its **⋯** menu holds **Rename** (changes the
+   displayed model name), **Edit** (the converter fields: ratings, the label
+   check and the two real-bench approvals) and **Delete**, which asks *Delete
+   this saved converter? Past runs keep their own copy.* and closes an editor
+   that was open on that converter. **+ Add a converter** opens the same fields
+   for a new profile and refuses a file name that is already saved (*A
+   converter file named “12t12-4a” already exists. Nothing was overwritten.*)
+   with two ways out: **Use a free file name** or **Open the existing
+   converter**. Changing the file name in **Edit** moves the profile to the
+   new name; saved tests that referenced the converter follow it.
+2. **Simulated or real bench?** Two tiles forming one radio group (arrow keys
+   move between them). *Simulation — Nothing is switched on. Synthetic
+   readings, real report layout; every output is labelled SYNTHETIC.* shows
+   the synthetic envelope in the same table the real tile uses (*Synthetic
+   source 0–60 V · 1 A · 60 W*, *Synthetic load*, *Protective limits none —
+   only the planning budget bounds the plan*, *Readback uncertainty synthetic
+   example specification, not an instrument*), so a point the plan skips is
+   predictable from the tile, and a panel **What the simulation can and cannot
+   do**: it runs a deterministic synthetic converter, source and load on a
+   virtual clock, reproduces realistic supply current limiting and start-up
+   behaviour, labels every output SYNTHETIC, touches no instrument and uses the
+   same report layout and workflow as the real bench; it cannot measure your
+   converter, prove anything about safety, protective limits or a real
+   start-up, show ripple, transients or thermal behaviour, or give an
+   instrument uncertainty (any ± in its report comes from the synthetic
+   specification). *Real bench — DP821A CH1 + DL3031A* (models from the bench
+   profile or the private inventory) shows the saved **limit presets** as
+   pills with plain names (*24 V converter tests*, *Wide input up to 36 V*,
+   *Pass-through wire check (12 V)*; the selected pill is filled with a white
+   label), the four protective limits (supply current limit, input
+   over-voltage, output voltage guard, output current guard) always visible,
+   **Change limits…** (saving new limits clears that preset's approval), **I
+   reviewed these limits — required once**, which is stored on the bench
+   profile and never also switches the tile, and its own panel **What the real
+   bench can and cannot do** from [configured-runs.md](configured-runs.md):
+   steady DC efficiency, regulation and power loss at 0.05–2.5 A and at most
+   34 W, 1–35.8 V input with one cold start per input voltage, polled DC guards;
+   it cannot reach the 48 W rating with the 1 A source, cannot run unsupervised
+   (saved approvals plus a fresh confirmation before every Start), cannot
+   measure temperature, ripple, transients or dynamic response, and cannot
+   certify accuracy while uncertainty is unquantified. Simulation versus real
+   comes from this tile only; a test no longer carries an execution mode, and
+   a saved test that still does is planned as the bench says, with a note in
+   the plan.
+3. **Which test?** Cards grouped by category (default *Normal operating
+   voltage*; tests filed under a standard show its clause as a badge), each
+   with its plain name, the grid (`24 V × 0 / 0.1 A`) and `N points · ~62 s`
+   on the real bench (the backend's own time arithmetic) or `N points ·
+   simulated` (the simulation runs on a virtual clock). A test the planner
+   cannot run on the selected bench is greyed with the planner's first reason
+   in red. Each card's **⋯** menu offers **Rename**, **Duplicate**, **Edit**
+   and **Delete**; **+ New test**, at the end of the saved tests, opens the grid
+   fields (input voltages and loads as comma-separated numbers, dwell,
+   measurement time, planning assumptions) plus the name, category and
+   optional standard clause, and refuses an existing file name the same way
+   as **+ Add a converter**. A cleared number is refused with *Enter a number
+   for “Minimum settling time (s)”.*; a limit names the field you see (*“Minimum
+   settling time (s)” must be at most 30 s, this test’s settling timeout.*). A
+   test belongs to whichever converter is selected when it is previewed; the
+   saved copy follows.
+
+### Automotive standards in Which test?
+
+Below the saved tests, the group **Automotive supply standards** shows one
+card, ISO 16750-2:2023: the other automotive standards of the catalog in
+`docs/standards/` (ISO 7637-2, CISPR 25, ISO 11452, ISO 10605, ISO 16750-3 and
+ISO 16750-4) need other laboratories, so they are not offered as cards; one
+footnote under the card says so and links the catalog, served read-only at
+`/standards` from `docs/standards/README.md`. The ISO 16750-2 card carries a
+**12 V system** / **24 V system** badge and prints the catalog's count for the
+selected converter and bench, for example *19 clauses: 1 DC level subset
+available, 2 after approval*.
+
+Selecting the ISO 16750-2 card expands it into a **clause checklist** and
+ticks the available DC level subset; selecting it again folds it. Exactly
+one test is selected for Start at any time: selecting a test card in any group
+deselects the previous one and folds the ISO 16750-2 checklist, and the header
+and the bottom bar name that one test. The ISO 16750-2 card is an editor, not
+a test: open, it is blue and dashed with an expand arrow (never green with a
+check), it leaves the selection alone, and **Add as tests** folds it and
+selects the last test it generated. The
+**12 V / 24 V** toggle switches every row to the other system's parameters
+(supply codes, UA, levels) and is remembered on the converter profile
+(`system_voltage_class`, default 12 V). Each row shows the clause, its levels
+for this converter, and the catalog's status word as a badge:
+
+- **DC level subset** (green, ticked by default): §4.2 supplies the voltage
+  levels for partial characterization on either system class. The standard's
+  t1/t2 holds and 1 V/s transitions are not reproduced; no clause-compliance
+  result is claimed.
+- **runs here after approval** (amber, tickable but not ticked by default):
+  §4.5 and §4.6.2. The recipes they generate step below the converter's stated
+  minimum and are written unapproved, so their cards stay greyed with the
+  planner's reason until approved. The row says where that approval is
+  recorded, in the catalog's words: *Approval happens in the saved recipe, not
+  on the bench page: set `authorization.uvlo_approved` to true and
+  `authorization.protective_policy_id` to the bench profile's
+  `protective_controls.policy_id`, and declare `source_current_limit_A`,
+  `dut_output_overvoltage_V` and `output_overcurrent_A` in that bench
+  profile.* On a real bench preset the same two clauses are **mock only**
+  (amber, not tickable): the procedure exists on the synthetic plant only.
+- **best effort (deviations recorded)** (amber, tickable, unticked by default)
+  for §4.3.1.2, §4.3.2, §4.6.1.1, §4.6.1.2, §4.9.1 and §4.9.2: the bench can hold
+  every level of the clause and command its timings with what it has (LAN voltage
+  steps, LAN output OFF/ON, the supply's Timer or Delayer) but cannot produce or
+  measure the clause's edges, sub-second timings or a true open circuit, so the
+  generated recipe carries a deviation sheet and is written unapproved. Nothing on
+  this page approves it: ticking the row only generates the recipe, which then
+  plans as `approval_blocked`. Approving it is the owner's act in the saved
+  recipe file: `authorization.best_effort_approved: true` with
+  `authorization.accepted_deviations_sha256` equal to the sheet's hash, plus
+  `authorization.uvlo_approved` wherever the input goes below the converter's
+  minimum (a drop level, output OFF); the row's approval sentence lists every
+  field. §4.3.1.1 is **runs here after approval** at both
+  system voltages (its 36 V level at 24 V is programmed at 35.8 V unless
+  `program_clause_level_exactly` is set). See
+  [standards/best-effort-proposal.md](standards/best-effort-proposal.md).
+- **needs \<instrument\>**, **not on this bench**, **outside DUT rating**,
+  **excluded by policy**, **needs split** or **not applicable** (grey, not
+  tickable), with the catalog's reason under the row. Load dump, reversed
+  voltage, short circuit and overload stay excluded by policy (brief §2, §7.5).
+
+The checklist footer counts *N test subsets available now · 19 clauses reviewed · M
+after approval*.
+
+**Add as tests** saves one recipe per ticked clause under the category
+*ISO 16750-2 supply profiles*, titled like `ISO 16750-2 §4.2 — DC level subset
+(12 V system)` with the clause as its badge:
+
+- §4.2 becomes an ordinary `steady_state_load_sweep` at UA, Usmin and Usmax
+  (14 / 9 / 16 V for code C at 12 V; 28 / 10 / 32 V for code E at 24 V) with a
+  0.1 / 0.25 / 0.5 A load grid. A level above the bench envelope or the
+  input over-voltage guard stays in the plan and Preview explains it; nothing
+  is dropped. Each level is a separate cold-started DC point; the standard's
+  t1/t2 hold profile and 1 V/s transitions are not reproduced. The recipe's
+  title, referenced clause and scope description travel into the HTML/PDF
+  method section, including these deviations.
+- §4.5 becomes a `slow_supply_ramp` and §4.6.2 a `reset_staircase`. Both run
+  in the **simulation only**: the real bench refuses them at Preview as
+  *not yet approved for real hardware*. The ramp walks UA down to 1 V and back
+  in 20 mV live steps every 2.4 s (0.5 V/min) with a qualified observation at
+  every 1 V; the staircase alternates Usmin with its 5 % lows, each low held
+  at least 5 s and each recovery at least 10 s. Because both step below the
+  converter's stated minimum, they take the approved UVLO-style path
+  (brief §7.5): the saved recipe ships with `authorization.uvlo_approved:
+  false` and its card stays greyed with the planner's reason until the recipe
+  is approved under the bench's protective policy, exactly like the shipped
+  UVLO example. The standard's 0 V end level is not requested (a 0 V source
+  setpoint is outside the planner's positive-input rule); the report records
+  that deviation.
+
+The report for a ramp or staircase states, per level, whether the output was
+in band, off (reset), recovered or not recovered, computed from the classified
+states only and labelled as the synthetic plant, and says plainly that the
+levels were commanded as bounded DC steps at the ~1 s cadence, that the ramp
+is a staircase of live steps rather than a linear ramp, and that no edge or
+transient was measured.
+
+Choose **Preview**. Nothing is switched on. The plan panel shows how many
+points will run, how many are skipped and why (identical reasons grouped,
+each with the planner's own word: *2 points assumption_limited: Requested load
+exceeds the planning budget …*), the estimated time (on the real bench from
+the backend's arithmetic; in the simulation *Measurements: seconds (virtual
+clock) · Report: typically 1–4 min on a Raspberry Pi*), the bench in use, and
+in red the **Before Start** list: missing converter or limit approvals, a
+missing inventory, or settings the real backend does not support. The table of
+all requested points uses the same words as the CLI and the saved plan
+(`executable`, `assumption_limited`, `approval_blocked`, `unsupported`) with a
+legend beneath it; a request is never reduced to fit, and skipped points stay
+in the saved plan and are listed in the report with the same reason. In the
+simulation the ready line spells out what follows Start: *Acquiring
+measurements* (seconds) → *Measurements saved — report queued* → *Preparing
+HTML and PDF* (minutes on a Pi) → *Complete*, with the links under Run and in
+Reports. Until a fresh plan exists the bottom bar says why Start is disabled
+(*Preview first — Start unlocks after a fresh plan.*, *Locked while a test runs
+on the bench.*, or *The plan cannot start: see the Before Start list*). Then
+**Start simulation**, or **Start test on the real bench**, which first opens
+the physical confirmation (wiring and polarity, CH1, limits reviewed, both
+instrument serials); only **Switch on and start** arms the job, and the worker
+verifies the connected identities before it enables outputs. Start is
+single-shot: a second click before the service answers does nothing, and a
+refused Start (a profile changed, another job holds the bench) marks the plan
+stale (*Start was refused — Preview again before starting.*). Changing any of
+the three selections, or saving a profile, also marks the plan stale and
+disables Start until you Preview again.
+
+The page follows the bench, not the job one tab happened to start. Every two
+seconds it asks the service which job is working or waiting for its report;
+a reload (F5), a second tab or a job started from the CLI attach to it, the
+header, the lock and Start describe it, and the lock releases when it ends.
+While a job is queued, acquiring or generating its report, the header pill
+shows a spinner with a short phrase led by the mode word (`Simulation:
+Acquiring… point 2 of 4`, `Real bench: Generating report…`), the local start
+time and the elapsed time; the three questions are locked; and **Stop…** sits
+at the far right of the header, never where Start was. It asks **Confirm
+stop** or **Keep running**; **Confirm stop** asks the service once (a double
+click, or a second tab, sends no second interrupt and keeps the first stop
+time), the stop is recorded and the Run section shows *Stop requested: <local
+time>* once the worker has seen it. Wait for both outputs to be reported as
+verified OFF before changing wiring. The **Run** section shows the mode
+(*Simulation · synthetic data · no instrument is touched* or *Real bench ·
+measured data*), for a simulation the four-step sequence with the current step
+marked, measured voltage and current, progress, measurement age, shutdown
+status, recent events and the report links of the selected run; under a
+simulated report's links it notes that any ± is uncertainty from the synthetic
+specification, not an instrument.
+
+After acquisition the worker exits with both outputs verified OFF and the job
+shows **Measurements saved — report queued**. The page starts a separate report
+process automatically when no test is running and enough memory is free; while
+it waits, the reason is shown in operator words in the header, the Run section
+and the Reports row: *Waiting for free memory: 96 MiB available, 150 MiB
+needed*, *Waiting for free memory and swap: …*, or *Waiting for the bench:
+another acquisition or report is still running* (the dispatcher's raw reason
+and the time it last checked are a tooltip). A queued report does not lock the
+bench: a new test may be started while reports are queued, and while an older
+report renders the header and the lock follow that render. **Remove from
+report queue** leaves the measurements saved; the job then reads *Removed from
+the report queue*, never *needs attention*. **Reports** lists the newest 30
+saved runs (it says so when there are more; **Show older runs** adds the next
+30, and **Filter runs** narrows the list to runs whose converter, test, bench or
+status contain the typed words) in bench-local time with the run
+(converter · test), bench (**Simulation · synthetic data** or **Real bench ·
+measured**), status and **Open HTML**, **Open PDF**, **View run** and
+**Regenerate report**, which makes a new report revision from the preserved
+measurements without running the instruments again (its tooltip says so; it is
+single-shot). The list refreshes itself from the same two-second poll and a
+`Report ready: <run id>` notice appears; **Refresh saved runs** is only needed
+for runs created outside this page. Every time the page shows is the bench
+computer's local clock with its zone abbreviation, e.g. `13:40:12 PDT
+(2026-09-29)`; the evidence files keep recording UTC. See [the process
+model](pi-process-model.md) for the memory thresholds and logs.
+
+Profiles are saved when you press Save in an editor, tick or clear a limit
+approval, rename, duplicate or delete. Deleting or renaming a profile that an
+active job was started from is refused; finished jobs keep their own plan
+snapshot, so their reports are unaffected. **+ Add a converter** and **+ New
+test** never write over an existing file name; **Edit** with a changed file
+name moves the profile; deleting a profile closes an editor open on it.
 
 ## What this procedure measures
 
@@ -110,7 +326,15 @@ which is ignored by Git. Interactive reports are served in a browser sandbox
 that permits plotting and exports but prevents report scripts from accessing
 the instrument-control page. Publishing a report does not publish bench control.
 
-Test notes can describe the setup today. Adding or repositioning photographs
-and schematics through the UI requires a separate report revision/asset workflow
-and is not currently available; finalized measurements are never edited by this
-page.
+Notes for the report can describe the setup today. Photographs and sensor
+markers are added on the separate **Sensor placement editor** page
+(`/annotations`, linked from the footer): choose a finished run (each option
+says *Simulation · synthetic data* or *Real bench · measured*; the uploader
+unlocks once a run is chosen, and a simulated run carries a caution that
+photographs describe a physical setup), upload a photograph, place the
+markers, and **Save as new report revision**. Each save creates a new report
+revision; finalized measurements are never edited by this page or by that one.
+
+The footer also links the [glossary](glossary.md): path efficiency, qualified,
+the planner's status words, SYNTHETIC, revision, lease, memory gate,
+`report-queued` and the milestones M0–M5.

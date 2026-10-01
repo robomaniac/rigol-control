@@ -31,8 +31,10 @@
   let pending = Promise.resolve();
   const errorBox = document.getElementById('report-error');
   const fail = error => { errorBox.textContent = 'Report interaction failed: ' + String(error.message ?? error); console.error(error); };
-  const quantityLabels = {Iout_A: 'Measured output current (A)', Pout_W: 'Measured output power (W)',
-    Vin_V: 'Measured input voltage (V)', elapsed_s: 'Time since first accepted query (s)'};
+  const quantityLabels = {Iout_A: 'output current (A)', Pout_W: 'output power (W)', Vin_V: 'input voltage (V)'};
+  // Axis wording follows the evidence label: a SYNTHETIC run never calls its values "Measured".
+  const quantityLabel = key => key === 'elapsed_s' ? 'Time since first accepted query (s)' :
+    key in quantityLabels ? (model.evidence_label === 'MEASURED' ? 'Measured' : 'Simulated') + ' ' + quantityLabels[key] : undefined;
   function xKey(spec) { return state.x_key === 'default' || spec.sample_series?.length ? spec.x_key : state.x_key; }
   function isLog(spec) { return state.log_current && /current|Iout_A|Iin_A/.test(xKey(spec)); }
   function plottedValue(spec, point) {
@@ -50,6 +52,18 @@
   const hoverLabels = {Vin_V:'Input voltage',Iin_A:'Input current',Vout_V:'Output voltage',
     Iout_A:'Output current',Pin_W:'Input power',Pout_W:'Output power',loss_W:'Path loss',
     efficiency_pct:'Path efficiency',vout_error_pct:'Output deviation',elapsed_s:'Elapsed time'};
+  // Brief 9.1: an efficiency above 100 % or a negative loss is preserved and
+  // flagged, never clamped. Such points are drawn with open markers, unjoined,
+  // and are never counted, exported or summarized as qualified.
+  const IMPLAUSIBLE_FLAG = 'implausible_power_ratio';
+  function flaggedPoint(point) {
+    return point.qualification === 'inconclusive' && Array.isArray(point.quality_flags) &&
+      point.quality_flags.includes(IMPLAUSIBLE_FLAG);
+  }
+  function flaggedValue(spec, point) {
+    return flaggedPoint(point) && finite(point[xKey(spec)]) && finite(point[spec.y_key]) &&
+      (!isLog(spec) || point[xKey(spec)] > 0);
+  }
   function hoverValue(key, value) {
     if (!finite(value)) return 'Not available';
     if (key.endsWith('_A')) return Math.abs(value) < 1 ? (value * 1000).toFixed(1) + ' mA' : value.toFixed(3) + ' A';
@@ -72,6 +86,7 @@
     // The ± text exists only where the analysis evaluated a readback budget (UNC-02).
     const band = point[spec.y_key + '_uncertainty_label'];
     if (typeof band === 'string' && spec.lower_key && spec.upper_key) lines.push('Expanded uncertainty: ' + safe(band));
+    if (flaggedPoint(point)) lines.push('Not qualified: implausible power ratio');
     return lines.join('<br>');
   }
   function stageTransitions(spec) {
@@ -108,26 +123,37 @@
     for (const series of spec.series) {
       const key = keyOf(series), {color, dash, symbol} = conditions.get(key);
       const rows = series.point_ids.map(id => points.get(id));
-      const valid = p => plottedValue(spec, p);
+      const valid = p => plottedValue(spec, p), flagged = p => flaggedValue(spec, p);
       // Evidence/selection controls still retain every requested series.
-      // Legends describe only curves with qualified, finite plotted values.
-      if (!rows.some(valid)) continue;
-      const base = {x: rows.map(p => valid(p) ? p[xKey(spec)] : null), legendgroup: key,
-        visible: state.selected_series.includes(key) ? true : 'legendonly', connectgaps: false,
-        meta: {conditionKey: key, seriesId: series.id}, type: 'scatter'};
-      if (spec.lower_key && spec.upper_key) {
-        const rgb = [1,3,5].map(i => parseInt(color.slice(i,i+2),16));
-        for (const [field,fill] of [[spec.lower_key,null],[spec.upper_key,'tonexty']]) {
-          result.push({...base, y: rows.map(p => valid(p) ? p[field] ?? null : null), mode:'lines',
-            line:{width:0}, fill, fillcolor:'rgba('+rgb.join(',')+',0.13)',showlegend:false,hoverinfo:'skip',
-            meta:{...base.meta,isBand:true}});
+      // Legends describe only curves with qualified, finite plotted values, or
+      // (when a series has none) its flagged open markers, named as such.
+      const hasValid = rows.some(valid), hasFlagged = rows.some(flagged);
+      if (!hasValid && !hasFlagged) continue;
+      const base = {legendgroup: key, visible: state.selected_series.includes(key) ? true : 'legendonly',
+        connectgaps: false, meta: {conditionKey: key, seriesId: series.id}, type: 'scatter',
+        text: rows.map(p => hoverText(spec, p)), customdata: rows.map(p => p.point_id),
+        hovertemplate: '%{text}<extra></extra>'};
+      if (hasValid) {
+        const x = rows.map(p => valid(p) ? p[xKey(spec)] : null);
+        if (spec.lower_key && spec.upper_key) {
+          const rgb = [1,3,5].map(i => parseInt(color.slice(i,i+2),16));
+          for (const [field,fill] of [[spec.lower_key,null],[spec.upper_key,'tonexty']]) {
+            result.push({...base, x, y: rows.map(p => valid(p) ? p[field] ?? null : null), mode:'lines',
+              line:{width:0}, fill, fillcolor:'rgba('+rgb.join(',')+',0.13)',showlegend:false,hoverinfo:'skip',
+              text:undefined, customdata:undefined, hovertemplate:undefined, meta:{...base.meta,isBand:true}});
+          }
         }
+        // Flagged positions stay null here, so no segment is drawn to or through them.
+        result.push({...base, x, y:rows.map(p => valid(p) ? p[spec.y_key] ?? null : null), name:safe(series.label),
+          mode:series.connect_points === false ? 'markers' : 'lines+markers',
+          line:{color,width:2.5,dash},marker:{color,size:7,symbol}});
       }
-      result.push({...base, y:rows.map(p => valid(p) ? p[spec.y_key] ?? null : null), name:safe(series.label),
-        mode:series.connect_points === false ? 'markers' : 'lines+markers',
-        line:{color,width:2.5,dash},marker:{color,size:7,symbol},
-        text:rows.map(p => hoverText(spec, p)),customdata:rows.map(p => p.point_id),
-        hovertemplate:'%{text}<extra></extra>'});
+      if (hasFlagged) {
+        result.push({...base, x: rows.map(p => flagged(p) ? p[xKey(spec)] : null),
+          y: rows.map(p => flagged(p) ? p[spec.y_key] ?? null : null),
+          name: safe(series.label) + ' · flagged, not qualified', mode:'markers', showlegend: !hasValid,
+          marker:{color,size:9,symbol:symbol + '-open',line:{color,width:2}}, meta:{...base.meta,isFlagged:true}});
+      }
     }
     // Retained raw time series (thermal settling) are plotted exactly as supplied.
     (spec.sample_series ?? []).forEach((series, index) => {
@@ -142,7 +168,8 @@
   function layout(spec) {
     const ranges = state.ranges[spec.id] ?? {};
     const reference = payload.figure_references?.[spec.id];
-    const plottedCurrent = [...new Set(conditionRows(spec).filter(p => p.qualification === 'valid' &&
+    // Default axes include every drawn observation, flagged open markers included (brief 12.4 item 8).
+    const plottedCurrent = [...new Set(conditionRows(spec).filter(p => (p.qualification === 'valid' || flaggedPoint(p)) &&
       finite(p[xKey(spec)]) && finite(p[spec.y_key])).map(p => p[xKey(spec)]))];
     const singleCurrentRange = !isLog(spec) && xKey(spec) === 'Iout_A' &&
       plottedCurrent.length === 1 && plottedCurrent[0] > 0 ? [0, 2 * plottedCurrent[0]] : undefined;
@@ -159,7 +186,7 @@
         line:{color:'#6b7280',width:1.2,dash:'dash'},layer:'below'}]:[],
       annotations:reference?[{xref:'paper',x:1,yref:'y',y:reference.value,text:safe(reference.label),
         xanchor:'right',yanchor:'bottom',showarrow:false,font:{size:11,color:'#59636e'},bgcolor:'rgba(255,255,255,0.85)'}]:[],
-      xaxis:{title:{text:safe(spec.sample_series?.length ? spec.x_label : quantityLabels[state.x_key] ?? spec.x_label)}, type:isLog(spec)?'log':'linear',
+      xaxis:{title:{text:safe(spec.sample_series?.length ? spec.x_label : quantityLabel(state.x_key) ?? spec.x_label)}, type:isLog(spec)?'log':'linear',
         gridcolor:'#e6edf1',zeroline:false,range:axisRange,autorange:!axisRange,tickformat:'~g',nticks:7},
       yaxis:{title:{text:safe(spec.y_label)},gridcolor:'#e6edf1',zeroline:false,
         range:ranges.y??reference?.y_range,autorange:!(ranges.y??reference?.y_range),tickformat:'~g',nticks:6},
@@ -191,9 +218,15 @@
             scrollZoom:false,modeBarButtonsToRemove:['toImage','sendDataToCloud'],doubleClick:'reset'});
           const rows = conditionRows(spec);
           const omitted = rows.filter(p => finite(p[xKey(spec)]) && p[xKey(spec)] <= 0).length;
+          const flaggedCount = rows.filter(p => flaggedValue(spec, p)).length;
+          const qualifiedCount = rows.filter(p => plottedValue(spec, p)).length;
+          // An empty chart must say why it is empty rather than stay silent.
           document.getElementById('status-'+spec.id).textContent =
             (isLog(spec) ? omitted + ' nonpositive-current point(s) omitted from this log view. ' : '') +
-            rows.length + ' point result(s) in selected test curves. Raw observations remain unchanged.';
+            rows.length + ' point result(s) in selected test curves. ' +
+            (flaggedCount ? flaggedCount + ' point(s) flagged implausible are drawn with open markers and excluded from qualified results. ' : '') +
+            (qualifiedCount === 0 ? 'No qualified point is plotted on this figure' + (flaggedCount ? '; only flagged points are shown. ' : '. ') : '') +
+            'Raw observations remain unchanged.';
           if (!document.getElementById('view-'+spec.id)?.hidden) Plotly.Plots.resize(graph);
         }
       } finally { updating = false; }
@@ -256,10 +289,12 @@
   }
   const csvFields = ['run_id','analysis_id','evidence_type','point_id','test_id','vin_target_V',
     'programmed_input_V','input_condition_label','iout_target_A',
-    'Vin_V','Iin_A','Vout_V','Iout_A','Pin_W','Pout_W','loss_W','efficiency_pct','vout_error_pct','qualification','reason',
+    'Vin_V','Iin_A','Vout_V','Iout_A','Pin_W','Pout_W','loss_W','efficiency_pct','vout_error_pct','qualification','quality_flags','reason',
     ...(specs.some(spec => spec.x_key === 'elapsed_s') ? ['phase_label','elapsed_start_s','elapsed_s','elapsed_end_s'] : [])];
   function csvCell(value) {
     if (value === null || value === undefined) return '';
+    // Flag lists join with ';' exactly as the issued Python export does.
+    if (Array.isArray(value)) value = value.join(';');
     let text = String(value);
     if (typeof value === 'string' && (/^[\s]*[=+\-@]/.test(value) || /^[\t\r\n]/.test(value))) text = "'" + text;
     return /[",\r\n]/.test(text) ? '"' + text.replaceAll('"','""') + '"' : text;
@@ -275,7 +310,7 @@
       x_quantity:xKey(spec),y_quantity:spec.y_key,axis_bounds:scope==='visible'?bounds(spec):null,
       boundary_semantics:'inclusive numeric bounds; log bounds are exported in physical units',
       scope_description:scope==='selected'?'all referenced points in selected test traces; independent of zoom and log display omissions':
-        'selected valid points plotted within both current axis ranges; nonpositive points excluded for log current',
+        'selected valid points plotted within both current axis ranges; flagged (not qualified) points excluded; nonpositive points excluded for log current',
       string_safety:'Spreadsheet formula prefixes in text cells are escaped with an apostrophe; evidence unchanged',
       view:clone(state)}};
   }
@@ -297,9 +332,12 @@
     currentLayout.xaxis.range = range.x && isLog(spec) ? range.x.map(Math.log10) : range.x;
     currentLayout.xaxis.autorange = !range.x;
     currentLayout.yaxis.range = range.y; currentLayout.yaxis.autorange = !range.y;
-    const names = spec.series.filter(series => state.selected_series.includes(keyOf(series)) &&
+    const flaggedDrawn = spec.series.filter(series => state.selected_series.includes(keyOf(series)))
+      .flatMap(series => series.point_ids).filter(id => flaggedValue(spec, points.get(id))).length;
+    const names = (spec.series.filter(series => state.selected_series.includes(keyOf(series)) &&
       series.point_ids.some(id => plottedValue(spec, points.get(id))))
-      .map(series => series.label).filter(Boolean).join('; ') || 'no qualified plotted conditions';
+      .map(series => series.label).filter(Boolean).join('; ') || 'no qualified plotted conditions') +
+      (flaggedDrawn ? ' | ' + flaggedDrawn + ' flagged point(s) drawn with open markers, not qualified' : '');
     const footer = [model.evidence_label+' | '+identity+' | Run '+model.run_id,
       'Analysis '+model.analysis_id+' | '+figureId+' | '+names,
       'Boundary: '+model.boundary+' | Aggregated points; exploratory view'].map(safe).join('<br>');
@@ -320,7 +358,8 @@
     document.getElementById('point-detail').textContent = (point.display_label ? point.display_label+' · ' : '')+
       'Aggregated point result '+pid+' · '+point.qualification+
       ' · '+(point.input_condition_label ?? 'requested '+point.vin_target_V+' V')+
-      ' / '+point.iout_target_A+' A requested load. '+(point.reason ?? '');
+      ' / '+point.iout_target_A+' A requested load. '+(point.reason ?? '')+
+      (Array.isArray(point.quality_flags)&&point.quality_flags.length?' Flags: '+point.quality_flags.join(', ')+'.':'');
     // Keep the same aggregated results available without pointer hover. The
     // separate raw table below retains individual queries and their timing.
     let measured=document.getElementById('point-measurements');

@@ -11,9 +11,11 @@ say so in their first lines.
 
 | Document | What it is |
 | --- | --- |
+| [Project review — 2026-09-30](../../Documentation/Project-Review-2026-09-30.md) | Current cross-project agent review: corrected defects, remaining UI/distribution gaps and verification results. |
 | [getting-started.md](getting-started.md) | For an engineer who has never seen this repository: what the software does, what to install, how to run it with no hardware, what must be true before any real converter test, and how to run and read a real test; every command checked with `--help`, hardware-touching ones marked **REAL HARDWARE**. |
 | [bench-ui.md](bench-ui.md) | The local bench page: a saved converter plus input voltages and output loads, a check of what the equipment can reach, the measurements, then links to the interactive HTML report and printable PDF; starting the page, port forwarding and reconnect behaviour. |
 | [configured-runs.md](configured-runs.md) | Configure and run a converter test from saved DUT, equipment and recipe profiles (data, not Python): the supported real procedure, its current physical envelope, the systemd launcher and where job evidence is saved. |
+| [glossary.md](glossary.md) | Words the bench page, the reports and the guides use before they define them: path efficiency, qualified, the planner's status words, SYNTHETIC, revision, lease, memory gate, `report-queued`, the milestones M0–M5; each with where it comes from in the code. Linked from the page footer. |
 
 ## Design contract
 
@@ -29,6 +31,7 @@ say so in their first lines.
 | Document | What it is |
 | --- | --- |
 | [uncertainty-budget.md](uncertainty-budget.md) | The structured readback uncertainty budget written to `analysis/<analysis_id>/uncertainty.json`: each profile field, the formulas, what the bench owner must enter before a real bench produces a number, and what stays unquantified afterwards. Unknown inputs never become a numerical zero. |
+| [simulation-plant.md](simulation-plant.md) | The simulated plant: equations and parameters of the synthetic converter, source and load, start-up and current-limit collapse, readback and thermal models, the run budget, the fit against the measured 12T12-4A and what is deliberately not modelled. |
 | [doctor-and-publication.md](doctor-and-publication.md) | The read-only `doctor` command, the outputs-OFF readback-cadence probe and the approval-gated `publish` command; developed and tested against fake SCPI sessions only, with statements still needing bench confirmation labelled. |
 | [pi-process-model.md](pi-process-model.md) | How acquisition and report rendering are separated into processes on the 1 GB bench Pi: the job state machine, the memory gate, descendant-process hygiene, what is logged where, the steady-state check procedure and the covering tests. |
 | [engineering-figure-labels.md](engineering-figure-labels.md) | The report's engineering figure names (Efficiency, Load Regulation, Input Current, Power Loss, the time plots and the line-regulation figure), axis and legend conventions, and why regulation and dropout are different measurements. |
@@ -94,4 +97,22 @@ are collected in [measured-results.md](measured-results.md) (its
 | Document | What it is |
 | --- | --- |
 | [merge-code-review.md](merge-code-review.md) | Independent read-only code review (2026-09-28) of the nine parallel increments merged at `0ec41fd`, diff base `6630e8c`: 72 files, 15 new modules; findings ranked by severity against the brief's rules, each citing `file:line`; no blocker, seven majors; no tests, demo, render, UI or instrument run. |
-| [merge-security-review.md](merge-security-review.md) | Independent defensive review of the attachments, annotation editor, publication, doctor, PDF-check and dispatcher surfaces merged at `0ec41fd`: threat model for owner-operated loopback bench software, then findings confirmed with small standalone Python probes against the real validators and route table (no pytest, renders, UI server or instruments). |
+| [merge-security-review.md](merge-security-review.md) | Independent defensive review of the attachments, annotation editor, publication, doctor, PDF-check and dispatcher surfaces merged at `0ec41fd`: threat model for owner-operated loopback bench software, then findings confirmed with small standalone Python probes against the real validators and route table (no pytest, renders, UI server or instruments). Its Resolution section (2026-09-30) records which findings commit `2582508` fixed and the three lows still open. |
+
+## Simulation review round (2026-09-30)
+
+Agent-role reviews of the simulated bench before the owner's review, each from
+the standpoint of a particular reader; all five roles reported and their
+findings were consolidated and assigned to implementers (see the first row).
+
+| Document | What it is |
+| --- | --- |
+| [simulation-review/README.md](simulation-review/README.md) | Consolidated findings of the five reviewer roles and the fix assignments. |
+| [simulation-review/ui-ux.md](simulation-review/ui-ux.md) | UI/UX designer's heuristic review of the bench page with screenshots. |
+| [simulation-review/electrical-engineer.md](simulation-review/electrical-engineer.md) | Power-electronics engineer's review of the simulated plant, metrics and standards verdicts. |
+| [simulation-review/new-user.md](simulation-review/new-user.md) | First-time user's walkthrough with a confusion log and glossary. |
+| [simulation-review/manager.md](simulation-review/manager.md) | Engineering manager's verified-vs-claimed table, risk register and two-week plan. |
+| [simulation-review/qa.md](simulation-review/qa.md) | QA engineer's observable-state table, robustness findings and proposed tests. |
+| [simulation-review/ui-ux-recheck.md](simulation-review/ui-ux-recheck.md) | UI/UX designer's re-check after the fix wave: blockers measured as fixed, remaining minors, verdict. |
+| [simulation-review/new-user-recheck.md](simulation-review/new-user-recheck.md) | First-time user's re-check and the follow-up pass that closed its remaining items. |
+| [simulation-review/codex-review-audit.md](simulation-review/codex-review-audit.md) | Independent audit of the Codex review's committed fixes (`031b122`): each claimed fix traced to its diff and test with a verdict, the verification-count discrepancy explained, and its remaining findings assessed. |

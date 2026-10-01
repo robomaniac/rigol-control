@@ -363,7 +363,7 @@ def test_cli_compare_writes_outputs_and_leaves_source_runs_untouched(bare_runs, 
         assert (out / name).is_file(), name
     written = ComparisonReportModel.model_validate_json((out / "comparison_model.json").read_text())
     assert written.kind == "comparison" and len(written.pairs) == 2 and written.pairing.interpolation_enabled is False
-    paired = list(csv.DictReader(io.StringIO((out / "exports/paired.csv").read_text(encoding="utf-8", newline=""))))
+    paired = list(csv.DictReader(io.StringIO((out / "exports/paired.csv").open(encoding="utf-8", newline="").read())))
     assert len(paired) == 2 and len(set(paired[0])) == len(paired[0])
     assert {row["evidence_type_a"] for row in paired} == {"SYNTHETIC"}
     assert all(row["u_delta_eta_pp"] == "" for row in paired), "no fabricated uncertainty"

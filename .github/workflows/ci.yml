@@ -47,6 +47,11 @@ jobs:
         # documents job or locally.
         run: python -m pytest dcdc-bench/tests -q -m 'not browser and not pdf and not integration'
 
+      - name: Detached worker and reconnect integration
+        # This ownership gate uses a mock worker and a stub renderer, so it
+        # belongs in the required job and needs neither Chromium nor Quarto.
+        run: python -m pytest dcdc-bench/tests/test_run02_reconnect.py -q -m integration
+
   documents:
     name: Browser and PDF gates (Quarto + Chromium, informational)
     runs-on: ubuntu-latest
@@ -140,15 +145,15 @@ jobs:
           "$BROWSER_PATH" --version
           pdftohtml -v 2>&1 | head -n 1
 
-      - name: Render the three mock demo reports (HTML and vector PDF)
+      - name: Render the four mock demo reports (HTML and vector PDF)
         # Simulated instruments only. Writes normal/, setup-limited/ and
         # aborted/ runs plus index.html under DCDC_DEMO_DIR.
         run: dcdc-bench demo --out dcdc-bench/examples/generated
 
-      - name: Browser and PDF release gates
+      - name: Browser, PDF and document integration gates
         # faulthandler_timeout mirrors the recorded verification command in
         # dcdc-bench/docs/implementation_status.md.
-        run: python -m pytest dcdc-bench/tests -q -m 'browser or pdf' -o faulthandler_timeout=240
+        run: python -m pytest dcdc-bench/tests -q -m 'browser or pdf or integration' --ignore=dcdc-bench/tests/test_run02_reconnect.py -o faulthandler_timeout=240
 
       - name: Keep build manifests, render logs and PDFs for inspection
         if: always()

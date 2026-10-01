@@ -66,8 +66,8 @@ cli.main            validate | plan | run | demo | analyze | report | ui | compa
    │                (configuration and analysis paths import no real driver)
    └─► services.*   load_plan_inputs, default_plan, execute, report_run, demo — shared by CLI and UI
 
-ui.run_ui (NiceGUI, loopback only; tabs Bench / DUT and recipe / Run / Reports; /annotations page)
-   └─► job_service.JobService     list/load/save_profile, preview, start, status, list_jobs, cancel,
+ui.run_ui (NiceGUI, loopback only; one page: converter / bench / test cards, Preview, Start, Run, Reports; /annotations page)
+   └─► job_service.JobService     list/load/save/delete/rename_profile, catalog, feasibility, preview, start, status, list_jobs, cancel,
           │                        retry_report, dispatch_reports, add_attachment, resolve_file
           ├─ workspace/jobs/<job_id>/   job.json, plan.json, request.json, launch.json, worker.log …
           ├─ launches `python -m dcdc_bench.job_service --worker <job>` detached or as a transient
@@ -122,8 +122,8 @@ tests.
 | `annotation_editor.py` | The UI's `/annotations` page for finished runs: upload a photograph, place sensor markers, save a new report revision. | `register_annotation_editor`, `eligible_jobs`, `image_assets`, `existing_annotations`, `asset_summary` | Touch the acquisition evidence (saving creates a report revision only). | `test_annotation_editor.py` |
 | `resources.py` | Host resource telemetry from `/proc`, the render memory gate, and descendant-process hygiene (session survivors, group termination). | `snapshot`, `MemoryGate`, `log_event`, `try_log_event`, `session_survivors`, `terminate_group`, `children_peak_rss_mib`, `main` | Change an outcome: telemetry skips a missing path and swallows I/O errors. | `test_resources.py`, `test_report_queue.py`, `test_reporting_resources.py` |
 | `job_service.py` | Local UI facade and detached job owner: saved profiles and previews, job folders, worker launch (detached or transient systemd unit), status, cancel, report retry and the report dispatcher. | `JobService` (`list_profiles`, `load_profile`, `save_profile`, `preview`, `start`, `status`, `list_jobs`, `cancel`, `retry_report`, `dispatch_reports`, `add_attachment`, `resolve_file`), `worker` | Let a UI request control instruments (docstring); start acquisition from `retry_report`; allow two ACTIVE jobs; launch a render from a request handler. | `test_job_service.py`, `test_run02_reconnect.py`, `test_report_queue.py` |
-| `ui_models.py` | Small pure presentation helpers for the bench page. | `plan_rows`, `edited_dut`, `edited_recipe`, `target_values`, `state_label`, `job_title`, `artifact_url`, `shutdown_label` | GUI, transport, worker or filesystem effects (docstring). | `test_ui.py` |
-| `ui.py` | The local NiceGUI bench workflow (tabs **Bench**, **DUT and recipe**, **Run**, **Reports**), loopback only, serving published run files. | `run_ui`, `require_loopback`, `published_file` | Own hardware (ownership stays in `JobService` workers, docstring); bind beyond loopback; block the event loop with instrument I/O (brief 4.1). | `test_ui.py`, browser-marked tests |
+| `ui_models.py` | Small pure presentation helpers for the bench page. | `plan_rows`, `edited_dut`, `edited_recipe`, `target_values`, `state_label`, `job_title`, `artifact_url`, `shutdown_label`, `recipe_title`, `recipe_grid`, `card_meta`, `limits_rows`, `skip_reasons`, `report_rows` | GUI, transport, worker or filesystem effects (docstring). | `test_ui.py` |
+| `ui.py` | The local NiceGUI bench workflow (one page: **Which converter?**, **Simulated or real bench?**, **Which test?**, a Preview/Start bar, Run, Reports), loopback only, serving published run files. | `run_ui`, `require_loopback`, `published_file` | Own hardware (ownership stays in `JobService` workers, docstring); bind beyond loopback; block the event loop with instrument I/O (brief 4.1). | `test_ui.py`, browser-marked tests |
 | `cli.py` | The small argparse CLI: `validate`, `plan`, `run`, `demo`, `analyze`, `report`, `ui`, `compare`, `doctor`, `publish`, `pdf-check`. | `main`, `parser` | Import real drivers on configuration or analysis paths (docstring). | `test_pipeline.py`, `test_ui.py`, `test_comparison.py`, `test_pdf_check.py`, `test_report_queue.py` |
 | `__init__.py`, `__main__.py` | Package docstring; `python -m dcdc_bench` dispatches to `cli.main`. | — | — | — |
 
@@ -149,7 +149,7 @@ host's free memory.
 | Folder | Contents |
 | --- | --- |
 | `profiles/` | Checked-in YAML: `dut/12t12-4a.yaml`; `bench/mock.yaml`, `bench/mock-thermal.yaml`, `bench/rigol.example.yaml` (blocked from execution); `recipes/` for the quick grid, rated grid, extended, source-limit, voltage-efficiency, thermal-mock and UVLO example procedures; `report/engineering.yaml`. |
-| `templates/` | `characterization.qmd` (the Quarto document), `theme/report.css`, `web/report.js` (the offline interaction script embedded in each HTML report). |
+| `templates/` | `characterization.qmd` (the Quarto document), `theme/report.css`, `theme/print-theme.typ` (the PDF "datasheet" theme: Letter/A4 page, header band with evidence label and local recording time, footer with run identity and page x of y, hanging section numbers, hairline tables, "Figure N." captions; applied through the `theme/typst-show.typ` Quarto template partial, which replaces Quarto's own `#show: article(...)` block), `theme/print-tables.typ` (PDF-02 table pagination), `web/report.js` (the offline interaction script embedded in each HTML report). The renderer writes the identity dictionary the theme reads into `print-header.typ` (Quarto header include) and copies the partial next to `report.qmd`. |
 | `tools/` | `setup.py` (virtual environment, pinned Quarto with SHA-256 check, browser detection) and `theme_preview.py` (the figure-theme previews described in [report-aesthetics-options.md](report-aesthetics-options.md)). |
 | `tests/` | The pytest suite and `fixtures/`. |
 | `workspace/`, `runs/`, `examples/generated/`, `diagnostics/`, `.tools/` | Created at run time and ignored by Git: the UI workspace, CLI run folders, demo output, `doctor` reports and the downloaded Quarto. |

@@ -63,9 +63,17 @@ def test_render_manifest_hashes_actual_renderer_theme_and_interaction_source(tmp
     (templates / "web").mkdir()
     (templates / "characterization.qmd").write_text("fixture template\n")
     theme = templates / "theme/report.css"
+    tables = templates / "theme/print-tables.typ"
+    print_theme = templates / "theme/print-theme.typ"
+    partial = templates / "theme/typst-show.typ"
     script = templates / "web/report.js"
+    head_script = templates / "web/report-head.js"
     theme.write_text("body { color: blue; }\n")
+    tables.write_text("#show table: it => it\n")
+    print_theme.write_text("#let dcdc-report(doc) = doc\n")
+    partial.write_text("#show: doc => dcdc-report(doc)\n")
     script.write_text("/* first interaction source */\n")
+    head_script.write_text("/* first report-head source */\n")
     monkeypatch.setattr(renderer, "TEMPLATES", templates)
     monkeypatch.setattr(renderer, "_browser_path", lambda: None)
     monkeypatch.setitem(sys.modules, "plotly.offline", SimpleNamespace(
@@ -86,12 +94,21 @@ def test_render_manifest_hashes_actual_renderer_theme_and_interaction_source(tmp
         return manifest["render_sources_sha256"]
 
     first = record(tmp_path / "r0001")
-    expected = {"renderer.py": Path(renderer.__file__), "report.css": theme, "report.js": script}
+    expected = {"renderer.py": Path(renderer.__file__), "report.css": theme, "print-theme.typ": print_theme,
+                "print-tables.typ": tables, "typst-show.typ": partial, "report.js": script,
+                "report-head.js": head_script}
     assert first == {name: hashlib.sha256(path.read_bytes()).hexdigest()
                      for name, path in expected.items()}
     theme.write_text("body { color: purple; }\n")
+    tables.write_text("#show table: it => block(breakable: false, it)\n")
+    print_theme.write_text("#let dcdc-report(doc) = { set page(paper: \"a4\"); doc }\n")
     script.write_text("/* second interaction source */\n")
+    head_script.write_text("/* second report-head source */\n")
     second = record(tmp_path / "r0002")
     assert first["renderer.py"] == second["renderer.py"]
+    assert first["typst-show.typ"] == second["typst-show.typ"]
     assert first["report.css"] != second["report.css"]
+    assert first["print-tables.typ"] != second["print-tables.typ"]
+    assert first["print-theme.typ"] != second["print-theme.typ"]
     assert first["report.js"] != second["report.js"]
+    assert first["report-head.js"] != second["report-head.js"]

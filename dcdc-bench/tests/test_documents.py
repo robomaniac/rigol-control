@@ -95,8 +95,12 @@ def viewer(documents):
         executable = _browser_path()
         browser = playwright.chromium.launch(executable_path=executable, headless=True,
             args=["--disable-dev-shm-usage", "--disable-gpu", "--no-sandbox", "--renderer-process-limit=1"])
+        # Playwright's service_workers="block" injects an unguarded read of
+        # navigator.serviceWorker, which itself throws in the served report's
+        # opaque sandbox. Offline mode and request routing enforce isolation;
+        # the served-report gate also checks native worker access is denied.
         context = browser.new_context(viewport={"width": 1365, "height": 980}, accept_downloads=True,
-                                      service_workers="block", offline=True)
+                                      offline=True)
         blocked = []
         def block(route):
             if route.request.url.startswith(("http:", "https:")):
@@ -135,6 +139,113 @@ def test_web01_web02_offline_exact_shipped_runtime(viewer, documents):
     _open_report(page, documents[0] / "report.html")
 
 
+
+def _browser_dispatches_print_events(context) -> bool:
+    """Probe on a blank page whether window.print() raises beforeprint/afterprint in this browser.
+
+    Headless Chrome for Testing (CI) does not; the system Chromium on the bench Pi does. The probe
+    decides a skip for the environment, never for the report under test.
+    """
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+    probe = context.new_page()
+    try:
+        probe.goto("about:blank")
+        probe.evaluate("""() => { window.__probe = [];
+            addEventListener('beforeprint', () => __probe.push('b')); addEventListener('afterprint', () => __probe.push('a'));
+            setTimeout(() => window.print(), 0); }""")
+        try:
+            probe.wait_for_function("window.__probe.length === 2", timeout=5000)
+            return True
+        except PlaywrightTimeoutError:
+            return False
+    finally:
+        probe.close()
+
+
+@pytest.mark.browser
+def test_served_report_opaque_origin_draws_and_prints_without_page_errors(viewer, documents):
+    """The real artifact headers add restrictions absent from a file:// view.
+
+    Reuse the release-gate browser; allow only this loopback URL through its
+    existing external-request block. A native print event verifies the modal
+    permission without substituting window.print or dispatching fake events.
+    """
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import threading
+    from dcdc_bench.ui import file_headers
+
+    page, errors, blocked = viewer
+    artifact = documents[0] / "report.html"
+    document = artifact.read_bytes()
+    headers = file_headers(artifact)
+    assert "allow-same-origin" not in headers["Content-Security-Policy"]
+
+    class ReportHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path != "/report.html":
+                self.send_error(404)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(document)))
+            for name, value in headers.items():
+                self.send_header(name, value)
+            self.end_headers()
+            self.wfile.write(document)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), ReportHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    url = f"http://127.0.0.1:{server.server_port}/report.html"
+    allow_loopback = lambda route: route.continue_()
+    page.route(url, allow_loopback)
+    page.context.set_offline(False)
+    initial_errors = len(errors)
+    try:
+        response = page.goto(url, wait_until="load", timeout=120000)
+        assert response.status == 200
+        assert response.headers["content-security-policy"] == headers["Content-Security-Policy"]
+        page.wait_for_function("document.documentElement.dataset.reportReady === 'true'", timeout=60000)
+        assert page.locator('.js-plotly-plot').count() == 3
+        assert page.evaluate("window.origin") == "null"
+        assert page.evaluate("""() => {
+            try { void window.sessionStorage; return false; }
+            catch (error) { return error.name === 'SecurityError'; }
+        }"""), "The report must retain an opaque origin with native storage denied"
+        assert page.evaluate("""() => {
+            try { void navigator.serviceWorker; return false; }
+            catch (error) { return error.name === 'SecurityError'; }
+        }"""), "The opaque report sandbox must deny service worker access"
+        assert page.locator('head #dcdc-report-head').count() == 1
+        page.evaluate("""() => {
+            localStorage.setItem('report-gate', 'document only');
+            window.__printEvents = [];
+            addEventListener('beforeprint', () => __printEvents.push('before'));
+            addEventListener('afterprint', () => __printEvents.push('after'));
+        }""")
+        assert page.evaluate("localStorage.getItem('report-gate')") == "document only"
+        # Quarto also reads storage in its resize/reader-mode handlers.
+        page.set_viewport_size({"width": 1000, "height": 850})
+        if not _browser_dispatches_print_events(page.context):
+            pytest.skip("this headless browser never dispatches beforeprint/afterprint, so the print permission "
+                        "cannot be observed here (Chrome for Testing on CI); the Pi's Chromium does dispatch them")
+        page.locator('#print-view').click()
+        page.wait_for_function("window.__printEvents.join(',') === 'before,after'", timeout=30000)
+        assert errors[initial_errors:] == []
+        assert not blocked, f"Served report attempted external requests: {blocked}"
+    finally:
+        page.unroute(url, allow_loopback)
+        page.context.set_offline(True)
+        page.set_viewport_size({"width": 1365, "height": 980})
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+        _open_report(page, artifact)
+
+
 @pytest.mark.browser
 def test_web03_web04_state_visibility_resets(viewer):
     page, _, _ = viewer
@@ -170,7 +281,22 @@ def test_web_chart_captions_remain_below_svg_on_desktop_and_mobile(viewer):
                     captionTop: view.querySelector('figcaption').getBoundingClientRect().top};
             })""")
             assert boxes and all(box["captionTop"] >= box["svgBottom"] - 1 for box in boxes), boxes
-            assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), width
+            # No horizontal overflow: the document is no wider than the layout viewport.
+            # `clientWidth` excludes a classic (non-overlay) scrollbar, which CI's Chromium
+            # draws and the bench Pi's does not; 2 px absorbs fractional layout rounding.
+            # On failure, name the elements that stick out so the offender is known.
+            overflow = page.evaluate("""() => {
+                const limit = document.documentElement.clientWidth + 2;
+                const wide = document.documentElement.scrollWidth > limit;
+                const offenders = wide ? [...document.body.querySelectorAll('*')]
+                    .filter(el => el.getBoundingClientRect().right > limit && el.getClientRects().length)
+                    .slice(0, 12).map(el => (el.tagName.toLowerCase() + (el.id ? '#' + el.id : '') +
+                        (el.className && typeof el.className === 'string' ? '.' + el.className.trim().split(/\\s+/).join('.') : '')
+                        + ' right=' + Math.round(el.getBoundingClientRect().right))) : [];
+                return {viewport: innerWidth, layout: document.documentElement.clientWidth,
+                        document: document.documentElement.scrollWidth, offenders};
+            }""")
+            assert overflow["document"] <= overflow["layout"] + 2, (width, overflow)
     finally:
         page.set_viewport_size({"width": 1365, "height": 980})
 
@@ -254,6 +380,20 @@ def test_web_time_stage_guides_follow_filters_without_creating_observations(view
         page.evaluate("dcdcReport.restoreDefaults()")
 
 
+def _richest_series(model, spec):
+    """The series with the most valid, finite points on this figure.
+
+    The simulated demo's first series is an input phase that can end at the
+    cold-start gate with no valid point; fixtures must not assume series[0]
+    has data to toggle or edit.
+    """
+    def valid_count(series):
+        ids = set(series["point_ids"])
+        return sum(1 for point in model["points"] if point["point_id"] in ids and point["qualification"] == "valid"
+                   and point.get(spec["y_key"]) is not None)
+    return max(spec["series"], key=valid_count)
+
+
 @pytest.mark.browser
 def test_web03_real_legend_checkbox_and_band_share_export_selection(viewer, documents, tmp_path):
     def add_fixture_bands(model):
@@ -266,12 +406,13 @@ def test_web03_real_legend_checkbox_and_band_share_export_selection(viewer, docu
 
     with _report_variant(viewer, documents, tmp_path, add_fixture_bands) as (page, model):
         spec = model["figures"][0]
-        key = format(spec["series"][0]["vin_target_V"], "g")
+        series = _richest_series(model, spec)
+        key = format(series["vin_target_V"], "g")
         graph_id = "plot-" + spec["id"]
         selector = '#trace-options input[data-series="' + key + '"]'
         graph = page.locator("#" + graph_id)
-        # Actual Plotly legend event, including its click-delay behavior.
-        graph.locator('.legend .legendtoggle').first.click()
+        # Actual Plotly legend event, including its click-delay behavior, on the entry of a series that has points.
+        graph.locator('.legend .traces').filter(has_text=series["label"]).first.locator('.legendtoggle').click()
         page.wait_for_function("key => !dcdcReport.state.selected_series.includes(key)", arg=key)
         page.evaluate("dcdcReport.whenIdle()")
         assert not page.locator(selector).is_checked()
@@ -332,7 +473,7 @@ def test_web08_log_mode_excludes_zero_and_negative_current_points_explicitly(vie
 
     def nonpositive_fixture(model):
         spec = next(f for f in model["figures"] if f["id"] == "fig-efficiency")
-        series = spec["series"][0]
+        series = _richest_series(model, spec)
         rows = [p for p in model["points"] if p["point_id"] in series["point_ids"] and p["qualification"] == "valid"
                 and p.get("efficiency_pct") is not None and (p.get("Iout_A") or 0) > 0]
         assert len(rows) >= 4, "the fixture needs positive points left after the two edits"
@@ -358,12 +499,15 @@ def test_web08_log_mode_excludes_zero_and_negative_current_points_explicitly(vie
         assert 0 in trace_x() and -.0004 in trace_x()
         assert page.evaluate(f"{graph}._fullLayout.xaxis.range")[0] <= -.0004, "default limits include the negative reading"
         assert excluded <= visible_ids()
+        # Invalid or unmeasured points are gaps in every mode; only the two
+        # nonpositive readings may be added to them by the log view.
+        linear_gaps = trace_x().count(None)
 
         page.evaluate("dcdcReport.setView({log_current:true})")
         page.evaluate("dcdcReport.whenIdle()")
         assert page.evaluate(f"{graph}._fullLayout.xaxis.type") == "log"
         xs = trace_x()
-        assert xs.count(None) == 2, "the two nonpositive readings become gaps"
+        assert xs.count(None) == linear_gaps + 2, "the two nonpositive readings become gaps"
         assert sorted(x for x in xs if x is not None) == chosen["positive"], "no value is substituted or shifted"
         assert "2 nonpositive-current point(s) omitted from this log view" in page.locator("#status-fig-efficiency").inner_text()
         assert not (excluded & visible_ids())
@@ -453,10 +597,20 @@ def test_web_compact_hover_desktop_mobile_and_alternate_axis(viewer):
             coordinate = _hover_point(page, point["point_id"])
             tooltip = page.locator('#plot-fig-efficiency .hoverlayer .hovertext')
             box = tooltip.bounding_box()
-            assert box and box["width"] <= 300 and box["height"] <= 100, box
+            # Compact: at most four 12 px lines, none longer than 60 characters, in the report's
+            # hover type size. A pixel width would measure the fallback font, not the label: CI's
+            # Chromium (DejaVu Sans) drew the same text 347 px wide where the bench Pi's UI font
+            # gave 300 px. Chromium reports fractional layout boxes; allow sub-pixel rounding.
+            texts = tooltip.locator('tspan.line').all_text_contents()
+            font_size = tooltip.evaluate("el => parseFloat(getComputedStyle(el.querySelector('text')).fontSize)")
+            assert box and box["height"] <= 101 and font_size <= 13, (box, font_size)
+            assert texts and max(len(text) for text in texts) <= 60, texts
             assert box["x"] >= -1 and box["x"] + box["width"] <= width + 1, box
             assert box["y"] >= -1 and box["y"] + box["height"] <= height + 1, box
-            assert tooltip.locator('tspan.line').count() == 3
+            # Condition, x, y — plus one labeled line only where a readback budget was evaluated (UNC-02).
+            lines = tooltip.locator('tspan.line').count()
+            has_band = "Expanded uncertainty:" in tooltip.text_content()
+            assert lines == (4 if has_band else 3), (lines, tooltip.text_content())
             assert tooltip.locator('.name').count() == 0, "Duplicate series bubble must be absent"
             colors = tooltip.evaluate("""el => ({background: getComputedStyle(el.querySelector('path')).fill,
                 text: getComputedStyle(el.querySelector('text')).fill})""")
@@ -576,7 +730,7 @@ def test_exp01_exported_svg_png_context(viewer, tmp_path):
     encoded=svg_url.split(',',1)[1]
     svg=base64.b64decode(encoded).decode() if ';base64,' in svg_url else unquote(encoded)
     assert 'SYNTHETIC' in svg and '12T12-4A' in svg and 'fig-efficiency' in svg
-    assert 'source-to-DUT-output' in svg
+    assert 'source-to-load-terminal' in svg  # the demo mock bench mirrors the physical bench's local-sense boundary
     png=page.evaluate("dcdcReport.exportFigure('fig-efficiency','png')")
     assert png.startswith('data:image/png;base64,')
     assert len(base64.b64decode(png.split(',',1)[1])) > 10000
@@ -624,3 +778,31 @@ def test_pdf_build_manifest_reports_real_success(documents):
         for fmt in ('html','pdf'):
             artifact=directory/f'report.{fmt}'
             assert manifest['artifacts'][fmt]['sha256'] == hashlib.sha256(artifact.read_bytes()).hexdigest()
+
+
+@pytest.mark.pdf
+def test_pdf_letter_pages_carry_identity_and_page_one_reads_in_plain_words(documents):
+    """Brief §12.6: page numbers and run identity on every page; §12.3: the first page is a summary
+    whose identity block reads in plain words, with the local recording time and identifiers last."""
+    from pypdf import PdfReader
+    for directory in documents:
+        model = json.loads((directory / 'report_model.json').read_text())
+        reader = PdfReader(directory / 'report.pdf')
+        assert json.loads((directory / 'build_manifest.json').read_text())['paper'] == 'letter'
+        for page in reader.pages:
+            assert (round(float(page.mediabox.width)), round(float(page.mediabox.height))) == (612, 792)
+        pages = [' '.join((page.extract_text() or '').split()) for page in reader.pages]
+        for number, text in enumerate(pages, 1):
+            assert model['run_id'] in text and f"Report revision {model['report_revision']}" in text
+            assert f'Page {number} of {len(pages)}' in text
+            assert model['evidence_label'] in text
+        first = pages[0]
+        for label in ('About this report', 'Device tested', 'Equipment', 'Measurement points', 'Recorded',
+                      'Evidence', 'Traceability', 'these match this document to its raw data files'):
+            assert label in first, label
+        # The header band converts the run's UTC start to the bench computer's zone and names it.
+        assert re.search(r'Recorded [A-Z][a-z]{2} \d{1,2}, \d{4}, \d{2}:\d{2} \S+', first), first[:400]
+        assert 'bench-computer local time; evidence files record UTC' in first
+        assert 'Summary' in first and 'Device tested' in first
+        assert re.search(r'Figure 1\. ', '\n'.join(pages)), 'captions read "Figure N." and sit below the figure'
+        assert model['analysis_id'] in first and 'settled-dc' in first

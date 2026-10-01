@@ -26,11 +26,12 @@ Contents: [1. What this software does](#1-what-this-software-does) ·
 2. You describe the converter, the bench limits and the test grid (input
    voltages × output loads) in saved *profiles*; a planner expands every
    requested point and marks it `executable`, `assumption_limited`,
-   `unsupported` or `approval_blocked` before anything is powered.
+   `unsupported` or `approval_blocked` (the planner's words, defined in the
+   [glossary](glossary.md)) before anything is powered.
 3. A separate worker process then steps through the executable points, waits
    for the output to settle, records time-stamped voltage and current readings
    from both instruments, and verifies that both outputs are OFF at the end.
-4. A pure analysis stage computes path efficiency, power loss and output
+4. A pure analysis stage computes [path efficiency](glossary.md#measurement-words), power loss and output
    regulation from the preserved raw samples, and a renderer produces an
    interactive HTML report plus a matching vector PDF.
 5. Everything runs locally on a Linux computer (the development bench is a
@@ -47,12 +48,19 @@ What it does **not** do:
   command is deliberately disabled (`cli.py`); real jobs go through the UI's
   job service or the fixed, explicitly `--arm`ed procedures described in the
   test documents.
-- It does not measure no-load consumption, temperature, transients or ripple,
-  does not use remote (4-wire) sensing and does not send arbitrary SCPI
-  commands from the UI workflow ([configured-runs.md](configured-runs.md)).
-- It does not certify measurement accuracy. Until the bench profile carries
-  transcribed readback specifications, reports say uncertainty is
-  **unquantified** ([uncertainty-budget.md](uncertainty-budget.md)).
+- It does not measure temperature, transients or ripple, does not use remote
+  (4-wire) sensing and does not send arbitrary SCPI commands from the UI
+  workflow ([configured-runs.md](configured-runs.md)). A requested 0 A load is
+  recorded as *enabled with no external load*: the input consumption with the
+  converter powered and the load input OFF. That is not the controller's
+  quiescent current, no efficiency is computed at 0 A, and on the real bench the
+  observation is not yet qualified ([glossary](glossary.md)).
+- It does not certify measurement accuracy. Reports from the **real** bench say
+  uncertainty is **unquantified** until its bench profile carries transcribed
+  readback specifications ([uncertainty-budget.md](uncertainty-budget.md)); the
+  simulation's reports show a ± that comes from a synthetic example
+  specification written into the mock bench profile, not from an instrument
+  (section 4.6).
 - It is not a substitute for instrument protection settings or for a person at
   the bench. Guards are polled DC stop criteria, not transient protection.
 - It publishes nothing and has no authentication; the UI binds to loopback and
@@ -76,14 +84,15 @@ What it does **not** do:
 
    ```bash
    git clone https://github.com/robomaniac/rigol-control.git && cd rigol-control
+   git checkout dcdc-bench-hardening
    ```
 
    *What you should see:* a folder containing `dcdc-bench/`, `Software/`,
-   `Documentation/`, `Electrical/`, `Data/` and `pyproject.toml`. The bench
-   subproject was developed on the `dcdc-bench-hardening` branch and had not
-   been pushed when this guide was written (dcdc-bench README, "What comes
-   next"). If `dcdc-bench/` is missing after cloning, ask the project owner
-   which branch to check out.
+   `Documentation/`, `Electrical/`, `Data/` and `pyproject.toml`, and
+   `git status` reporting `On branch dcdc-bench-hardening`. `main` also has
+   the `dcdc-bench/` subproject (pull request #1 merged the branch on
+   2026-09-29), but it lags the branch by dozens of commits, so the branch is
+   the one to use until the next pull request updates `main`.
 
 2. Check Python.
 
@@ -133,9 +142,9 @@ What it does **not** do:
    python3 dcdc-bench/tools/setup.py
    ```
 
-   What it does ([tools/setup.py](../tools/setup.py)): creates a **second**
-   environment at `dcdc-bench/.venv` with the `report,test` extras (the
-   dcdc-bench README's demo instructions use that one; you can ignore it and
+   What it does ([tools/setup.py](../tools/setup.py)): creates an optional
+   **second** environment at `dcdc-bench/.venv` with the `report,test` extras
+   (only the dcdc-bench README's Windows demo commands use it; ignore it and
    keep using the root `.venv` from step 3), downloads **Quarto 1.10.18** for
    Linux x86_64/ARM64 or Windows x64 into `dcdc-bench/.tools/` after verifying
    the published SHA-256, and, only if no `chromium-headless-shell`, `chromium`
@@ -154,7 +163,12 @@ What it does **not** do:
    .venv/bin/dcdc-bench --help
    ```
 
-   *What you should see:* `usage: ... {validate,plan,run,demo,analyze,report,ui,compare,doctor,publish,pdf-check} ...`.
+   *What you should see:* `usage: dcdc-bench [-h] {validate,plan,run,demo,analyze,report,ui,compare,doctor,publish,pdf-check} ...`
+   followed by a one-line description of each command. Every subcommand
+   answers `--help` with its arguments, their defaults and what it does or
+   does not touch (for example `.venv/bin/dcdc-bench run --help` says that
+   `--mode real` and `--arm` are refused there). `python -m dcdc_bench --help`
+   prints the same text.
 
    ```bash
    .venv/bin/benchctl --help
@@ -211,13 +225,13 @@ converter, source and load.
    that exceed the 1 A source budget at the assumed 80 % efficiency; they are
    kept in the plan with an explanation and skipped.
 
-2. Generate the three simulated example reports.
+2. Generate the four simulated example reports.
 
    ```bash
    .venv/bin/dcdc-bench demo --out dcdc-bench/examples/generated
    ```
 
-   **Memory and time.** This runs three mock acquisitions and six document
+   **Memory and time.** This runs four mock acquisitions and eight document
    builds (HTML and PDF each). On the 1 GB verification Pi the three run
    folders were created about **3.5 minutes apart** (run IDs `083115`,
    `083435`, `083852` in [implementation_status.md](implementation_status.md)),
@@ -230,7 +244,8 @@ converter, source and load.
 
    *What you should see:* `Mock normal: acquiring and rendering…`,
    `Saved dcdc-bench/examples/generated/normal/<run_id>`, the same for
-   `setup-limited` and `aborted`, then `Open: /abs/path/dcdc-bench/examples/generated/index.html`.
+   `setup-limited`, `aborted` and `best-effort`, then
+   `Open: /abs/path/dcdc-bench/examples/generated/index.html`.
 
 3. Open the index in a browser.
 
@@ -245,18 +260,19 @@ converter, source and load.
    `ssh -L 8082:127.0.0.1:8082 <user>@<pi>`) and open `http://localhost:8082/`.
 
    *What you should see:* a page titled **DC–DC converter characterization**
-   marked **SYNTHETIC — software demonstration only** with three entries, each
+   marked **SYNTHETIC — software demonstration only** with four entries, each
    linking an *Interactive report* and a *Canonical PDF*.
 
-4. What the three examples show (dcdc-bench README):
+4. What the four examples show (dcdc-bench README):
 
    | Example | What to inspect |
    | --- | --- |
    | Normal test | Valid acquired points, planning exclusions, graphs and evidence |
    | Supply reaches its current limit | A simulated source enters current limiting; that point cannot support a nominal efficiency claim |
    | Test stopped early | An early stop preserves completed points, unrun points and shutdown evidence |
+   | ISO 16750-2 §4.3.1.2 jump start, best effort | The deviation sheet: what the clause asks against what the simulated supply commanded (26 V held 60 s from 10.8 V), host-clock intervals, edges "not measured", the hold level as a measured point; its approval is part of the demonstration |
 
-   Each run asks the simulated supply for **12, 24 and 30 V** and the
+   The first three runs ask the simulated supply for **12, 24 and 30 V** and the
    simulated load for **0, 0.05, 0.1, 0.25, 0.5, 0.75 and 1 A**. In the HTML,
    hover the markers, choose curves and quantities, zoom, and export CSV/SVG/PNG.
    **Reset zoom** keeps your selections; **Restore default view** resets them.
@@ -271,22 +287,70 @@ converter, source and load.
    *What you should see:* the same JSON summary as `validate`, and a `plan.json` file.
 
    ```bash
-   .venv/bin/dcdc-bench run --plan plan.json --mode mock --out dcdc-bench/runs
+   .venv/bin/dcdc-bench run --plan plan.json --mode mock --out dcdc-bench/examples/generated/practice
    ```
 
-   *What you should see:* the run directory path `dcdc-bench/runs/<run_id>`
-   (exit code 0 when completed, 4 otherwise). `--scenario setup-limited` or
-   `aborted` reproduces the other two demo cases. This also renders reports,
-   so the memory note above applies.
+   *What you should see:* the run directory path
+   `dcdc-bench/examples/generated/practice/<run_id>` (exit code 0 when
+   completed, 4 otherwise). `--scenario setup-limited` or `aborted` reproduces
+   the other two demo cases. This also renders reports, so the memory note
+   above applies. Keep practice runs under `dcdc-bench/examples/generated/`
+   (ignored by Git) or use the page's simulation (step 6); never write them
+   into `dcdc-bench/runs/`, which holds the project's only copy of the real
+   measurements (that is where the command's default `--out runs` lands when it
+   is run from `dcdc-bench/`).
 
-6. Optional: open the bench page with the simulated bench only.
+6. Optional: open the bench page with the simulation only.
 
    ```bash
    .venv/bin/dcdc-bench ui --root dcdc-bench/workspace
    ```
 
-   Without `--inventory` no real bench can start; the button reads **Start
-   simulated test**. Section 6 describes the page.
+   *Reaching the page from your own computer.* The page listens only on
+   the Pi's own loopback address (`127.0.0.1`), on purpose: it has no login
+   and, once a bench is approved, it can energize equipment. So typing the
+   Pi's LAN address (`http://192.168.x.x:8082`) in your browser does **not**
+   work, and `http://localhost:8082` on your computer only works once that
+   port is tunnelled to the Pi. Two ways to tunnel it:
+
+   - *VS Code Remote-SSH:* press Ctrl+Shift+P, run *Forward a Port*,
+     type the port (`8082` for this command; `8081` for the installed bench
+     service), then open the *Forwarded Address* the *Ports* panel shows,
+     which is `http://localhost:8082/` or `http://localhost:8081/` on your
+     computer. The forward lasts while VS Code is connected; add it again after
+     a reconnect.
+   - *Plain SSH:* `ssh -L 8081:127.0.0.1:8081 <user>@<pi>` in a terminal on
+     your computer, then open `http://localhost:8081/` in your browser.
+
+   Nothing on the Pi has to change for either; see
+   [Open a report from the Pi](../../Documentation/Viewing-Local-Reports.md)
+   for the same steps with screenshots of the Ports panel. The simulation
+   needs no approval: pick **Simulation**, a converter, **Normal operating
+   voltage**, then **Preview** and **Start simulation**.
+
+   Without `--inventory` no real bench can start. Under **2 Simulated or real
+   bench?** the **Simulation** tile is selected; it shows the synthetic
+   envelope (0–60 V, 1 A, 60 W, no protective limits) and a panel **What the
+   simulation can and cannot do**. Click **Preview**, then **Start simulation**.
+   The bottom bar says why Start is disabled until then (**Preview first — Start
+   unlocks after a fresh plan.**).
+
+   *What you should see after Start:* the header pill reads **Simulation:
+   Acquiring… point 2 of 21** (the mode word leads every phrase), and the
+   **Run** section lists the four steps with the current one marked:
+   **Acquiring measurements** (seconds, on a virtual clock) →
+   **Measurements saved — report queued** (waits until no test is running and
+   enough memory is free; a held-back report says, for example, **Waiting for
+   free memory: 96 MiB available, 150 MiB needed**) → **Preparing HTML and PDF**
+   (typically one to four minutes on a Raspberry Pi) → **Complete**, when
+   **Open HTML** and **Open PDF** appear under **Run** and in the **Reports**
+   row labelled **Simulation · synthetic data**. Any ± in that report is
+   uncertainty from the synthetic specification, not an instrument: the mock
+   bench profile carries example readback specifications so the budget's
+   format can be demonstrated. Skipped points appear in the plan with the
+   planner's own words (`assumption_limited`, `unsupported`, `approval_blocked`)
+   and a legend; the page footer links the [glossary](glossary.md). Section 6
+   describes the rest of the page.
 
 ## 5. Critical before any real test
 
@@ -320,8 +384,9 @@ to this software.
    demo; for a converter test the DUT sits between the two instruments.
    *Why:* the software cannot detect reversed polarity or a CH2 connection.
    You will be asked to confirm **Converter input/output wiring and polarity
-   are correct** and **The converter input is connected to power-supply
-   channel 1** before every Start.
+   are correct** and **The converter is on DP821A CH1 (not CH2) and the load
+   input** before every Start (the supply model in that label comes from the
+   bench profile).
 
 3. **Use local sensing.** The supported wiring is DP821A CH1 with **local load
    sensing**: `remote_sense_required` must be `false` for source and load,
@@ -367,9 +432,9 @@ to this software.
 
    | Field | Where | What you are asserting |
    | --- | --- | --- |
-   | `execution_approval.real_hardware_enabled` | DUT profile | This converter profile may be used on real hardware at all. UI: **This converter profile is approved for real hardware**. |
+   | `execution_approval.real_hardware_enabled` | DUT profile | This converter profile may be used on real hardware at all. UI: **This converter is approved for the real bench**. |
    | `execution_approval.wiring_and_polarity_confirmed` | DUT profile | The wiring plan and polarity for this converter were reviewed. UI: **The wiring plan and polarity for this converter were reviewed**. |
-   | `protective_controls.approved` | bench profile | The protective limits saved in the bench profile were reviewed and approved for this bench. UI: **These protective limits were reviewed and are approved for this bench**. |
+   | `protective_controls.approved` | bench profile | The protective limits saved in the bench profile were reviewed and approved for this bench. UI: **I reviewed these limits — required once** under the preset pill; once saved it reads **Limits approved for this preset**. |
 
    The bench the UI seeds for real use, `rigol-local-limited`, ships with
    `approved: false`; the shipped DUT profile ships with both approvals
@@ -426,11 +491,16 @@ to this software.
 
 8. **Keep the physical disconnect within reach and stay at the bench.** Every
    recipe carries `allow_unattended: false` and `require_operator_arming:
-   true`; the Start confirmation includes **I reviewed these limits and will
-   supervise the run**. Software cleanup can fail on a connection, identity,
-   process or power fault ([Electrical/Wiring.md](../../Electrical/Wiring.md)),
-   and a disconnected browser or SSH session must never be read as "outputs
-   OFF" ([bench-ui.md](bench-ui.md)). Never leave a real run unattended.
+   true`, and the page's **What the real bench can and cannot do** panel lists
+   running unsupervised among the things the bench cannot do: an operator
+   stays at the bench. The Start confirmation asks you to tick **I reviewed
+   the protective limits: 1 A supply · 26 V input · 13.2 V / 2.55 A output**
+   (the selected preset's limits); no checkbox asks for a supervision promise,
+   so staying is your responsibility, not a form field. Software cleanup can
+   fail on a connection, identity, process or power fault
+   ([Electrical/Wiring.md](../../Electrical/Wiring.md)), and a disconnected
+   browser or SSH session must never be read as "outputs OFF"
+   ([bench-ui.md](bench-ui.md)). Never leave a real run unattended.
 
 9. **Make sure the host is ready.** Check memory (`free -m`,
    `.venv/bin/python -m dcdc_bench.resources`), close browsers and editors you
@@ -469,57 +539,66 @@ to this software.
    ssh -L 8082:127.0.0.1:8082 <user>@<pi-hostname>
    ```
 
-   *What you should see:* `http://localhost:8082/` shows **DC–DC Bench** with
-   four tabs: **Bench**, **DUT and recipe**, **Run**, **Reports**. A forward
-   only reaches a running server; it does not start one
+   *What you should see:* `http://localhost:8082/` shows **DC–DC Bench** as one
+   page: **1 Which converter?**, **2 Simulated or real bench?**, **3 Which
+   test?**, a **Run** section, **Reports**, and a bar fixed to the bottom with
+   **Preview** and **Start**. A forward only reaches a running server; it does
+   not start one
    ([Viewing-Local-Reports.md](../../Documentation/Viewing-Local-Reports.md)).
 
-3. **Select.** On **Bench**, choose `rigol-local-limited`. The banner reads
-   **REAL BENCH — Start can enable the connected instruments**. Open **Bench
-   limits**, check the four protective values, and tick the approval box. On
-   **DUT and recipe**, choose the converter, tick the label check and the two
-   approvals under **Real-hardware approval for this converter profile**, then
-   choose `real-24v-small-grid` (24 V; 0.1, 0.25, 0.5 A; 8 s per load) or type
-   your own comma-separated **Input voltages (V)** and **Output loads (A)**.
-   Every voltage is paired with every load. Write the setup in **Test notes**;
-   they appear in the report as operator observations.
+3. **Select.** Click the converter card; if it says *Not yet approved for the
+   real bench*, choose **Edit**, tick the label check and the two approvals
+   under **Real-bench approval for this converter**, and **Save converter**.
+   Click the **Real bench** tile, then the **24 V converter tests** preset pill
+   (`rigol-local-limited`); check the four protective limits in the small table
+   and tick **I reviewed these limits — required once**. Click the **24 V small
+   grid — 0.1 / 0.25 / 0.5 A** card (`real-24v-small-grid`: 24 V; 0.1, 0.25,
+   0.5 A; 8 s per load), or **+ New test** and type your own comma-separated
+   **Input voltages (V)** and **Output loads (A)**. Every voltage is paired
+   with every load. The summary line and the bottom bar show the three choices.
 
-4. **Preview.** Click **Preview test and limits**.
+4. **Preview.** Click **Preview** in the bottom bar.
 
-   *What you should see:* the **Run** tab opens with **Review this test**:
-   *Ready points* `n / total`, *Planned acquisition* in minutes, *Bench: Real
-   equipment*, a line with the supply current limit and output guards, red
-   error lines if the plan is unsupported, grey warnings, and a table of every
-   requested point with its **Plan** status and **Reason**. Excluded points
-   stay in the saved plan and are skipped. Preview saves your profiles and
-   never enables an output. Changing any field clears the preview.
+   *What you should see:* a **Plan** panel with *Points that will run*
+   `n / total`, *Skipped* with the grouped reasons, *Estimated time*, *Bench:
+   Real — DP821A CH1 + DL3031A*, the limits line, and in red a **Before Start**
+   list if anything blocks a real start (approvals, inventory, unsupported
+   settings). Every requested point is listed with its **Plan** status and
+   **Reason** under *All requested points and planning notes*. Excluded points
+   stay in the saved plan and are skipped. Preview never enables an output.
+   Changing any of the three selections marks the plan stale. Write the setup
+   in **Notes for the report**; they appear as operator observations.
 
-5. **Confirm.** Under **Confirm the physical setup**, tick the three boxes and
-   type both serial numbers exactly as configured (the page shows
-   `Power-supply serial number configured: <serial>` from your inventory).
+5. **Confirm.** Click **Start test on the real bench**. Under **Confirm the
+   physical setup**, tick the three boxes and type both serial numbers exactly
+   as configured (each field shows `configured: <serial>` from your inventory).
 
-   *What you should see:* **Start test** becomes enabled only when the preview
-   has no errors, all boxes are ticked, both serials match and no other job is
-   active.
+   *What you should see:* Start itself is enabled only when the preview has no
+   errors and no other job is active; **Switch on and start** becomes enabled
+   only when all boxes are ticked and both serials match.
 
-6. **Start.** Click **Start test** once. The service rebuilds the plan from
+6. **Start.** Click **Switch on and start** once. The service rebuilds the plan from
    the saved profiles, re-runs every real-plan check, verifies the inventory
    hash, takes the bench lease and launches a dedicated worker. The worker
    verifies both `*IDN?` serials against the inventory and the models against
    `DP821A`/`DL3031A`, switches both outputs OFF, programs the protections,
    proves an unloaded startup, then enables the load.
 
-   *What you should see:* the status card moves through **Waiting to start →
+   *What you should see:* the header pill shows **Acquiring… point n of m**
+   with the local start time and elapsed time, the three questions are locked,
+   and the **Run** section moves through **Waiting to start →
    Acquiring measurements**, with `n / m load points accepted`, the requested
    input and load, live **Measured input / Supply current / Measured output /
    Load current**, **Stage**, **Elapsed seconds**, **Last measurement age (s)**
    and **Supply mode**. Live values are unqualified readings; the report applies
    qualification.
 
-7. **Stop** (if needed). Click **Stop test safely**. The worker performs its
-   bounded cleanup and records the resulting states.
+7. **Stop** (if needed). Click **Stop…** at the far right of the header, then
+   **Confirm stop** (or **Keep running**). The worker performs its bounded
+   cleanup and records the resulting states.
 
-   *What you should see:* `Stop requested — waiting for shutdown`, then either
+   *What you should see:* `Stop requested — waiting for the worker` in the
+   header, *Stop requested: <local time>* in the Run section, then either
    **Supply output and electronic load are verified OFF.** or **Output shutdown
    is not fully verified. Check the instruments before touching the wiring.**
    Do not touch the wiring until you see the first message and have looked at
@@ -537,7 +616,7 @@ to this software.
    takes several minutes on a Pi.
 
    *What you should see:* **Preparing HTML and PDF**, then **Complete** with
-   links **Open interactive HTML**, **Open PDF** and **Report data JSON**.
+   links **Open HTML**, **Open PDF** and **Report data JSON**.
 
 9. **Find the evidence on disk.** Each job is one folder:
 
@@ -557,9 +636,9 @@ to this software.
    analysis and reports get their own identifiers and never rewrite it.
 
 10. **Retry a report** without powering the converter again. On a finished job
-    whose HTML or PDF failed, the Run tab shows **Report generation needs
-    attention: PDF. Saved measurements are preserved.** and a **Retry report
-    generation** button; it queues a report-only worker (`report-queued`) and
+    whose HTML or PDF failed, the Run section shows **Report generation needs
+    attention: PDF. Saved measurements are preserved.** and the job's row in
+    **Reports** offers **Regenerate report**; it queues a report-only worker (`report-queued`) and
     writes a new revision `rNNNN`. From a terminal, on this or another
     computer that has the run folder and the report tools:
 
@@ -626,11 +705,11 @@ to this software.
 | `Configure the private bench inventory before a real run` or `Private inventory needs psu_rigol_1, rigol_dp800 and its expected serial` | The UI was started without `--inventory`, or `lab.yaml` lacks the device names, drivers or serials. | `Software/config/lab.yaml`; restart the UI with `--inventory`. |
 | `Confirmed instrument serials do not match the preview` / `Instrument confirmation does not match the saved inventory` | The typed serial differs from `expected_serial`. | Copy the serial shown as `... serial number configured:` exactly. |
 | Job fails early with `serial mismatch for 'source': expected ..., got ...` or `This backend requires the verified DP821A model` | The instrument at the configured address is not the one in the inventory. | `dcdc-bench/workspace/jobs/<job_id>/worker.log` and `runs/<run_id>/raw/events.jsonl`; re-run `benchctl identify --setup main_bench`. |
-| `A job is already acquiring or reporting; no automatic hardware queue` or `Bench is busy acquiring or rendering; retry explicitly after it finishes` | Another job holds the exclusive activity lease (`dcdc-bench/runs/.bench-activity.lock` unless `DCDC_ACTIVITY_LOCK` is set). | **Reports** tab for an active job; `pgrep -af dcdc_bench`, `pgrep -af quarto`, `pgrep -af chromium`; `systemctl --user list-units 'dcdc-job-*' --all --no-pager`. |
-| Run tab stays at **Measurements saved — report queued** with `Waiting: MemAvailable below 150 MiB` (or the `+ SwapFree` variant, or `bench lease held`) | The dispatcher's memory gate or lease check refused; measurements are safe. | `free -m`, `.venv/bin/python -m dcdc_bench.resources`, `tail dcdc-bench/workspace/resource-log.jsonl`. Free memory (close VS Code/browsers), add temporary swap per [Pi-Reliability.md](../../Documentation/Pi-Reliability.md), or copy the run to a laptop and run `dcdc-bench report`. `DCDC_RENDER_MIN_AVAILABLE_MIB`/`DCDC_RENDER_MIN_AVAILABLE_PLUS_SWAP_FREE_MIB` change the thresholds (both `0` disables the gate; the kernel on the Pi boots with `cgroup_disable=memory`, so nothing else protects the host). |
+| `A job is already acquiring or reporting; no automatic hardware queue` or `Bench is busy acquiring or rendering; retry explicitly after it finishes` | Another job holds the exclusive activity lease (`dcdc-bench/runs/.bench-activity.lock` unless `DCDC_ACTIVITY_LOCK` is set). | **Reports** for an active job; `pgrep -af dcdc_bench`, `pgrep -af quarto`, `pgrep -af chromium`; `systemctl --user list-units 'dcdc-job-*' --all --no-pager`. |
+| The Run section stays at **Measurements saved — report queued** with `Waiting: MemAvailable below 150 MiB` (or the `+ SwapFree` variant, or `bench lease held`) | The dispatcher's memory gate or lease check refused; measurements are safe. | `free -m`, `.venv/bin/python -m dcdc_bench.resources`, `tail dcdc-bench/workspace/resource-log.jsonl`. Free memory (close VS Code/browsers), add temporary swap per [Pi-Reliability.md](../../Documentation/Pi-Reliability.md), or copy the run to a laptop and run `dcdc-bench report`. `DCDC_RENDER_MIN_AVAILABLE_MIB`/`DCDC_RENDER_MIN_AVAILABLE_PLUS_SWAP_FREE_MIB` change the thresholds (both `0` disables the gate; the kernel on the Pi boots with `cgroup_disable=memory`, so nothing else protects the host). |
 | `dcdc-bench report` exits 3 with `Not enough free memory to render safely (...)` | Same gate, from the CLI; nothing was written. | As above. |
-| Job ends **Needs attention** with `Acquisition preserved; report generation failed. See worker.log and build manifest.` | Rendering failed after a good acquisition. | `worker.log` and `runs/<run_id>/reports/<rev>/build_manifest.json` (`status`, `artifacts`, `resource_usage`); then **Retry report generation**. |
-| PDF artifact status `failed-validation` in `build_manifest.json` (Run tab: `Report generation needs attention: PDF`) | The PDF was produced but failed the pagination check (PDF-02). | `dcdc-bench pdf-check <report.pdf>` prints the findings; the HTML remains usable; retry after fixing. |
+| Job ends **Needs attention** with `Acquisition preserved; report generation failed. See worker.log and build manifest.` | Rendering failed after a good acquisition. | `worker.log` and `runs/<run_id>/reports/<rev>/build_manifest.json` (`status`, `artifacts`, `resource_usage`); then **Regenerate report** in **Reports**. |
+| PDF artifact status `failed-validation` in `build_manifest.json` (Run section: `Report generation needs attention: PDF`) | The PDF was produced but failed the pagination check (PDF-02). | `dcdc-bench pdf-check <report.pdf>` prints the findings; the HTML remains usable; retry after fixing. |
 | `Quarto is unavailable. Install the reporting tools or set QUARTO_PATH.` | No Quarto found. | `ls dcdc-bench/.tools/quarto-*/bin/quarto`; re-run `python3 dcdc-bench/tools/setup.py` or set `QUARTO_PATH`. |
 | Static figures fail or the browser is not found | No Chromium found. | `command -v chromium-headless-shell`; install it or set `BROWSER_PATH`. |
 | `dcdc-bench: missing optional dependency (...); install the report extra and renderer tools` (exit 3) | Extras were not installed in this environment. | Repeat step 3.4 with the same `.venv`. |
