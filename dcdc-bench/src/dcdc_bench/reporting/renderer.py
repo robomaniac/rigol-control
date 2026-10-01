@@ -1439,7 +1439,7 @@ def write_exports(model: dict, out_dir: Path) -> dict[str, dict]:
             "report_revision": model.get("report_revision"), "evidence_type": model.get("evidence_label"),
             "dut": _identity(model),
             "standard": sheet.get("standard") or "ISO 16750-2", "clause": sheet.get("clause"),
-            "variant": sheet.get("variant"), "test_type": sheet.get("test_type"),
+            "variant": sheet.get("variant"), "variants": list(sheet.get("variants") or []), "test_type": sheet.get("test_type"),
             "summary_sentence": sheet.get("summary_sentence"),
             "statement": BEST_EFFORT_STATEMENT, "procedure_statement": sheet.get("procedure_statement"),
             "poll_note": sheet.get("poll_note") or BEST_EFFORT_POLL_NOTE,

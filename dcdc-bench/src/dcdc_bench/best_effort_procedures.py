@@ -45,9 +45,11 @@ from .domain import BestEffortPolicy, DeviationSheet, Plan, TestDefinition, Test
 from .mock_uvlo import SyntheticUvlo, UvloMockBench
 from .planning import (MOCK_DEADLINE_FIXED_S, MOCK_DEADLINE_SECONDS_PER_RECORD, MOCK_ESTIMATE_FIXED_S,
                        MOCK_ESTIMATE_SECONDS_PER_RECORD, MOCK_RUN_BUDGET_S, REQUIRED_MEASUREMENTS,
-                       best_effort_approval_gaps as planner_approval_gaps, recipe_deviations_sha256, uvlo_approval_gaps,
-                       verify_plan_hash)
+                       best_effort_approval_gaps as planner_approval_gaps,
+                       best_effort_needs_uvlo_approval as planner_needs_uvlo_approval, recipe_deviations_sha256,
+                       uvlo_approval_gaps, verify_plan_hash)
 from .runner import OUTPUT_IN_BAND_FRACTION, STARTUP_CYCLES, STARTUP_FAILURE_REASON, STARTUP_INTERVAL_S
+from .standards import ovp_suggestion_V
 from .storage import atomic_json
 from .uvlo import (LOAD_CURRENT_TOLERANCE_A, ProtectiveLimitFault, ReadingOverride, RegulationRuleStop, SourceBoundaryStop,
                    UvloInputRampProcedure, absolute_limits, run_phase_scoped_mock)
@@ -77,7 +79,7 @@ RUN_TAGS = {TRANSIENT_HOLD_TEST_TYPE: "hold", MOMENTARY_DROP_TEST_TYPE: "drop", 
             LINE_INTERRUPTION_TEST_TYPE: "lineint"}
 # Project conventions reused here (sources named so the record can be traced):
 ENDPOINT_MARGIN_V = 0.2            # endpoint margin below the DUT maximum (35.8 V against 36 V) unless program_clause_level_exactly
-OVP_HEADROOM_V = 2.0               # source OVP above the top level; wider than the DP800 OVP accuracy band (0.5 % + 0.5 V) below 40 V
+# The source OVP is the catalog's suggestion for the recipe (standards.ovp_suggestion_V: 2 V above the top level, 14 V at least).
 OCP_HEADROOM_A = 0.05              # source OCP above the current limit (1.0 A / 1.05 A as the existing procedures program)
 DEFAULT_PROGRAM_BOUND_S = 720.0    # the real path's one-shot source timer bound when no per-recipe bound is approved (owner decision 1)
 INSTRUMENT_SCHEDULE_TOLERANCE_S = 0.118 + 0.055   # program start uncertainty: command processing (DS5) + LAN transport (LAN)
@@ -93,18 +95,20 @@ TERMINAL_NOTE = ("terminal-side quantity: commanded, not measured on this bench 
                  "second; no scope or DAQ channel is bound)")
 INSTRUMENT_NOTE = ("instrument-timed group (whole seconds, exact to the supply's own clock per the programming guide; sub-second "
                    "acceptance and the boundary error unverified, bench check B1); the host timestamps only the program start")
+INSTRUMENT_REST_NOTE = (INSTRUMENT_NOTE + "; the programmed rest group holds the base for the declared rest plus the schedule tolerance "
+                        "and the bench's observation window, so the time at base between stimuli is this group, not the declared rest")
+RECOVERY_INTERVAL_NOTE = ("host-clock interval from the return or ON command's issue instant to the start of the observation acquisition "
+                          "at the base level; the terminal-side instant of the restore is not observed")
+REST_INTERVAL_NOTE = ("host-clock interval from the return command to the next stimulus command: the time at the base level between "
+                      "stimuli, which includes the bench's observation acquisition after each one; the rest after the last stimulus "
+                      "runs into the final observation and is not counted here")
 POLL_NOTE = "Observed output states come from polling at the recipe's interval; states shorter than the poll interval are not visible to this bench."
-_PARAMETER_ALIASES = {
-    "hold": "hold_s", "hold_time": "hold_s", "t_hold": "hold_s", "level_hold": "hold_s", "plateau": "hold_s",
-    "interruption": "interruption_s", "interruption_time": "interruption_s", "t_interruption": "interruption_s",
-    "open_time": "interruption_s", "t_open": "interruption_s", "interrupt": "interruption_s",
-    "drop": "drop_s", "drop_time": "drop_s", "drop_duration": "drop_s", "t_drop": "drop_s", "pulse_width": "drop_s",
-    "pulse_duration": "drop_s", "pulse": "drop_s",
-    "recovery": "recovery_s", "recovery_time": "recovery_s", "t_recovery": "recovery_s", "rest": "recovery_s",
-    "rest_time": "recovery_s", "t_rest": "recovery_s", "pause": "recovery_s", "interval": "recovery_s",
-    "repeats": "repeats", "repetitions": "repeats", "repeat": "repeats", "pulses": "repeats", "cycles": "repeats",
-    "count": "repeats", "number_of_pulses": "repeats", "number_of_interruptions": "repeats",
-}
+# The sheet vocabulary of standards.deviation_sheet: row parameter -> the quantity the host can time (a 4.3.2 pulse is the
+# hold of a transient_hold, a 4.6.1.1 drop duration the drop); every other row is terminal-side and stays "not measured".
+_TIMED_PARAMETERS = {"hold_s": "hold_s", "pulse_s": "active", "drop_duration_s": "drop_s", "interruption_s": "interruption_s",
+                     "recovery_s": "recovery_s", "rest_s": "rest_s", "repetitions": "repeats"}
+# Rows the supply's ~1 s readback observes at the source terminals: the stimulus level, or the base.
+_READBACK_PARAMETERS = {"level_V": "level", "base_V": "base"}
 
 
 # -- declared repeats and windows -----------------------------------------------------------------------
@@ -138,19 +142,10 @@ def best_effort_approval_gaps(bench: Any, recipe: TestRecipe) -> list[str]:
     return planner_approval_gaps(bench, recipe)
 
 
-def stimulus_levels_V(test: TestDefinition) -> list[float]:
-    """Source levels the stimulus visits besides the base: the hold level, the drop level, or 0 V for an interruption."""
-    policy = test.best_effort
-    if test.type == TRANSIENT_HOLD_TEST_TYPE:
-        return [policy.level_V] if policy.level_V is not None else []
-    if test.type == MOMENTARY_DROP_TEST_TYPE:
-        return [policy.drop_level_V] if policy.drop_level_V is not None else []
-    return [0.0]
-
-
 def needs_uvlo_approval(dut: Any, test: TestDefinition) -> bool:
-    """A stimulus below the DUT's stated minimum input takes the approved UVLO-style path (proposal §4.1)."""
-    return any(level < dut.ratings.input_voltage_min_V for level in stimulus_levels_V(test))
+    """A stimulus below the DUT's stated minimum input takes the approved UVLO-style path (proposal §4.1): the planner's rule
+    (``planning.best_effort_needs_uvlo_approval``), so Preview and the worker agree."""
+    return planner_needs_uvlo_approval(dut, test)
 
 
 # -- sequence and budget ---------------------------------------------------------------------------------
@@ -228,28 +223,79 @@ def host_interval(first: dict[str, Any], second: dict[str, Any]) -> float:
 
 def _parameter_key(name: str, kind: str) -> str | None:
     """Map a sheet row's parameter name onto the quantity the host can time, or None for a terminal-side row."""
-    normalised = name.strip().lower().replace("-", "_").replace(" ", "_")
-    for suffix in ("_seconds", "_sec", "_ms", "_s"):
-        if normalised.endswith(suffix) and normalised[:-len(suffix)] in _PARAMETER_ALIASES:
-            normalised = normalised[:-len(suffix)]
-            break
-    if normalised in ("hold_s", "interruption_s", "drop_s", "recovery_s", "repeats"):
-        return normalised
-    if normalised in ("duration", "duration_s", "time", "t", "t_active", "active_time", "pulse", "pulse_width", "pulse_duration"):
-        return STIMULUS[kind]["active"]  # a 4.3.2 pulse is the hold of a transient_hold, a 4.6.1.1 pulse the drop
-    return _PARAMETER_ALIASES.get(normalised)
+    key = _TIMED_PARAMETERS.get(name)
+    return STIMULUS[kind]["active"] if key == "active" else key
 
 
 def _voltage_key(name: str) -> str | None:
     """Map a sheet row's parameter onto the level the supply readback observes: ``level`` (hold or drop) or ``base``."""
-    normalised = name.strip().lower().replace("-", "_").replace(" ", "_")
-    if normalised.endswith("_v"):
-        normalised = normalised[:-2]
-    if normalised in ("level", "hold_level", "drop_level", "overvoltage_level", "jump_start_level", "stimulus_level", "pulse_level"):
-        return "level"
-    if normalised in ("base", "start", "from", "base_level", "start_level", "supply", "nominal"):
-        return "base"
+    return _READBACK_PARAMETERS.get(name)
+
+
+# -- construction-time stimulus checks (one rule for Preview and the worker) -----------------------------
+def _stimulus_refusal(plan: Plan, test: TestDefinition, limits: dict[str, Any]) -> str | None:
+    policy, spec, kind = test.best_effort, STIMULUS[test.type], test.type
+    expected = 2 if kind in (TRANSIENT_HOLD_TEST_TYPE, MOMENTARY_DROP_TEST_TYPE) else 1
+    if len(test.input_voltage_targets_V) != expected or len(test.output_current_targets_A) != 1:
+        shape = ("[base_V, level_V]" if kind == TRANSIENT_HOLD_TEST_TYPE else "[from_V, drop_level_V]"
+                 if kind == MOMENTARY_DROP_TEST_TYPE else "[base_V]")
+        return f"{kind} declares input_voltage_targets_V as {shape} and one load; the timings live in best_effort"
+    if policy.mechanism not in spec["mechanisms"]:
+        if policy.mechanism == "switch_box":
+            return (f"{kind} by switch_box needs the series switch box, which this bench does not have (design pending); "
+                    f"this bench offers {', '.join(spec['mechanisms'])}")
+        return f"{kind} cannot be realised by {policy.mechanism!r} on this bench; it offers {', '.join(spec['mechanisms'])}"
+    missing = [field for field in spec["needs"] if getattr(policy, field) is None]
+    if missing:
+        return f"{kind} requires best_effort.{', best_effort.'.join(missing)}"
+    active = float(getattr(policy, spec["active"]))
+    if policy.mechanism in INSTRUMENT_MECHANISMS:
+        group = INSTRUMENT_TIMING_PARAMETERS["group_seconds"]
+        if active != int(active) or not group["min"] <= active <= group["max"]:
+            return (f"{policy.mechanism} times {spec['active']} in whole seconds ({group['min']} s to {group['max']} s); "
+                    f"{active:g} s is not representable (use a LAN mechanism for sub-second intervals)")
+    elif active < MINIMUM_LAN_INTERVAL_S:
+        return (f"LAN-timed intervals below {MINIMUM_LAN_INTERVAL_S:g} s are not offered: two LAN writes cannot be spaced "
+                "reliably below the recorded round-trip spread, and nothing here measures the result")
+    base, ratings = test.input_voltage_targets_V[0], plan.dut.ratings
+    if kind == TRANSIENT_HOLD_TEST_TYPE:
+        if policy.level_V == base:
+            return "transient_hold needs a hold level different from the base level"
+        top = max(base, policy.level_V)
+        exact = getattr(plan.recipe.authorization, "program_clause_level_exactly", False)
+        if top > ratings.input_voltage_max_V:
+            return f"Hold level {top:g} V exceeds the DUT maximum input {ratings.input_voltage_max_V:g} V; request retained without clipping"
+        if not exact and top > ratings.input_voltage_max_V - ENDPOINT_MARGIN_V:
+            return (f"Hold level {top:g} V is within the {ENDPOINT_MARGIN_V:g} V endpoint margin of the DUT maximum; "
+                    "declare authorization.program_clause_level_exactly to program the clause level there (owner decision 6)")
+        if top > limits["input_voltage_V"]:
+            return (f"Hold level {top:g} V exceeds the absolute input-voltage limit {limits['input_voltage_V']:g} V "
+                    f"({limits['input_voltage_ceiling_source']}); a reviewed protective policy with a higher guard is needed first")
+        if ovp_suggestion_V(top) > (plan.bench.source.max_voltage_V or math.inf):
+            return "The source OVP for this hold level would exceed the source's voltage capability"
+    elif kind == MOMENTARY_DROP_TEST_TYPE and policy.drop_level_V >= base:
+        return "momentary_drop needs a drop level below the base level"
+    total = stimulus_plan(test, plan.recipe)["stimulus_total_s"] + STARTUP_CYCLES * STARTUP_INTERVAL_S \
+        + plan.recipe.settling.minimum_dwell_s + observation_window_s(plan.recipe)
+    bound = program_bound_s(plan.recipe)
+    if total > bound:
+        return (f"The {kind} sequence needs about {total:.0f} s, above the {bound:.0f} s bound in force; declare a longer "
+                "authorization.instrument_timed_bound_s for this recipe (owner decision 1) or shorten it")
     return None
+
+
+def stimulus_refusals(plan: Plan) -> list[str]:
+    """Why the simulated worker would refuse each declared stimulus, in recipe order; empty when it would run.
+
+    The same checks ``BestEffortProcedure`` applies at construction (target shape, a mechanism this bench offers and can
+    time, the honest LAN floor, levels against the DUT maximum, the endpoint margin and the absolute limit, the source OVP,
+    and the whole sequence against the per-recipe bound), so ``planning.prepare_mock_plan`` lists them in Preview.
+    """
+    tests = plan.recipe.tests
+    if not tests or any(test.type not in BEST_EFFORT_TEST_TYPES or test.best_effort is None for test in tests):
+        return []
+    limits = absolute_limits(plan)
+    return [reason for reason in (_stimulus_refusal(plan, test, limits) for test in tests) if reason]
 
 
 class BestEffortProcedure(UvloInputRampProcedure):
@@ -283,8 +329,9 @@ class BestEffortProcedure(UvloInputRampProcedure):
                 raise ValueError("Best-effort stimulus reaches below the DUT's stated minimum input (0 V during an interruption, "
                                  "or the drop level) and takes the approved UVLO-style path (brief 7.5); refused: " + "; ".join(uvlo_gaps))
         self.limits = absolute_limits(plan)
-        for test in tests:
-            self._validate_stimulus(plan, test)
+        refusals = stimulus_refusals(plan)
+        if refusals:
+            raise ValueError("; ".join(refusals))
         blocked = [point for point in plan.points if point.status != "executable"]
         if blocked:
             raise ValueError(f"Best-effort procedure refused: {len(blocked)} declared point(s) are not executable and a stimulus is "
@@ -304,57 +351,6 @@ class BestEffortProcedure(UvloInputRampProcedure):
         self.programmed = {test.id: self._programmed_settings(plan, test) for test in tests}
         self.plant_record: dict[str, Any] | None = None
 
-    # -- construction-time checks ---------------------------------------------------------------------
-    def _validate_stimulus(self, plan: Plan, test: TestDefinition) -> None:
-        policy, spec, kind = test.best_effort, STIMULUS[test.type], test.type
-        expected = 2 if kind in (TRANSIENT_HOLD_TEST_TYPE, MOMENTARY_DROP_TEST_TYPE) else 1
-        if len(test.input_voltage_targets_V) != expected or len(test.output_current_targets_A) != 1:
-            shape = ("[base_V, level_V]" if kind == TRANSIENT_HOLD_TEST_TYPE else "[from_V, drop_level_V]"
-                     if kind == MOMENTARY_DROP_TEST_TYPE else "[base_V]")
-            raise ValueError(f"{kind} declares input_voltage_targets_V as {shape} and one load; the timings live in best_effort")
-        if policy.mechanism not in spec["mechanisms"]:
-            if policy.mechanism == "switch_box":
-                raise ValueError(f"{kind} by switch_box needs the series switch box, which this bench does not have (design pending); "
-                                 f"this bench offers {', '.join(spec['mechanisms'])}")
-            raise ValueError(f"{kind} cannot be realised by {policy.mechanism!r} on this bench; it offers {', '.join(spec['mechanisms'])}")
-        missing = [field for field in spec["needs"] if getattr(policy, field) is None]
-        if missing:
-            raise ValueError(f"{kind} requires best_effort.{', best_effort.'.join(missing)}")
-        active = float(getattr(policy, spec["active"]))
-        if policy.mechanism in INSTRUMENT_MECHANISMS:
-            limits = INSTRUMENT_TIMING_PARAMETERS["group_seconds"]
-            for name, value in ((spec["active"], active),):
-                if value != int(value) or not limits["min"] <= value <= limits["max"]:
-                    raise ValueError(f"{policy.mechanism} times {name} in whole seconds ({limits['min']} s to {limits['max']} s); "
-                                     f"{value:g} s is not representable (use a LAN mechanism for sub-second intervals)")
-        elif active < MINIMUM_LAN_INTERVAL_S:
-            raise ValueError(f"LAN-timed intervals below {MINIMUM_LAN_INTERVAL_S:g} s are not offered: two LAN writes cannot be spaced "
-                             "reliably below the recorded round-trip spread, and nothing here measures the result")
-        base, ratings = test.input_voltage_targets_V[0], plan.dut.ratings
-        if kind == TRANSIENT_HOLD_TEST_TYPE:
-            if policy.level_V == base:
-                raise ValueError("transient_hold needs a hold level different from the base level")
-            top = max(base, policy.level_V)
-            exact = getattr(plan.recipe.authorization, "program_clause_level_exactly", False)
-            if top > ratings.input_voltage_max_V:
-                raise ValueError(f"Hold level {top:g} V exceeds the DUT maximum input {ratings.input_voltage_max_V:g} V; request retained without clipping")
-            if not exact and top > ratings.input_voltage_max_V - ENDPOINT_MARGIN_V:
-                raise ValueError(f"Hold level {top:g} V is within the {ENDPOINT_MARGIN_V:g} V endpoint margin of the DUT maximum; "
-                                 "declare authorization.program_clause_level_exactly to program the clause level there (owner decision 6)")
-            if top > self.limits["input_voltage_V"]:
-                raise ValueError(f"Hold level {top:g} V exceeds the absolute input-voltage limit {self.limits['input_voltage_V']:g} V "
-                                 f"({self.limits['input_voltage_ceiling_source']}); a reviewed protective policy with a higher guard is needed first")
-            if top + OVP_HEADROOM_V > (plan.bench.source.max_voltage_V or math.inf):
-                raise ValueError("The source OVP for this hold level would exceed the source's voltage capability")
-        elif kind == MOMENTARY_DROP_TEST_TYPE and policy.drop_level_V >= base:
-            raise ValueError("momentary_drop needs a drop level below the base level")
-        total = stimulus_plan(test, plan.recipe)["stimulus_total_s"] + STARTUP_CYCLES * STARTUP_INTERVAL_S \
-            + plan.recipe.settling.minimum_dwell_s + observation_window_s(plan.recipe)
-        bound = program_bound_s(plan.recipe)
-        if total > bound:
-            raise ValueError(f"The {kind} sequence needs about {total:.0f} s, above the {bound:.0f} s bound in force; declare a longer "
-                             "authorization.instrument_timed_bound_s for this recipe (owner decision 1) or shorten it")
-
     def _programmed_settings(self, plan: Plan, test: TestDefinition) -> dict[str, Any]:
         controls, policy = plan.bench.protective_controls, test.best_effort
         base = test.input_voltage_targets_V[0]
@@ -363,7 +359,7 @@ class BestEffortProcedure(UvloInputRampProcedure):
         return {"source_voltage_setpoint_V": base, "top_level_V": top,
                 "program_clause_level_exactly": bool(getattr(plan.recipe.authorization, "program_clause_level_exactly", False)),
                 "endpoint_margin_V": ENDPOINT_MARGIN_V, "source_current_limit_A": limit, "source_ocp_A": limit + OCP_HEADROOM_A,
-                "source_ovp_V": top + OVP_HEADROOM_V, "load_voltage_limit_V": controls.dut_output_overvoltage_V,
+                "source_ovp_V": ovp_suggestion_V(top), "load_voltage_limit_V": controls.dut_output_overvoltage_V,
                 "load_current_limit_A": controls.output_overcurrent_A,
                 "order": "identity, outputs verified OFF, protections programmed and read back, source ON, source-only startup gate, "
                          "load ON, stimulus; absolute limits at every poll (brief §7, proposal §4)",
@@ -406,9 +402,11 @@ class BestEffortProcedure(UvloInputRampProcedure):
                 if entry.classification in ("not_met_but_documented", "unknown_until_measured"):
                     limitations.append(f"Deviation sheet, ISO 16750-2 clause {test.best_effort.clause}, {entry.parameter}: "
                                        f"{entry.classification.replace('_', ' ')}" + (f" ({entry.note})" if entry.note else "") + ".")
+        variants = [test.best_effort.variant for test in recipe.tests]
         method = {
-            "type": self.kind, "test_type": self.kind, "clause": first.clause, "variant": first.variant,
-            "variants": [test.best_effort.variant for test in recipe.tests], "policy_id": authorization.protective_policy_id,
+            # One variant when the recipe runs one test; None when it runs several (each combined entry carries its own).
+            "type": self.kind, "test_type": self.kind, "clause": first.clause, "variant": variants[0] if len(set(variants)) == 1 else None,
+            "variants": variants, "policy_id": authorization.protective_policy_id,
             "approval": {"best_effort_approved": bool(getattr(authorization, "best_effort_approved", False)),
                          "accepted_deviations_sha256": getattr(authorization, "accepted_deviations_sha256", None),
                          "declared_deviations_sha256": declared_deviations_sha256(recipe),
@@ -545,18 +543,24 @@ class BestEffortProcedure(UvloInputRampProcedure):
                     achieved = {"value": len(detail["repeats"]), "measured_by": "host_clock",
                                 "note": f"repeats completed, counted by the host ({_repeats(policy)} declared)"}
                 elif key is not None and instrument and detail["repeats"]:
-                    programmed = detail["sequence"]["active_group_s"] if key == STIMULUS[test.type]["active"] else _recovery_s(policy)
-                    achieved = {"value": None, "measured_by": "none", "programmed": programmed, "note": INSTRUMENT_NOTE}
-                elif key is not None and intervals.get(key):
-                    values = intervals[key]
+                    active = key == STIMULUS[test.type]["active"]
+                    # The programmed groups as written: the rest group is longer than the declared rest (observation inside).
+                    programmed = detail["sequence"]["active_group_s"] if active else detail["sequence"]["rest_group_s"]
+                    achieved = {"value": None, "measured_by": "none", "programmed": programmed,
+                                "note": INSTRUMENT_NOTE if active else INSTRUMENT_REST_NOTE}
+                elif key is not None and (values := intervals.get(key) or (intervals.get("recovery_s") if key == "rest_s" else None)):
+                    # A clause rest between stimuli is the return-to-next-stimulus interval where one exists; otherwise, as for
+                    # a recovery window, the interval from the return to the observation that follows it.
+                    note = (REST_INTERVAL_NOTE if key == "rest_s" and intervals.get("rest_s") else
+                            RECOVERY_INTERVAL_NOTE if key in ("rest_s", "recovery_s") else HOST_INTERVAL_NOTE)
                     achieved = {"value": mean(values), "min": min(values), "max": max(values), "values": list(values),
-                                "measured_by": "host_clock", "note": HOST_INTERVAL_NOTE}
+                                "measured_by": "host_clock", "note": note}
                 elif key is None and entry.get("measured_by") == "supply_readback" and _voltage_key(entry["parameter"]) is not None:
                     achieved = self._readback_level(detail, _voltage_key(entry["parameter"]))
                 else:
                     achieved = self._achieved_default(entry)
                 entry["achieved"] = achieved
-                combined.append({**entry, "test_id": test.id})
+                combined.append({**entry, "test_id": test.id, "variant": policy.variant})
             statements.append(detail["statement"] if len(self.snapshot.recipe.tests) == 1
                               else f"{policy.variant or test.id}: {detail['statement']}")
         method["deviations"] = combined
@@ -809,6 +813,7 @@ class BestEffortProcedure(UvloInputRampProcedure):
                                                                                  h.plant_truth, h.checkpoint)
         base = test.input_voltage_targets_V[0]
         kind = test.type
+        previous_return = None
         for index in range(_repeats(policy)):
             transitions_before = len(bench.uvlo.transitions)
             if kind == TRANSIENT_HOLD_TEST_TYPE:
@@ -852,6 +857,10 @@ class BestEffortProcedure(UvloInputRampProcedure):
                 window_ids, window_readings = poll_until(on["commanded_at_s"] + _recovery_s(policy), point, "recovery")
                 intervals = {"interruption_s": host_interval(off, on)}
                 first, second = off, on
+            if previous_return is not None:
+                # The previous repeat's time at base ended when this stimulus was issued (its observation sits inside).
+                detail["repeats"][-1]["intervals_host_s"]["rest_s"] = host_interval(previous_return, first)
+            previous_return = second
             self.stage = "observation"
             self.begin_step(base, "recovery")
             observation = acquire(point)
@@ -1026,4 +1035,4 @@ def run_best_effort_mock(plan: Plan, out: Path, *, seed: int = 1, synthetic: Syn
 __all__ = ["BEST_EFFORT_TEST_TYPES", "BestEffortProcedure", "INTERRUPTION_TEST_TYPES", "LINE_INTERRUPTION_TEST_TYPE", "METHOD_KEY",
            "MICRO_INTERRUPTION_TEST_TYPE", "MOMENTARY_DROP_TEST_TYPE", "TRANSIENT_HOLD_TEST_TYPE", "best_effort_approval_gaps",
            "best_effort_mock_estimate", "declared_deviations_sha256", "deviation_sheet_sha256", "needs_uvlo_approval",
-           "run_best_effort_mock", "stimulus_levels_V", "stimulus_plan"]
+           "run_best_effort_mock", "stimulus_plan", "stimulus_refusals"]

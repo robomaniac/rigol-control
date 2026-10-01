@@ -11,6 +11,7 @@ import hashlib
 import io
 import json
 import math
+import re
 from collections import Counter, defaultdict
 from pathlib import Path
 from statistics import mean
@@ -1392,17 +1393,29 @@ BEST_EFFORT_BASES = {
     "MOCK": "synthetic plant parameter",
     "derived": "derived from the tagged bounds",
     "UNV": "unverified; stated by no document read",
+    "host clock": "the bench computer's own command count and timestamps",
 }
+# A recorded basis names its tag(s) up front ("DS5: DP800 datasheet p. 5: ...", "LAN: ... and DS5: ..."); the table, the
+# sentence and the legend show the tags, the export keeps the full string. ISO is recognised by the standard's number.
+_BASIS_TAG_PATTERNS = (("ISO", r"ISO 16750-[12]"), ("DS5", r"\bDS5\b"), ("PG", r"\bPG\b"), ("LAN", r"\bLAN\b"), ("DRV", r"\bDRV\b"),
+                       ("RB", r"\bRB\b"), ("SEED", r"\bSEED\b"), ("DUT", r"\bDUT\b"), ("ENV", r"\bENV\b"), ("MOCK", r"\bMOCK\b"),
+                       ("derived", r"\bderived\b"), ("UNV", r"\bUNV\b"), ("host clock", r"\bhost clock\b"))
 # Mechanism vocabulary (§2.2): the sentence phrase and the table label.
 BEST_EFFORT_MECHANISMS = {
+    # domain.DeviationMechanism (the recorded sheets) and the proposal's earlier words (older fixtures) both read.
     "lan_voltage_step": ("a voltage step over LAN", "LAN voltage step"),
+    "lan_output_off": ("an output OFF/ON interruption over LAN", "LAN output OFF/ON"),
     "lan_output_off_on": ("an output OFF/ON interruption over LAN", "LAN output OFF/ON"),
+    "supply_timer": ("an instrument-timed Timer program", "supply Timer"),
+    "supply_delayer": ("an instrument-timed Delayer program", "supply Delayer"),
     "timer_group": ("an instrument-timed Timer program", "Timer group"),
     "delayer_group": ("an instrument-timed Delayer program", "Delayer group"),
+    "switch_box": ("a series switch box", "switch box"),
     "steady_level": ("a steady level", "steady level"),
     "supply_slew": ("the supply's own slew", "supply slew"),
 }
-BEST_EFFORT_MEASURED_BY = {"host_clock": "host clock (write timestamps)", "none": "not measured"}
+BEST_EFFORT_MEASURED_BY = {"host_clock": "host clock (write timestamps)", "none": "not measured",
+                           "supply_readback": "supply readback (about 1 s refresh)"}
 DEVIATION_COLUMNS = ("parameter", "clause_asks", "this_bench", "mechanism", "measured_by", "classification", "note")
 DEVIATION_HEADERS = ("Parameter", "Clause asks", "This bench", "Mechanism", "Measured by", "Classification", "Note")
 _DEVIATION_UNIT_SUFFIXES = ("V", "s", "ms", "A", "W", "Hz", "ohm", "Ohm", "MOhm", "pct", "K", "C")
@@ -1475,9 +1488,25 @@ def _deviation_label(parameter: str) -> str:
     return " ".join(tokens).strip() or str(parameter)
 
 
+def _basis_tags(basis: str) -> list[str]:
+    """The tags a recorded basis names, in order of appearance; the string itself when it names none (shown as recorded)."""
+    if basis in BEST_EFFORT_BASES:
+        return [basis]
+    found = [(match.start(), tag) for tag, pattern in _BASIS_TAG_PATTERNS for match in [re.search(pattern, basis)] if match]
+    return [tag for _, tag in sorted(found)] or [basis]
+
+
 def _deviation_basis(record: dict | None) -> str:
+    """The basis tag(s) of a required or achievable record, for the table cells and the sentence."""
     basis = record.get("basis") if isinstance(record, dict) else None
-    return str(basis).strip() if isinstance(basis, str) and basis.strip() else ""
+    return ", ".join(_basis_tags(str(basis).strip())) if isinstance(basis, str) and basis.strip() else ""
+
+
+def _entry_label(entry: dict, several: bool = False) -> str:
+    """The row label; prefixed with the entry's variant when the sheet merges several variants of one clause."""
+    label = _deviation_label(entry["parameter"])
+    variant = entry.get("variant")
+    return f"{variant}: {label}" if several and isinstance(variant, str) and variant else label
 
 
 def _with_basis(text: str, record: dict | None) -> str:
@@ -1503,14 +1532,15 @@ def _deviation_not_measured(entry: dict) -> bool:
     return recorded in (None, "none", False)
 
 
-def deviation_display(entry: dict) -> dict[str, str]:
+def deviation_display(entry: dict, *, several_variants: bool = False) -> dict[str, str]:
     """The seven table cells of one sheet entry (§2.3 item 1), derived from the record alone.
 
     The verb "achieved" never appears: the bench commands a value, the host
     clock times an interval, and anything at the converter is "not measured".
+    ``several_variants`` prefixes the parameter with the entry's variant.
     """
     unit = str(entry.get("unit") or "")
-    label = _deviation_label(entry["parameter"])
+    label = _entry_label(entry, several_variants)
     achievable, achieved = _deviation_record(entry, "achievable"), _deviation_record(entry, "achieved")
     bench: list[str] = []
     commanded = _deviation_quantity(achievable.get("value"), unit)
@@ -1563,11 +1593,14 @@ def best_effort_summary_sentence(sheet: dict) -> str:
     {one status phrase per entry}; {counts}; see the deviation sheet)."
     """
     entries = sheet["deviations"]
+    variants = _sheet_variants(sheet)
+    several = len(variants) > 1
     asks = []
     for entry in entries:
         requirement = _deviation_requirement(entry.get("required"), str(entry.get("unit") or ""))
         if requirement:
             asks.append(f"{_deviation_label(entry['parameter'])} {requirement}")
+    asks = list(dict.fromkeys(asks))  # the variants of one clause ask for the same parameters
     commanded: dict[str, list[str]] = {}
     for entry in entries:
         value = _deviation_quantity(_deviation_record(entry, "achievable").get("value"), str(entry.get("unit") or ""))
@@ -1576,11 +1609,12 @@ def best_effort_summary_sentence(sheet: dict) -> str:
         mechanism = entry.get("mechanism")
         phrase = (BEST_EFFORT_MECHANISMS[mechanism][0] if mechanism in BEST_EFFORT_MECHANISMS
                   else mechanism.replace("_", " ") if isinstance(mechanism, str) and mechanism else "an unrecorded mechanism")
-        commanded.setdefault(phrase, []).append(f"{_deviation_label(entry['parameter'])} {value}")
+        commanded.setdefault(phrase, []).append(f"{_entry_label(entry, several)} {value}")
     produced = _join_phrases([f"{_join_phrases(values)} as {phrase}" for phrase, values in commanded.items()])
-    details = [f"variant {sheet['variant']}"] if sheet.get("variant") else []
+    details = ([f"variants {_join_phrases(variants)}"] if several else
+               [f"variant {sheet['variant']}"] if sheet.get("variant") else [])
     for entry in entries:
-        label = _deviation_label(entry["parameter"])
+        label = _entry_label(entry, several)
         unit = str(entry.get("unit") or "")
         achievable = _deviation_record(entry, "achievable")
         classification = entry["classification"]
@@ -1603,11 +1637,14 @@ def best_effort_summary_sentence(sheet: dict) -> str:
 
 def best_effort_limitations(sheet: dict) -> list[str]:
     """Appendix bullets (§2.3 item 3): every not-met and not-measured row, then the mandatory statement."""
-    phrases = [f"variant {sheet['variant']}"] if sheet.get("variant") else []
+    variants = _sheet_variants(sheet)
+    several = len(variants) > 1
+    phrases = ([f"variants {_join_phrases(variants)}"] if several else
+               [f"variant {sheet['variant']}"] if sheet.get("variant") else [])
     for entry in sheet["deviations"]:
         if entry["classification"] not in ("not_met_but_documented", "unknown_until_measured"):
             continue
-        label = _deviation_label(entry["parameter"])
+        label = _entry_label(entry, several)
         unit = str(entry.get("unit") or "")
         achievable = _deviation_record(entry, "achievable")
         if entry["classification"] == "unknown_until_measured":
@@ -1621,16 +1658,26 @@ def best_effort_limitations(sheet: dict) -> list[str]:
             requirement = _deviation_requirement(entry.get("required"), unit)
             phrases.append(f"{label} not met, documented" + (f": {_with_basis(bound, achievable)}" if bound else "")
                            + (f" against {requirement}" if requirement else ""))
-    if len(phrases) == (1 if sheet.get("variant") else 0):
+    if len(phrases) == (1 if (several or sheet.get("variant")) else 0):
         phrases.append("every recorded parameter is met or approximated; see the deviation sheet")
     return [f"{_best_effort_clause_phrase(sheet)}: " + "; ".join(phrases) + ".", BEST_EFFORT_STATEMENT]
+
+
+def _sheet_variants(sheet: dict) -> list[str]:
+    """The distinct variants a sheet's entries name, in order (several when one recipe ran a clause's variants)."""
+    recorded = sheet.get("variants") if isinstance(sheet.get("variants"), list) else []
+    named = [entry.get("variant") for entry in sheet.get("deviations") or [] if isinstance(entry, dict)]
+    return [v for v in dict.fromkeys([*recorded, *named]) if isinstance(v, str) and v]
 
 
 def build_best_effort_sheet(raw: dict) -> dict[str, Any]:
     """Validate the recorded sheet and add what the report needs: display cells, counts, legend, sentence, statement.
 
     Entries are kept verbatim (the export holds the sheet as recorded) and gain a
-    ``display`` block. Malformed entries are refused rather than guessed at.
+    ``display`` block. Malformed entries are refused rather than guessed at. A
+    recipe that ran several variants of one clause (4.6.1.1 B and A, the 4.6.1.2
+    cases) records one combined list whose entries name their variant: the rows
+    are labelled with it and the title names them all instead of one.
     """
     if not isinstance(raw, dict):
         raise ValueError("A best-effort sheet must be a mapping")
@@ -1643,6 +1690,10 @@ def build_best_effort_sheet(raw: dict) -> dict[str, Any]:
     variant = raw.get("variant")
     if variant is not None and not isinstance(variant, str):
         raise ValueError("A best-effort variant must be text or null")
+    variants = _sheet_variants(raw)
+    several = len(variants) > 1
+    if several:
+        variant = None  # several variants in one sheet: the entries carry their own, the title names them all
     normalised = []
     used_bases: list[str] = []
     for entry in entries:
@@ -1657,16 +1708,22 @@ def build_best_effort_sheet(raw: dict) -> dict[str, Any]:
             for key, value in (record or {}).items():
                 if isinstance(value, float) and not math.isfinite(value):
                     raise ValueError(f"Deviation {entry['parameter']!r}: {block}.{key} is not finite")
-            basis = _deviation_basis(record)
-            if basis and basis not in used_bases:
-                used_bases.append(basis)
+            raw_basis = record.get("basis") if isinstance(record, dict) else None
+            if isinstance(raw_basis, str) and raw_basis.strip():
+                for tag in _basis_tags(raw_basis.strip()):
+                    if tag not in used_bases:
+                        used_bases.append(tag)
         if entry["classification"] == "met" and not (_deviation_basis(entry.get("achievable")) or _deviation_host_timed(entry)):
             raise ValueError(f"Deviation {entry['parameter']!r} is met without a bound or host-timed value that justifies it")
-        normalised.append({**copy.deepcopy(entry), "display": deviation_display(entry)})
+        normalised.append({**copy.deepcopy(entry), "display": deviation_display(entry, several_variants=several)})
     clause = clause.strip()
-    sheet = {"standard": BEST_EFFORT_STANDARD, "clause": clause, "variant": variant,
-             "test_type": raw.get("test_type"),
-             "title": f"Deviations from {BEST_EFFORT_STANDARD} clause {clause}" + (f", variant {variant}" if variant else ""),
+    title = f"Deviations from {BEST_EFFORT_STANDARD} clause {clause}"
+    if several:
+        title += f", variants {_join_phrases(variants)}"
+    elif variant:
+        title += f", variant {variant}"
+    sheet = {"standard": BEST_EFFORT_STANDARD, "clause": clause, "variant": variant, "variants": variants,
+             "test_type": raw.get("test_type"), "title": title,
              "columns": list(DEVIATION_HEADERS),
              "deviations": normalised, "counts": _best_effort_counts(normalised),
              "bases": {tag: BEST_EFFORT_BASES.get(tag, "as recorded") for tag in used_bases},

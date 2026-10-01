@@ -617,6 +617,10 @@ def prepare_mock_plan(plan: Plan) -> tuple[Plan, list[str], float]:
     else:
         return plan, [], 0.0
     errors = [] if estimate["within_budget"] else [f"Simulated run refused: {estimate['reason']}"]
+    if types <= set(BEST_EFFORT_TEST_TYPES):
+        # The worker's construction-time stimulus checks, so Preview refuses exactly what BestEffortProcedure would.
+        from .best_effort_procedures import stimulus_refusals
+        errors += [f"Simulated run refused: {reason}" for reason in stimulus_refusals(plan)]
     return plan, errors, estimate["typical_s"]
 
 

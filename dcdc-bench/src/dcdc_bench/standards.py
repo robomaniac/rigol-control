@@ -698,9 +698,10 @@ def recipe_parameters(clause: Clause, system: str, dut: DutProfile) -> dict[str,
             return None
         return {
             "clause": clause.citation, "system": system, "recipe_kind": clause.recipe_kind, "coverage": "partial", "base_V": base,
-            "test_case_1": {"interruption_s": [round(1.0 + 0.1 * k, 1) for k in range(11)],
+            # The clause's own wording (cited, not reproduced): decade steps; the offered subset is below.
+            "test_case_1": {"interruption": params["test_case_1"]["tmicro"],
                             "recovery_s": "at least 5 s and until the DUT is fully serviceable"},
-            "test_case_2": {"interruption_s": 1.0, "recovery_s": [float(k) for k in range(1, 11)]},
+            "test_case_2": {"interruption": params["test_case_2"]["tmicro_s"], "recovery": params["test_case_2"]["trecovery"]},
             # What the best-effort recipe offers (proposal §3, owner decision 7): the clause's own decade steps from
             # 100 ms up. 100 ms over LAN (commanded, not measured); 1 s and 2 s, and the 1 s and 10 s recoveries, timed
             # by the supply's Delayer in whole seconds.
@@ -793,6 +794,28 @@ def _level_entry(parameter: str, clause_V: float, programmed_V: float, mechanism
         note = (f"programmed at the project's {programmed_V:g} V margin setting below the converter's stated maximum; "
                 "program_clause_level_exactly programs the clause value (owner decision 6)" + (f"; {note}" if note else ""))
     return _entry(parameter, "V", required, achievable, mechanism, measured_by, note)
+
+
+def _drop_level_entry(clause_V: float, drop_s: float, mechanism: str, *, reached: bool) -> DeviationEntry:
+    """The 4.6.1.1 drop level (proposal §3): a programming-accuracy bound when the commanded window outlasts the supply's
+    worst-case fall (the converter drops out and draws standby current, so the fall approaches the unloaded case); with a
+    shorter window the depth reached before the restore has no bound and stays unknown until a scope measures it."""
+    fall_ms = max(DS5_FALL_S) * 1000
+    required = DeviationRequired(value=clause_V, tolerance=GENERAL_VOLTAGE_TOLERANCE_V,
+                                 basis=f"{BASIS_ISO_FIGURE}; {BASIS_ISO_GENERAL} +/- 0.2 V")
+    if reached:
+        achievable = DeviationAchievable(value=clause_V, bound=_programming_bound(clause_V),
+                                         basis=f"{BASIS_DS5}: programming accuracy 0.1 % + 25 mV; fall settled within 1 % in "
+                                               f"< {fall_ms:g} ms unloaded, inside the {drop_s:g} s window")
+        note = (f"programmed level; the {drop_s:g} s window outlasts the supply's worst-case fall (< {fall_ms:g} ms unloaded), so "
+                "the level is reached as a datasheet bound; the time at the level is bounded, not measured")
+    else:
+        achievable = DeviationAchievable(value=clause_V, bound=None,
+                                         basis=f"{BASIS_DS5}: fall < 110 ms loaded / < {fall_ms:g} ms unloaded, longer than the "
+                                               f"{drop_s * 1000:g} ms commanded; no bound on the depth reached before the restore")
+        note = (f"programmed level; the commanded {drop_s * 1000:g} ms window is shorter than the supply's worst-case fall "
+                f"(< {fall_ms:g} ms unloaded), so whether the terminals reach it before the restore is unknown until measured")
+    return _entry("drop_level_V", "V", required, achievable, mechanism, "none", note)
 
 
 def _time_entry(parameter: str, clause_s: float, tolerance_s: float | None, commanded_s: float, mechanism: str, *,
@@ -910,7 +933,10 @@ def deviation_sheet(number: str, system: str, dut: DutProfile, *, variant: str |
                    _time_entry("pulse_s", params["duration_s"], params["duration_tolerance_s"], chosen["duration_s"], mechanism),
                    _edge_entry("edge_rise_s", params["edge_max_s"], "rise", mechanism),
                    _edge_entry("edge_fall_s", params["edge_max_s"], "fall", mechanism),
-                   _time_entry("rest_s", params["rest_s"], params["rest_tolerance_s"], params["rest_s"], mechanism),
+                   _time_entry("rest_s", params["rest_s"], params["rest_tolerance_s"], params["rest_s"], mechanism,
+                               note="commanded rest between the return command and the next pulse; the bench acquires an observation of "
+                                    "the output after each pulse before the next one, so the time at the base level between pulses is "
+                                    "longer than this figure and is recorded in the run (host-timed, or as the programmed rest group)"),
                    _count_entry(params["repeats"], mechanism)]
         asks = (f"{params['repeats']} pulses to {params['level_V']:g} V of {params['duration_s'] * 1000:g} ms from "
                 f"{params['base_V']:g} V with {params['edge_max_s'] * 1000:g} ms edges and a {params['rest_s']:g} s rest")
@@ -920,8 +946,7 @@ def deviation_sheet(number: str, system: str, dut: DutProfile, *, variant: str |
     elif clause.recipe_kind == "momentary_drop":
         chosen = params["variants"][variant]
         mechanism = chosen["mechanism"]
-        entries = [_level_entry("drop_level_V", params["drop_level_V"], params["drop_level_V"], mechanism, "none", basis=BASIS_ISO_FIGURE,
-                                note="programmed level; whether the terminals reach it within the drop is covered by the duration row"),
+        entries = [_drop_level_entry(params["drop_level_V"], chosen["duration_s"], mechanism, reached=chosen["duration_s"] >= max(DS5_FALL_S)),
                    _time_entry("drop_duration_s", params["drop_duration_s"], params["drop_duration_tolerance_s"], chosen["duration_s"],
                                mechanism, basis=BASIS_ISO_FIGURE),
                    _edge_entry("edge_fall_s", params["edge_max_s"], "fall", mechanism),

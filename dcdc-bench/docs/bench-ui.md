@@ -159,11 +159,15 @@ for this converter, and the catalog's status word as a badge:
   for §4.3.1.2, §4.3.2, §4.6.1.1, §4.6.1.2, §4.9.1 and §4.9.2: the bench can hold
   every level of the clause and command its timings with what it has (LAN voltage
   steps, LAN output OFF/ON, the supply's Timer or Delayer) but cannot produce or
-  measure the clause's edges, so the generated recipe carries a deviation sheet
-  and is written unapproved. Approving it is the owner's act in the saved recipe:
-  `authorization.best_effort_approved: true` with
-  `authorization.accepted_deviations_sha256` equal to the sheet's hash (the row's
-  approval sentence says so). §4.3.1.1 is **runs here after approval** at both
+  measure the clause's edges, sub-second timings or a true open circuit, so the
+  generated recipe carries a deviation sheet and is written unapproved. Nothing on
+  this page approves it: ticking the row only generates the recipe, which then
+  plans as `approval_blocked`. Approving it is the owner's act in the saved
+  recipe file: `authorization.best_effort_approved: true` with
+  `authorization.accepted_deviations_sha256` equal to the sheet's hash, plus
+  `authorization.uvlo_approved` wherever the input goes below the converter's
+  minimum (a drop level, output OFF); the row's approval sentence lists every
+  field. §4.3.1.1 is **runs here after approval** at both
   system voltages (its 36 V level at 24 V is programmed at 35.8 V unless
   `program_clause_level_exactly` is set). See
   [standards/best-effort-proposal.md](standards/best-effort-proposal.md).

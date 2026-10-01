@@ -163,6 +163,13 @@ def test_approval_gate_refuses_until_the_sheet_is_accepted_and_grants_an_approve
         BestEffortProcedure(build_plan(*profiles(TRANSIENT_HOLD_TEST_TYPE, bound_s=5.)))
     with pytest.raises(ValueError, match="Simulated run refused"):
         BestEffortProcedure(build_plan(*profiles(TRANSIENT_HOLD_TEST_TYPE, hold_s=3000., repeats=1, bound_s=5000., recovery_s=1.)))
+    # Preview lists the same refusals as the worker (planning.prepare_mock_plan calls stimulus_refusals).
+    from dcdc_bench.planning import prepare_mock_plan
+    _, errors, _ = prepare_mock_plan(build_plan(*profiles(MICRO_INTERRUPTION_TEST_TYPE, mechanism="supply_delayer", interruption_s=.5)))
+    assert len(errors) == 1 and errors[0].startswith("Simulated run refused: supply_delayer times interruption_s in whole seconds")
+    _, errors, _ = prepare_mock_plan(build_plan(*profiles(TRANSIENT_HOLD_TEST_TYPE, bound_s=5.)))
+    assert any("above the 5 s bound in force" in error for error in errors)
+    assert prepare_mock_plan(build_plan(*profiles(TRANSIENT_HOLD_TEST_TYPE)))[1] == []
     # Owner decision 6: the clause level at the DUT ceiling only with program_clause_level_exactly.
     with pytest.raises(ValueError, match="endpoint margin.*program_clause_level_exactly"):
         BestEffortProcedure(build_plan(*profiles(TRANSIENT_HOLD_TEST_TYPE, clause="4.3.1.1", system="24V", level_V=36., base_V=24.)))
@@ -214,8 +221,13 @@ def test_transient_hold_completes_with_host_clock_intervals_and_the_converter_on
     # Achieved: the hold interval is host-timed (write to write, the driver's two pre-checks included) within the LAN spread.
     hold = achieved(run, "hold_s")
     assert hold["measured_by"] == "host_clock" and 3. - EPS <= hold["min"] <= hold["max"] <= 3. + 2 * LAN_ROUND_TRIP_MAX_S + EPS and len(hold["values"]) == 2
+    # The clause's rest is the time at base between the two holds: it includes the observation acquisition after the
+    # first hold (the declared 1 s window plus about 0.75 s of acquisition), and the record says so.
     rest = achieved(run, "rest_s")
-    assert rest["measured_by"] == "host_clock" and 1. - EPS <= rest["min"] and rest["max"] < 1.1
+    assert rest["measured_by"] == "host_clock" and rest["values"] == [detail["repeats"][0]["intervals_host_s"]["rest_s"]]
+    assert 1.5 <= rest["min"] <= rest["max"] < 3. and "between stimuli" in rest["note"]
+    assert "rest_s" not in detail["repeats"][-1]["intervals_host_s"], "nothing follows the last hold"
+    assert all(1. - EPS <= r["intervals_host_s"]["recovery_s"] < 1.1 for r in detail["repeats"]), "return to observation start"
     assert achieved(run, "repetitions") == {"value": 2, "measured_by": "host_clock", "note": "repeats completed, counted by the host (2 declared)"}
     level = achieved(run, "level_V")
     assert level["measured_by"] == "supply_readback" and level["value"] == pytest.approx(26., abs=.05), "the source readback saw the hold level"
@@ -247,6 +259,8 @@ def test_transient_hold_completes_with_host_clock_intervals_and_the_converter_on
     transient = build_plan(*profiles(TRANSIENT_HOLD_TEST_TYPE, clause="4.3.2", variant="A", level_V=18., hold_s=.4, repeats=5, recovery_s=1., base_V=16.))
     run2, _ = evidence(run_best_effort_mock(transient, tmp_path))
     assert run2["execution_status"] == "completed" and len(run2["method"][METHOD_KEY]["tests"]["stimulus"]["repeats"]) == 5
+    rest2 = achieved(run2, "rest_s")
+    assert len(rest2["values"]) == 4 and rest2["min"] > 1.5, "the time at base between the five pulses, not the 1 s commanded rest"
     assert all(r["polls_during_stimulus"]["cycles"] == 1 for r in run2["method"][METHOD_KEY]["tests"]["stimulus"]["repeats"]), "one 0.25 s poll fits a 0.4 s hold"
     assert achieved(run2, "pulse_s")["min"] >= .4 - EPS and achieved(run2, "repetitions")["value"] == 5, "the clause's pulse row is the hold"
     short_level = run2["points"][1]
@@ -284,6 +298,7 @@ def test_momentary_drop_variant_a_over_lan_and_variant_b_by_the_supply_timer(tmp
                                     "repeats": 1, "per_repeat_s": 5, "stimulus_total_s": 6, "pre_group_s": 1, "active_group_s": 1, "rest_group_s": 4}
     assert [c["command"] for c in detail_b["commands"]] == ["program_start"] and detail_b["program"]["groups"] == [[12., .5, 1], [4.5, .5, 1], [12., .5, 4]]
     assert detail_b["program"]["end_state_observed"] == "OFF" and detail_b["program"]["status_at_end"]["running"] is False
+    assert run_b["method"][METHOD_KEY]["variant"] == "B" and run_b["method"][METHOD_KEY]["deviations"][0]["variant"] == "B"
     repeat_b = detail_b["repeats"][0]
     assert repeat_b["predicted_window"] and repeat_b["polls_during_stimulus"]["cycles"] >= 3 and repeat_b["polls_during_stimulus"]["off"] >= 1
     assert repeat_b["plant_truth"]["tripped"] and repeat_b["observation"]["state"] == "on"
@@ -327,6 +342,8 @@ def test_one_second_interruption_restarts_through_soft_start_and_a_short_one_wit
     ons = [t["at"] for t in truth if t["origin"] == "delayer" and t["kind"] == "output" and t["value"] is True and t.get("group")]
     assert len(offs) == 2 and all(abs((on - off) - 1.) <= .001 for off, on in zip(offs, ons)), "Delayer OFF groups last 1 s within 1 ms"
     assert achieved(run_d, "interruption_s") == {"value": None, "measured_by": "none", "programmed": 1, "note": achieved(run_d, "interruption_s")["note"]}
+    recovery_d = achieved(run_d, "recovery_s")
+    assert recovery_d["programmed"] == 4 and "rest group" in recovery_d["note"], "the programmed ON group, not the declared 2 s"
     # 100 ms over LAN: with the default 470 uF the converter trips; with 10 mF it rides through and nothing on the bench sees the event.
     short = build_plan(*profiles(MICRO_INTERRUPTION_TEST_TYPE, variant="case1-100ms", interruption_s=.1, repeats=1))
     tripped, _ = evidence(run_best_effort_mock(short, tmp_path))

@@ -403,8 +403,8 @@ def test_recipe_parameters_for_the_runnable_clauses(dut):
 
     micro = S.recipe_parameters(iso("4.6.1.2"), "12V", dut)
     assert micro["coverage"] == "partial" and micro["base_V"] == 12.0
-    assert micro["test_case_1"]["interruption_s"][0] == 1.0 and micro["test_case_1"]["interruption_s"][-1] == 2.0
-    assert micro["test_case_2"]["recovery_s"] == [float(k) for k in range(1, 11)]
+    assert micro["test_case_1"]["interruption"].startswith("10 us to 2 s in decade steps"), "the clause's wording, no invented series"
+    assert micro["test_case_2"]["recovery"].startswith("100 us to 10 s in decade steps")
     assert "10 MOhm" in micro["method_deviation"]
     assert list(micro["offered"]) == S.CLAUSE_VARIANTS["4.6.1.2"]
     assert micro["offered"]["case1-100ms"] == {"interruption_s": 0.1, "recovery_s": 5.0, "mechanism": "lan_output_off"}
@@ -694,8 +694,9 @@ def test_classification_rule_is_pinned_with_synthetic_bounds():
 
 def test_every_best_effort_sheet_has_one_row_per_recorded_parameter_with_the_expected_classifications(dut):
     expectations = {
-        ("4.6.1.1", "A"): {"drop_level_V": "met", "drop_duration_s": "unknown_until_measured", "edge_fall_s": "not_met_but_documented",
-                           "edge_rise_s": "not_met_but_documented"},
+        # Variant A (proposal §3): a 100 ms window is shorter than the supply's worst-case fall, so the depth has no bound.
+        ("4.6.1.1", "A"): {"drop_level_V": "unknown_until_measured", "drop_duration_s": "unknown_until_measured",
+                           "edge_fall_s": "not_met_but_documented", "edge_rise_s": "not_met_but_documented"},
         ("4.6.1.1", "B"): {"drop_level_V": "met", "drop_duration_s": "not_met_but_documented", "edge_fall_s": "not_met_but_documented",
                            "edge_rise_s": "not_met_but_documented"},
         ("4.3.1.2", None): {"level_V": "met", "hold_s": "met", "edge_rise_s": "not_met_but_documented", "edge_fall_s": "not_met_but_documented",
@@ -752,8 +753,8 @@ def test_every_best_effort_sheet_has_one_row_per_recorded_parameter_with_the_exp
 def test_summary_sentences_follow_the_template_for_the_momentary_drop(dut):
     golden_a = ("ISO 16750-2 clause 4.6.1.1 asks for a drop from Usmin 9 V to 4.5 V for 100 ms with edges of at most 10 ms; this bench "
                 "produced a voltage step to 4.5 V commanded for 100 ms over LAN (depth and interval at the terminals not measured; supply "
-                "fall time datasheet-bounded < 110 ms loaded / < 800 ms unloaded) (1 parameter met, 0 approximated, 2 not met, "
-                "1 not measured; see the deviation sheet).")
+                "fall time datasheet-bounded < 110 ms loaded / < 800 ms unloaded) (0 parameters met, 0 approximated, 2 not met, "
+                "2 not measured; see the deviation sheet).")
     golden_b = ("ISO 16750-2 clause 4.6.1.1 asks for a drop from Usmin 9 V to 4.5 V for 100 ms with edges of at most 10 ms; this bench "
                 "produced a voltage step to 4.5 V held 1 s by the supply timer (depth and interval at the terminals not measured; supply "
                 "fall time datasheet-bounded < 110 ms loaded / < 800 ms unloaded) (1 parameter met, 0 approximated, 3 not met, "
@@ -761,8 +762,12 @@ def test_summary_sentences_follow_the_template_for_the_momentary_drop(dut):
     assert S.deviation_sheet("4.6.1.1", "12V", dut, variant="A").statement == golden_a
     assert S.deviation_sheet("4.6.1.1", "12V", dut, variant="B").statement == golden_b
     summary = S.deviation_summary(S.deviation_sheet("4.6.1.1", "12V", dut, variant="A"))
-    assert summary == ("drop level 4.5 V met; drop duration 0.1 s not measured (commanded); edge fall <= 0.01 s not met (documented); "
-                       "edge rise <= 0.01 s not met (documented)")
+    assert summary == ("drop level 4.5 V not measured (commanded); drop duration 0.1 s not measured (commanded); "
+                       "edge fall <= 0.01 s not met (documented); edge rise <= 0.01 s not met (documented)")
+    reached = S.deviation_sheet("4.6.1.1", "12V", dut, variant="B").entries[0]
+    assert reached.classification == "met" and reached.achievable.bound == [4.4705, 4.5295] and "outlasts" in reached.note
+    unknown = S.deviation_sheet("4.6.1.1", "12V", dut, variant="A").entries[0]
+    assert unknown.achievable.bound is None and "shorter than the supply's worst-case fall" in unknown.note
 
 
 def test_exact_level_recipes_program_the_clause_value_and_default_recipes_record_the_margin(dut, mock_bench):
