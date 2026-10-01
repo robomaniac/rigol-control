@@ -139,6 +139,29 @@ def test_web01_web02_offline_exact_shipped_runtime(viewer, documents):
     _open_report(page, documents[0] / "report.html")
 
 
+
+def _browser_dispatches_print_events(context) -> bool:
+    """Probe on a blank page whether window.print() raises beforeprint/afterprint in this browser.
+
+    Headless Chrome for Testing (CI) does not; the system Chromium on the bench Pi does. The probe
+    decides a skip for the environment, never for the report under test.
+    """
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+    probe = context.new_page()
+    try:
+        probe.goto("about:blank")
+        probe.evaluate("""() => { window.__probe = [];
+            addEventListener('beforeprint', () => __probe.push('b')); addEventListener('afterprint', () => __probe.push('a'));
+            setTimeout(() => window.print(), 0); }""")
+        try:
+            probe.wait_for_function("window.__probe.length === 2", timeout=5000)
+            return True
+        except PlaywrightTimeoutError:
+            return False
+    finally:
+        probe.close()
+
+
 @pytest.mark.browser
 def test_served_report_opaque_origin_draws_and_prints_without_page_errors(viewer, documents):
     """The real artifact headers add restrictions absent from a file:// view.
@@ -206,6 +229,9 @@ def test_served_report_opaque_origin_draws_and_prints_without_page_errors(viewer
         assert page.evaluate("localStorage.getItem('report-gate')") == "document only"
         # Quarto also reads storage in its resize/reader-mode handlers.
         page.set_viewport_size({"width": 1000, "height": 850})
+        if not _browser_dispatches_print_events(page.context):
+            pytest.skip("this headless browser never dispatches beforeprint/afterprint, so the print permission "
+                        "cannot be observed here (Chrome for Testing on CI); the Pi's Chromium does dispatch them")
         page.locator('#print-view').click()
         page.wait_for_function("window.__printEvents.join(',') === 'before,after'", timeout=30000)
         assert errors[initial_errors:] == []
