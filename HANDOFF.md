@@ -215,6 +215,16 @@ low-sensitivity and all now public on the branch:
    Approving any generated best-effort recipe is also the owner's act: set
    `authorization.best_effort_approved` and `accepted_deviations_sha256` in the
    saved recipe (the catalog row says so); nothing on the page does it.
+   From the integration review of 2026-10-01: (a) the generated §4.6.1.1 recipe
+   at 12 V starts from Usmin 9.0 V, the converter's stated minimum, and the
+   synthetic plant turns on at 9.1 V at its input, so a simulated run stops at
+   the startup gate with that reason recorded — keep the clause base (honest
+   abort) or raise `from_V` in the saved recipe (the sheet records it);
+   (b) §4.3.2 observes the output after every pulse, so the time at base between
+   pulses is longer than the clause's 1 s rest (recorded as such in the run) —
+   accept, or move the observation after the last pulse; (c) whether to rename
+   the run record's `achieved` block for rows nothing measured; (d) whether
+   `planning.phase_duration_bound_s` (used by tests only) stays.
 
 ## 9. Next bounded tasks, in order
 
