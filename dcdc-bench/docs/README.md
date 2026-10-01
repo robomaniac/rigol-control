@@ -11,6 +11,7 @@ say so in their first lines.
 
 | Document | What it is |
 | --- | --- |
+| [Project review — 2026-09-30](../../Documentation/Project-Review-2026-09-30.md) | Current cross-project agent review: corrected defects, remaining UI/distribution gaps and verification results. |
 | [getting-started.md](getting-started.md) | For an engineer who has never seen this repository: what the software does, what to install, how to run it with no hardware, what must be true before any real converter test, and how to run and read a real test; every command checked with `--help`, hardware-touching ones marked **REAL HARDWARE**. |
 | [bench-ui.md](bench-ui.md) | The local bench page: a saved converter plus input voltages and output loads, a check of what the equipment can reach, the measurements, then links to the interactive HTML report and printable PDF; starting the page, port forwarding and reconnect behaviour. |
 | [configured-runs.md](configured-runs.md) | Configure and run a converter test from saved DUT, equipment and recipe profiles (data, not Python): the supported real procedure, its current physical envelope, the systemd launcher and where job evidence is saved. |

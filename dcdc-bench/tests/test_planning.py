@@ -381,7 +381,7 @@ def test_iso16750_2_clause_4_2_recipe_keeps_out_of_envelope_levels_as_unsupporte
     guarded.protective_controls.dut_input_overvoltage_V = 26.
     recipe = TestRecipe.model_validate(build_recipe("4.2", "24V", dut, guarded))
     assert recipe.tests[0].type == "steady_state_load_sweep" and recipe.tests[0].input_voltage_targets_V == [28., 10., 32.]
-    assert recipe.title == "ISO 16750-2 §4.2 — supply voltage range (24 V system)"
+    assert recipe.title == "ISO 16750-2 §4.2 — DC level subset (24 V system)"
     assert recipe.category == "ISO 16750-2 supply profiles" and recipe.standard_clause == "ISO 16750-2:2023 §4.2"
     plan = build_plan(dut, guarded, recipe)
     assert len(plan.points) == 9, "every requested level x load stays in the plan"

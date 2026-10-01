@@ -30,6 +30,7 @@ present, a Playwright Chromium.
 ```bash
 python -m pytest Software/tests -q
 python -m pytest dcdc-bench/tests -q -m 'not browser and not pdf and not integration'
+python -m pytest dcdc-bench/tests/test_run02_reconnect.py -q -m integration
 ```
 
 Both suites use fake instruments only. Markers are registered in
@@ -39,14 +40,15 @@ Both suites use fake instruments only. Markers are registered in
 | --- | --- | --- |
 | `browser` | Playwright Chromium, offline | Second job, allowed to fail |
 | `pdf` | Quarto 1.10.18 / Typst, `pdftohtml` | Second job, allowed to fail |
-| `integration` | Subprocess workers or the bundled Typst binary | Not in CI |
+| `integration` | Subprocess workers or the bundled Typst binary | Worker reconnect: required job; document fixtures: second job |
 
 With the tools installed, the release gates read a completed demo:
 
 ```bash
 dcdc-bench demo --out dcdc-bench/examples/generated
 DCDC_DEMO_DIR="$PWD/dcdc-bench/examples/generated" \
-  python -m pytest dcdc-bench/tests -q -m 'browser or pdf'
+  python -m pytest dcdc-bench/tests -q -m 'browser or pdf or integration' \
+  --ignore=dcdc-bench/tests/test_run02_reconnect.py
 ```
 
 ## Rules

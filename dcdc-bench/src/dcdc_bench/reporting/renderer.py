@@ -29,6 +29,7 @@ from typing import Any
 
 # The issued CSV export guards text cells exactly as the analysis export does.
 from ..analysis import READBACK_METRIC_PREFIX, _safe_cell, is_flagged_implausible
+from ..annotations import load_annotations
 from .sensor_placement import with_sensor_placement
 from ..resources import children_peak_rss_mib, session_survivors, terminate_group, try_log_event
 
@@ -735,7 +736,7 @@ def _phase_outcome(value: Any) -> str:
     return labels.get(value, str(value).replace("_", " ").replace("-", " ").capitalize()) if value else "Not reported"
 
 
-def _body(model: dict) -> str:
+def _body(model: dict, *, sensor_placement_present: bool = False) -> str:
     if model.get("kind") == "comparison":
         from .comparison import comparison_body
         return comparison_body(model)
@@ -843,10 +844,16 @@ def _body(model: dict) -> str:
     out += ["", "## Device tested {#dut}", ""]
     dut = model["dut"]
     identity = dut.get("identity", dut)
+    construction = dut.get("construction") or {}
+    construction_values = [construction.get(key) or "unknown"
+                           for key in ("topology", "controller_part_number", "isolation")]
+    construction_text = ("unknown — black-box characterization"
+                         if all(str(value).strip().lower() == "unknown" for value in construction_values)
+                         else " / ".join(str(value) for value in construction_values))
     identity_rows = [["Model", _identity(model)], ["Sample", identity.get("sample_id") or "not assigned"],
                      ["Brand on sample label", identity.get("actual_brand_on_label") or "unknown"],
                      ["Owner-provided aliases", ", ".join(identity.get("brand_aliases", [])) or "none"],
-                     ["Topology / controller / isolation", "unknown — black-box characterization"]]
+                     ["Topology / controller / isolation", construction_text]]
     if identity_rows:
         out += [_rows_table(["Identity", "Recorded value"], identity_rows, layout="key-value"), ""]
     ratings = dut.get("ratings", {})
@@ -857,8 +864,17 @@ def _body(model: dict) -> str:
                 ["Rating origin", ratings.get("origin", "unknown")],
                 ["Sample-label verification", "yes" if ratings.get("verified_from_sample_label") else "not verified"]]
         out += [_rows_table(["Rating / evidence", "Recorded value"], rows, layout="key-value"), ""]
-    out += ["Schematic and sample photographs: not supplied in this report model. "
-            "No internal topology or component identity is inferred.", ""]
+    descriptors = model.get("provenance", {}).get("attachment_descriptors") or []
+    documentation = []
+    if descriptors:
+        documentation.append(f"Attachment references: {len(descriptors)} supplied with acquisition metadata. "
+                             "References alone do not establish that a schematic or photograph is embedded.")
+    if sensor_placement_present:
+        documentation.append("Photographic sensor-placement documentation is included in the "
+                             "[Sensor placement section](#sensor-placement).")
+    if not documentation:
+        documentation.append("Schematic and sample photographs: not supplied in this report model.")
+    out += [" ".join(documentation) + " No internal topology or component identity is inferred.", ""]
     if not stages:
         out += ["```{=typst}", "#pagebreak()", "```", ""]
     # Scope denser vertical table padding to the PDF method section. Keeping
@@ -1628,6 +1644,7 @@ def _render_report(report_model: dict, out_dir: Path, formats=("html", "pdf"), *
             "print-tables.typ": _sha(TEMPLATES / "theme/print-tables.typ"),
             "typst-show.typ": _sha(TEMPLATES / "theme/typst-show.typ"),
             "report.js": _sha(TEMPLATES / "web/report.js"),
+            "report-head.js": _sha(TEMPLATES / "web/report-head.js"),
         }}
     gate_record = out / "memory_gate.json"
     if gate_record.is_file():
@@ -1679,7 +1696,10 @@ def _render_report(report_model: dict, out_dir: Path, formats=("html", "pdf"), *
                 "pdf_sha256": _sha(figures_dir / f"{spec['id']}.pdf")})
         (out / "report_model.json").write_text(_json(model), encoding="utf-8")
         shutil.copyfile(TEMPLATES / "theme/report.css", out / "report.css")
-        (out / "metadata.html").write_text('<meta name="robots" content="noindex,nofollow">', encoding="utf-8")
+        head_script = (TEMPLATES / "web/report-head.js").read_text(encoding="utf-8")
+        (out / "metadata.html").write_text(
+            '<meta name="robots" content="noindex,nofollow">\n'
+            '<script id="dcdc-report-head">' + head_script + '</script>\n', encoding="utf-8")
         script = (TEMPLATES / "web/report.js").read_text(encoding="utf-8")
         payload = {"model": model, "colors": COLORS, "condition_colors": _condition_colors(model),
                    "condition_styles": _condition_styles(model),
@@ -1702,7 +1722,8 @@ def _render_report(report_model: dict, out_dir: Path, formats=("html", "pdf"), *
         source = source.replace("__TITLE__", json.dumps(_md(model.get("title", f"{_identity(model)} characterization"))))
         source = source.replace("__SUBTITLE__", json.dumps(_md(identity["subtitle"])))
         source = source.replace("__PAPER__", PAPER_SIZES[paper])
-        source = source.replace("__BODY__", with_sensor_placement(_body(model), out, _md))
+        body = _body(model, sensor_placement_present=load_annotations(out) is not None)
+        source = source.replace("__BODY__", with_sensor_placement(body, out, _md))
         (out / "report.qmd").write_text(source, encoding="utf-8")
         for fmt in requested:
             print(f"Building {fmt.upper()} document…", file=sys.stderr, flush=True)

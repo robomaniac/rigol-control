@@ -4,7 +4,8 @@ Reads ``standards.catalog`` for the selected bench, converter and system class
 and turns it into what the page shows: one card per standard, and for
 ISO 16750-2 one row per clause with a badge. Badge kinds and labels:
 
-* ``runs_here`` "runs here": tickable and ticked by default (4.2);
+* ``runs_here`` "DC level subset": tickable and ticked by default (4.2),
+  with the omitted hold profile and transitions stated beside it;
 * ``runs_after_approval`` "runs here after approval": tickable, not ticked by
   default; the generated recipe steps below the converter's stated minimum
   and plans as ``approval_blocked`` until approved (4.5 and 4.6.2 on the
@@ -98,6 +99,10 @@ def badge(entry: S.CatalogEntry) -> dict[str, Any]:
     recipe needs approval first is offered, never pre-selected.
     """
     clause, verdict = entry.clause, entry.feasibility
+    if clause.recipe_kind == "steady_min_max" and verdict.status == "runs_here" and entry.recipe is not None:
+        return {"kind": "runs_here", "label": "DC level subset", "tickable": True,
+                "ticked_by_default": True,
+                "text": "Partial characterization: cold-started DC levels only; t1/t2 holds and 1 V/s transitions are not reproduced."}
     if verdict.status in S.RUNNABLE_STATUSES and clause.procedure_status in ("recipe", "mock_only") and entry.recipe is not None:
         return {"kind": verdict.status, "label": BADGE_LABELS[verdict.status], "tickable": True,
                 "ticked_by_default": verdict.status == "runs_here",
@@ -123,7 +128,7 @@ def levels_text(entry: S.CatalogEntry, system: str) -> str:
         return ""
     if number == "4.2":
         return (f"code {recipe['supply_code']}: UA {recipe['UA_V']:g} V, Usmin {recipe['Usmin_V']:g} V, "
-                f"Usmax {recipe['Usmax_V']:g} V; t1 {recipe['t1_s']:g} s, t2 {recipe['t2_s']:g} s")
+                f"Usmax {recipe['Usmax_V']:g} V; separate cold-started DC levels")
     if number == "4.3.1.1":
         return f"{recipe['level_V']:g} V for {recipe['duration_s'] / 60:g} min"
     if number == "4.5":
@@ -168,7 +173,7 @@ def card_summary(rows: list[dict[str, Any]]) -> str:
     now = sum(1 for row in rows if row["badge"] == "runs_here")
     after = sum(1 for row in rows if row["badge"] == "runs_after_approval")
     mock_only = sum(1 for row in rows if row["badge"] == "mock_only")
-    parts = [f"{now} clause{'s' if now != 1 else ''} runnable now"]
+    parts = [f"{now} DC level subset{'s' if now != 1 else ''} available"]
     if after:
         parts.append(f"{after} after approval")
     if mock_only:
@@ -217,7 +222,8 @@ def _thresholds(dut: DutProfile) -> tuple[float, float]:
 
 
 def _title(number: str, system: str) -> str:
-    return f"ISO 16750-2 §{number} — {CLAUSE_SHORT_NAMES[number]} ({system[:-1]} V system)"
+    name = "DC level subset" if number == "4.2" else CLAUSE_SHORT_NAMES[number]
+    return f"ISO 16750-2 §{number} — {name} ({system[:-1]} V system)"
 
 
 def recipe_id_for(number: str, system: str) -> str:

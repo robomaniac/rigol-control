@@ -25,7 +25,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .attachments import MEDIA_TYPES, AssetStore
-from .storage import atomic_json
+from .storage import atomic_json, verify_integrity
 
 _OCTET = r"(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)"
 # Private, link-local and loopback ranges only: a generic IPv4 pattern would
@@ -166,6 +166,59 @@ def _build_status(report_dir: Path) -> str | None:
         return None
     status = payload.get("status") if isinstance(payload, dict) else None
     return str(status) if status is not None else None
+
+
+def _verify_issued_files(report_dir: Path, *, allow_unverified: bool) -> list[str]:
+    """Verify recorded output hashes before publication creates a destination.
+
+    Manifest paths can name a different machine after an archive is moved;
+    locate files by the renderer's fixed layout, never follow those paths.
+    An unverified-build override cannot approve changed issued bytes.
+    """
+    manifest = report_dir / "build_manifest.json"
+    if not _regular_file(manifest, report_dir):
+        if allow_unverified:
+            return []
+        raise ValueError("Issued report has no build manifest to verify")
+    try:
+        built = json.loads(manifest.read_text(encoding="utf-8"))
+    except ValueError:
+        if allow_unverified:
+            return []
+        raise ValueError("Issued report has an unreadable build manifest") from None
+    if not isinstance(built, dict):
+        raise ValueError("Issued report build manifest must be an object")
+    expected = {}
+    for fmt, artifact in built.get("artifacts", {}).items():
+        if fmt not in ("html", "pdf") or not isinstance(artifact, dict):
+            raise ValueError("Invalid issued artifact record")
+        if "sha256" in artifact:
+            expected[f"report.{fmt}"] = artifact["sha256"]
+    if "report.html" not in expected and not allow_unverified:
+        raise ValueError("Issued report has no recorded HTML hash; reissue it before publication")
+    if "model_sha256" in built:
+        expected["report_model.json"] = built["model_sha256"]
+    for name, record in built.get("exports", {}).items():
+        if Path(name).name != name or name in ("", ".", "..") or not isinstance(record, dict):
+            raise ValueError("Invalid issued export record")
+        if "sha256" in record:
+            expected[f"exports/{name}"] = record["sha256"]
+    for figure in built.get("figures", []):
+        if not isinstance(figure, dict) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", str(figure.get("id", ""))):
+            raise ValueError("Invalid issued figure record")
+        for fmt in ("svg", "pdf"):
+            if f"{fmt}_sha256" in figure:
+                expected[f"figures/{figure['id']}.{fmt}"] = figure[f"{fmt}_sha256"]
+    css_hash = built.get("render_sources_sha256", {}).get("report.css")
+    if css_hash is not None:
+        expected["report.css"] = css_hash
+    for relative, digest in expected.items():
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError(f"Invalid issued hash for {relative}")
+        source = report_dir / relative
+        if not _regular_file(source, report_dir) or _sha(source) != digest:
+            raise ValueError(f"Issued artifact integrity mismatch: {relative}; reissue the report instead of changing issued files")
+    return sorted(expected)
 
 
 def _inside(child: Path, parent: Path) -> bool:
@@ -427,6 +480,7 @@ def publish_run(run_dir: Path, revision: str, out_dir: Path, approval_path: Path
     approval = load_approval(approval_path)
     if not (run_dir / "run.json").is_file() or not (run_dir / "integrity.json").is_file():
         raise ValueError(f"{run_dir} is not a finalized run folder (run.json and integrity.json are required)")
+    verify_integrity(run_dir)
     run = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
     run_id = str(run.get("run_id", ""))
     if not run_id or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", run_id):
@@ -443,6 +497,7 @@ def publish_run(run_dir: Path, revision: str, out_dir: Path, approval_path: Path
         raise ValueError(f"Revision {revision} build_manifest.json status is {build_status!r}, not 'success'; a report "
                          "validation error blocks an ordinary issued publication. To publish it knowingly, set "
                          "allow_unverified: true in the approval record; the publication manifest records both.")
+    verified_report_files = _verify_issued_files(report_dir, allow_unverified=approval.allow_unverified)
     store = AssetStore(run_dir)
     manifest_path = store.root / "manifest.json"
     revision_paths = store.revision_paths()
@@ -628,6 +683,7 @@ def publish_run(run_dir: Path, revision: str, out_dir: Path, approval_path: Path
                      "keep_serials": approval.keep_serials, "include_pdf": approval.include_pdf,
                      "allow_unverified": approval.allow_unverified, "statement": approval.statement},
         "build_status": build_status,
+        "source_verification": {"acquisition_integrity": "verified", "issued_hashes_verified": verified_report_files},
         "noindex": noindex,
         "noindex_is_not_access_control": "noindex is not access control: a robots tag only asks crawlers not to index; "
                                          "confidential data need an access-controlled destination, not a publicly reachable file.",

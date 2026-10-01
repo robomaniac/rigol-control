@@ -96,6 +96,14 @@ def prepare_real_plan(original: Plan) -> tuple[Plan, list[str], float]:
     if not (5 <= r.settling.minimum_dwell_s <= 15 and 4 <= r.settling.window_s <= 15
             and 5 <= r.settling.minimum_fresh_samples <= 15 and r.settling.timeout_s >= r.settling.minimum_dwell_s):
         errors.append("Settling requires 5–15 s dwell, 4–15 s window and 5–15 queried samples")
+    minimum_settling_s = max(r.settling.minimum_dwell_s, r.settling.window_s,
+                             r.settling.minimum_fresh_samples * r.acquisition.target_poll_interval_s)
+    # execute() sleeps before every settling query and checks the timeout
+    # after it. Even ideal transport needs this long; equality leaves no time
+    # for the mandatory queries or durable evidence writes.
+    if r.settling.timeout_s <= minimum_settling_s:
+        errors.append(f"Settling timeout must exceed {minimum_settling_s:g} s to allow the dwell, window and "
+                      "required query count, with additional time for instrument communication and evidence writes")
     if not (5 <= r.acquisition.duration_s <= 15 and 1 <= r.acquisition.target_poll_interval_s <= 2
             and 5 <= r.acquisition.minimum_complete_cycles <= 15
             and 0 < r.acquisition.maximum_interchannel_skew_s <= .75):

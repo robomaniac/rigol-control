@@ -171,7 +171,10 @@ def file_headers(path: Path, relative: str | None = None) -> dict[str, str]:
     if suffix == '.html':
         # Report scripts can draw/export plots, but have an opaque origin
         # and cannot access the local instrument-control UI.
-        headers['Content-Security-Policy'] = 'sandbox allow-scripts allow-downloads allow-popups'
+        # Printing is a sandboxed modal action: the report's Print current
+        # view button needs allow-modals. Keep allow-same-origin absent so
+        # reports still cannot act in the instrument-control origin.
+        headers['Content-Security-Policy'] = 'sandbox allow-scripts allow-downloads allow-popups allow-modals'
         return headers
     headers['Content-Security-Policy'] = 'sandbox'
     if relative is not None and '/attachments/' in '/' + relative.replace('\\', '/'):
@@ -380,6 +383,7 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                  # job_id -> saved_runs_key of the last snapshot this page showed; drives the
                  # Reports auto-refresh and the "Report ready" notice from the same poll.
                  'seen': {},
+                 'events_open': {},
                  # Real-start confirmation widgets; emptied whenever the panel is cleared so a
                  # later invalidation never touches deleted inputs.
                  'confirm': {}, 'stop_armed': False, 'stop_key': None, 'editor': None,
@@ -409,8 +413,16 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
 
         # --- selection helpers ------------------------------------------------------------------
 
+        def notify(message, **kwargs):
+            # A save/delete handler can outlive its editor or dialog slot after
+            # refresh. Notifications belong to the stable page client, never
+            # to the now-deleted event sender's parent.
+            if not client.is_deleted:
+                with client:
+                    ui.notify(message, **kwargs)
+
         def notify_error(exc):
-            ui.notify(friendly_error(exc), type='negative', timeout=12000, multi_line=True)
+            notify(friendly_error(exc), type='negative', timeout=12000, multi_line=True)
 
         def benches_of(mode):
             return {name: bench for name, bench in state['catalog']['bench'].items() if bench.get('mode') == mode}
@@ -448,21 +460,25 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
 
         async def reload(*, recompute=True):
             """Re-read the saved profiles (after a save/rename/delete) and re-plan every test card."""
+            generation = state['generation']
             catalog = await run.io_bound(service.catalog)
-            if client.is_deleted or catalog is None:
-                return
+            if client.is_deleted or catalog is None or generation != state['generation']:
+                return False
             state['catalog'] = catalog
             fix_selection()
             if recompute:
                 await refresh_feasibility()
+            return generation == state['generation']
 
         async def refresh_feasibility():
             dut, bench, recipes = state['dut'], bench_name(), list(state['catalog']['recipe'])
+            generation = state['generation']
             if not dut or not bench:
                 state['feasibility'] = {}
                 return
             result = await run.io_bound(compute_feasibility, dut, bench, recipes)
-            if client.is_deleted or result is None:
+            if (client.is_deleted or result is None or generation != state['generation']
+                    or (dut, bench, recipes) != (state['dut'], bench_name(), list(state['catalog']['recipe']))):
                 return
             state['feasibility'] = result
 
@@ -480,41 +496,57 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
             render_bar()
 
         async def select(kind, name):
+            if state['active'] or state['start_busy']:
+                return
             if kind == 'dut':
                 if state['dut'] == name:
                     return
                 state['dut'] = name
                 state['standards'].update(system=None, ticked=set())  # the checklist follows the converter's ratings and class
+                changed()  # Invalidate the old plan before the first asynchronous operation.
+                generation = state['generation']
                 await refresh_feasibility()  # the cards' runnability depends on the converter's ratings
+                if client.is_deleted or generation != state['generation']:
+                    return
                 render_converters()
             else:
                 if state['recipe'] == name:
                     return
                 state['recipe'] = name
+                changed()
             render_tests()
-            changed()
 
         async def select_mode(mode):
+            if state['active'] or state['start_busy']:
+                return
             if mode == 'real' and state['bench']['real'] is None:
-                ui.notify('Save a real bench preset first (the seeded "24 V converter tests" preset was removed).', type='warning')
+                notify('Save a real bench preset first (the seeded "24 V converter tests" preset was removed).', type='warning')
                 return
             if state['mode'] == mode:
                 return
             state['mode'] = mode
+            changed()
+            generation = state['generation']
             await refresh_feasibility()
+            if client.is_deleted or generation != state['generation']:
+                return
             render_bench()
             render_tests()
-            changed()
 
         async def select_bench(mode, name):
+            if state['active'] or state['start_busy']:
+                return
             if state['bench'][mode] == name and state['mode'] == mode:
                 return
             state['bench'][mode] = name
             state['mode'] = mode
+            changed()
+            generation = state['generation']
             await refresh_feasibility()
+            if client.is_deleted or generation != state['generation']:
+                return
             render_bench()
             render_tests()
-            changed()
 
         # --- dialogs ------------------------------------------------------------------------------
 
@@ -552,7 +584,7 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                     async def saved():
                         text = str(field.value or '').strip()
                         if not text:
-                            ui.notify('Enter a name.', type='warning')
+                            notify('Enter a name.', type='warning')
                             return
                         dismiss(box)
                         await on_ok(text)
@@ -561,35 +593,47 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
 
         # --- profile actions ----------------------------------------------------------------------
 
-        async def save_and_select(kind, data, *, note=None, overwrite=True, replaces=None):
+        async def save_and_select(kind, data, *, note=None, overwrite=True, replaces=None, select_saved=True):
             """Validate + save a profile, re-read the catalog and select the saved name.
 
             ``overwrite=False`` for a new profile: the service refuses an existing file
             name instead of replacing it. ``replaces`` for Edit with a changed file
             name: the old file goes away with the save (no second card).
             """
+            if state['active'] or state['start_busy']:
+                raise ValueError('Wait for the current job to finish before changing saved profiles.')
+            changed()
+            generation = state['generation']
             name = await run.io_bound(lambda: service.save_profile(kind, data, overwrite=overwrite, replaces=replaces))
             if client.is_deleted or name is None:
                 return None
-            await reload(recompute=False)
+            if not await reload(recompute=False) or generation != state['generation']:
+                return name
             if kind == 'dut':
                 state['dut'] = name
             elif kind == 'recipe':
                 state['recipe'] = name
-            elif kind == 'bench':
+            elif kind == 'bench' and select_saved:
                 state['bench'][data['mode']] = name
                 state['mode'] = data['mode']
             await refresh_feasibility()
+            if client.is_deleted or generation != state['generation']:
+                return name
             render_converters()
             render_bench()
             render_tests()
             changed()
             if note:
-                ui.notify(note, type='positive')
+                notify(note, type='positive')
             return name
 
         async def delete_profile(kind, name):
             async def do_delete():
+                if state['active'] or state['start_busy']:
+                    notify('Wait for the current job to finish before changing saved profiles.', type='warning')
+                    return
+                changed()
+                generation = state['generation']
                 try:
                     await run.io_bound(service.delete_profile, kind, name)
                 except (ValueError, OSError) as exc:
@@ -597,12 +641,13 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                     return
                 if state['editor'] and state['editor'][0] in (kind, 'limits' if kind == 'bench' else kind) and state['editor'][1] == name:
                     close_editor()  # Save in a still-open editor would recreate the deleted file
-                await reload()
+                if not await reload() or generation != state['generation']:
+                    return
                 render_converters()
                 render_bench()
                 render_tests()
                 changed()
-                ui.notify(f'Deleted “{name}”. Past runs keep their own copy.', type='info')
+                notify(f'Deleted “{name}”. Past runs keep their own copy.', type='info')
             confirm_dialog(DELETE_PROMPTS[kind], f'“{display_name(kind, name)}” will disappear from this list.', 'Delete', do_delete)
 
         def display_name(kind, name):
@@ -675,6 +720,8 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
 
         def open_dut_editor(name=None):
             """Add (name None) or edit a converter with the existing DUT form; saved approvals live here too."""
+            if state['active'] or state['start_busy']:
+                return
             close_editor()
             state['editor'] = ('dut', name)
             template = state['catalog']['dut'].get(name) if name else None
@@ -734,6 +781,8 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
 
         def open_recipe_editor(name=None):
             """New test (name None) or edit a test with the existing recipe fields plus its card text."""
+            if state['active'] or state['start_busy']:
+                return
             close_editor()
             state['editor'] = ('recipe', name)
             template = state['catalog']['recipe'].get(name) if name else None
@@ -741,7 +790,7 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
             if new:
                 source = state['catalog']['recipe'].get(state['recipe']) or next(iter(state['catalog']['recipe'].values()), None)
                 if source is None:
-                    ui.notify('No saved test to start from; the seeded quick sweep is restored when the page restarts.', type='warning')
+                    notify('No saved test to start from; the seeded quick sweep is restored when the page restarts.', type='warning')
                     return
                 template = copy.deepcopy(source)
                 template.update(recipe_id='', title='', description=None, standard_clause=None, execution_mode=None)
@@ -818,6 +867,8 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
 
         def open_limits_editor(name):
             """Change the four protective limits of a real bench preset; saving clears its approval."""
+            if state['active'] or state['start_busy']:
+                return
             close_editor()
             state['editor'] = ('limits', name)
             data = copy.deepcopy(state['catalog']['bench'][name])
@@ -842,7 +893,7 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                             for key, value in values(fields).items():
                                 data['protective_controls'][key] = None if value is None or value == '' else float(value)
                             data['protective_controls']['approved'] = False
-                            await save_and_select('bench', data, note='Limits saved — approval cleared; review and tick the box again.')
+                            await save_and_select('bench', data, note='Limits saved — approval cleared; review and tick the box again.', select_saved=False)
                             close_editor()
                         except (ValueError, TypeError, OSError) as exc:
                             notify_error(exc)
@@ -852,7 +903,7 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
             data = copy.deepcopy(state['catalog']['bench'][name])
             data.setdefault('protective_controls', {})['approved'] = bool(event.value)
             try:
-                await save_and_select('bench', data)
+                await save_and_select('bench', data, select_saved=False)
             except (ValueError, OSError) as exc:
                 notify_error(exc)
 
@@ -995,7 +1046,12 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                             ui.label('No real bench preset is saved. The seeded preset is restored when the page restarts.').classes('bench-tile-sub')
                         else:
                             ui.label(bench_equipment(real, state['inventory']) + '. Start can switch outputs on.').classes('bench-tile-sub')
-                            with ui.column().classes('bench-real-details gap-2'):
+                            with ui.column().classes('bench-real-details gap-2') as details:
+                                # Editing a field or approving a preset is not a
+                                # selection of the surrounding real-bench tile.
+                                # Keyboard events must stay with the input too.
+                                details.on('click.stop', lambda: None)
+                                details.on('keydown.stop', lambda: None)
                                 with ui.row().classes('items-center gap-2 flex-wrap'):
                                     ui.label('Limit preset').classes('bench-lbl')
                                     with ui.element('div').classes('bench-pills'):
@@ -1074,7 +1130,7 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                     if info['expandable']:
                         item = card(selected=state['standards']['open'], title=info['title'], subtitle=info['subtitle'],
                                     meta=(f"{info['clause_count']} clauses: " + info['summary']) if info.get('summary')
-                                    else f"{info['runnable_count']} of {info['clause_count']} clauses runnable now on this bench",
+                                    else f"{info['runnable_count']} test subsets available · {info['clause_count']} clauses reviewed",
                                     reason=None if info['runnable'] else info['reason'], badge=f'{system[:-1]} V system',
                                     on_select=lambda _=None: toggle_standard())
                         item.classes(add='bench-standard-card')
@@ -1135,7 +1191,8 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                         else:
                             badge.tooltip(row['text'] or row['reason'])
                 with ui.row().classes('items-center justify-between w-full flex-wrap gap-2'):
-                    ui.label(f'{runnable} of {len(rows)} clauses runnable now on this bench' + (f' · {later} after approval' if later else '')).classes(
+                    ui.label(f'{runnable} test subset{"s" if runnable != 1 else ""} available now · {len(rows)} clauses reviewed'
+                             + (f' · {later} after approval' if later else '')).classes(
                         'bench-card-meta bench-checklist-footer')
                     widgets['add_tests'] = ui.button('Add as tests', on_click=add_as_tests, icon='playlist_add').props('unelevated no-caps')
                     widgets['add_tests'].set_enabled(bool(ticked))
@@ -1151,17 +1208,21 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
 
         async def system_changed(value):
             """Switch the clause parameters to the other system class and remember it on the converter profile."""
+            if state['active'] or state['start_busy']:
+                return
             if value not in ('12V', '24V') or value == standards_system():
                 return
             name = state['dut']
             data = copy.deepcopy(state['catalog']['dut'][name])
             data['system_voltage_class'] = value
+            changed()
+            generation = state['generation']
             try:
                 await run.io_bound(service.save_profile, 'dut', data)
             except (ValueError, OSError) as exc:
                 notify_error(exc)
                 return
-            if client.is_deleted:
+            if client.is_deleted or generation != state['generation']:
                 return
             state['catalog']['dut'][name] = data
             state['standards']['system'] = value
@@ -1171,13 +1232,17 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
 
         async def add_as_tests():
             """Save one recipe per ticked runnable clause and select the last one; every field comes from the catalog and the ratings."""
+            if state['active'] or state['start_busy']:
+                return
             standards = state['standards']
             dut, bench = current('dut'), current('bench')
             numbers = sorted(standards['ticked'], key=lambda number: [int(part) for part in number.split('.')])
             if not (dut and bench and numbers):
-                ui.notify('Tick at least one runnable clause first.', type='warning')
+                notify('Tick at least one runnable clause first.', type='warning')
                 return
             system, saved = standards_system(), []
+            changed()
+            generation = state['generation']
             try:
                 for number in numbers:
                     data = build_recipe(number, system, dut, bench)
@@ -1192,13 +1257,16 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                 notify_error(exc)
                 if not saved:
                     return
-            await reload(recompute=False)
+            if not await reload(recompute=False) or generation != state['generation']:
+                return
             state['recipe'] = saved[-1]
             await refresh_feasibility()
+            if client.is_deleted or generation != state['generation']:
+                return
             standards['ticked'] = set()
             render_tests()
             changed()
-            ui.notify(f'Added {len(saved)} test{"" if len(saved) == 1 else "s"} under “ISO 16750-2 supply profiles”.', type='positive')
+            notify(f'Added {len(saved)} test{"" if len(saved) == 1 else "s"} under “ISO 16750-2 supply profiles”.', type='positive')
 
         # --- plan, confirmation, start -----------------------------------------------------------
 
@@ -1232,9 +1300,14 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
             hint = start_hint()
             widgets['start_hint'].set_text(hint)
             widgets['start_hint'].set_visibility(bool(hint))
-            widgets['preview'].set_enabled(not state['preview_busy'] and not state['active'] and bool(state['dut'] and bench_name() and state['recipe']))
+            widgets['preview'].set_enabled(not state['preview_busy'] and not state['active'] and not state['start_busy']
+                                           and bool(state['dut'] and bench_name() and state['recipe']))
             for key in ('converters_section', 'bench_section', 'tests_section'):
-                panels[key].classes(add='bench-locked' if state['active'] else '', remove='' if state['active'] else 'bench-locked')
+                locked = state['active'] or state['start_busy']
+                panels[key].classes(add='bench-locked' if locked else '', remove='' if locked else 'bench-locked')
+                # pointer-events alone still admits keyboard activation. Native
+                # inert locks the whole editor group, with run status outside it.
+                panels[key].props(add='inert' if locked else '', remove='' if locked else 'inert')
 
         def render_plan():
             panel = panels['plan']
@@ -1309,11 +1382,11 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                         ui.label(label + ' — ' + timing)
 
         async def preview_test():
-            if state['preview_busy']:
+            if state['preview_busy'] or state['active'] or state['start_busy']:
                 return
             dut, bench, recipe = state['dut'], bench_name(), state['recipe']
             if not (dut and bench and recipe):
-                ui.notify('Choose a converter, a bench and a test first.', type='warning')
+                notify('Choose a converter, a bench and a test first.', type='warning')
                 return
             state['preview_busy'] = True
             widgets['preview'].disable()
@@ -1331,7 +1404,7 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                     return
                 remember_jobs(jobs)
                 if state['generation'] != generation:
-                    ui.notify('Settings changed while the preview was being prepared. Preview again to use your latest settings.', type='warning')
+                    notify('Settings changed while the preview was being prepared. Preview again to use your latest settings.', type='warning')
                     return
                 state['preview'], state['stale_note'] = preview, None
                 render_plan()
@@ -1344,7 +1417,8 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
 
         def scroll_to(selector):
             if getattr(client, 'has_socket_connection', False):
-                ui.run_javascript(f"document.querySelector({json.dumps(selector)})?.scrollIntoView({{behavior:'smooth',block:'start'}})")
+                with client:
+                    ui.run_javascript(f"document.querySelector({json.dumps(selector)})?.scrollIntoView({{behavior:'smooth',block:'start'}})")
 
         def can_arm():
             preview = state['preview']
@@ -1405,7 +1479,7 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                 return
             # Single-shot: a second click before the service answers finds can_start() false and does nothing.
             state['start_busy'] = True
-            widgets['start'].disable()
+            render_bar()
             if 'confirm_start' in widgets:
                 widgets['confirm_start'].disable()
             try:
@@ -1453,7 +1527,7 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                 widgets['confirm_stop'].disable()
             try:
                 await run.io_bound(service.cancel, job_id)
-                ui.notify('Stop requested. Wait for the worker to verify both outputs OFF.', type='warning')
+                notify('Stop requested. Wait for the worker to verify both outputs OFF.', type='warning')
                 await poll()
             except (ValueError, OSError, RuntimeError) as exc:
                 state['stop_requested'].discard(job_id)
@@ -1492,7 +1566,7 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
         async def dequeue_report(job_id):
             try:
                 await run.io_bound(service.cancel, job_id)
-                ui.notify('Removed from the report queue. The saved measurements are preserved; Regenerate report can build one later.', type='info')
+                notify('Removed from the report queue. The saved measurements are preserved; Regenerate report can build one later.', type='info')
                 await poll()
                 await refresh_reports()
             except (ValueError, OSError, RuntimeError) as exc:
@@ -1508,7 +1582,7 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
             try:
                 await run.io_bound(service.retry_report, job_id)
                 state['job_id'] = job_id
-                ui.notify('Rebuilding the report from the saved measurements. No acquisition will run.', type='info')
+                notify('Rebuilding the report from the saved measurements. No acquisition will run.', type='info')
                 await poll()
                 await refresh_reports()
             except (ValueError, OSError, RuntimeError) as exc:
@@ -1563,9 +1637,10 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                         ui.label('Requested input: ' + quantity(progress['requested_input_V'], 'V') +
                                  ' · Requested load: ' + quantity(progress.get('requested_output_A'), 'A')).classes('bench-muted')
                     latest = snapshot.get('latest') or {}
+                    reading_kind = 'Simulated' if snapshot.get('mode') == 'mock' else 'Measured'
                     with ui.row().classes('w-full gap-3'):
-                        for key, label, unit in [('Vin_V', 'Measured input', 'V'), ('Iin_A', 'Supply current', 'A'),
-                                                  ('Vout_V', 'Measured output', 'V'), ('Iout_A', 'Load current', 'A')]:
+                        for key, label, unit in [('Vin_V', reading_kind + ' input', 'V'), ('Iin_A', 'Supply current', 'A'),
+                                                  ('Vout_V', reading_kind + ' output', 'V'), ('Iout_A', 'Load current', 'A')]:
                             with ui.column().classes('bench-stat-tile gap-1'):
                                 ui.label(label).classes('bench-muted')
                                 ui.label(quantity(latest.get(key), unit)).classes('bench-stat-value')
@@ -1605,7 +1680,9 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                         ui.label('Report generation needs attention: ' + ', '.join(failed_formats) + '. Saved measurements are preserved. Use "Regenerate report" in Reports.').classes('bench-message bench-warning')
                     events = snapshot.get('events') or []
                     if events:
-                        with ui.expansion('Recent events', icon='list').classes('w-full'):
+                        job_id = snapshot['job_id']
+                        with ui.expansion('Recent events', icon='list', value=state['events_open'].get(job_id, False),
+                                          on_value_change=lambda e, job_id=job_id: state['events_open'].__setitem__(job_id, e.value)).classes('w-full'):
                             for event in events[-12:]:
                                 ui.label(event_text(event)).classes('bench-muted')
 
@@ -1693,7 +1770,7 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                 state['seen'][snapshot['job_id']] = key
                 stale = stale or previous != key
                 if report_became_ready(previous, key):
-                    ui.notify('Report ready: ' + str(snapshot.get('run_id') or snapshot['job_id']), type='positive', timeout=10000)
+                    notify('Report ready: ' + str(snapshot.get('run_id') or snapshot['job_id']), type='positive', timeout=10000)
             if stale:
                 await refresh_reports()
 
@@ -1762,7 +1839,7 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                     ui.label('DC–DC Bench').classes('bench-title')
                     ui.label('One page: converter → bench → test → Preview → Start.').classes('bench-subtitle')
                 with ui.element('div').classes('bench-status-area'):
-                    widgets['idle'] = ui.label('Idle — nothing switched on').classes('bench-idle').props('role=status')
+                    widgets['idle'] = ui.label('Idle — no job running').classes('bench-idle').props('role=status')
                     with ui.row().classes('bench-activity items-center gap-3').props('role=status aria-live=polite') as activity:
                         ui.spinner(size='sm', color='primary')
                         widgets['activity_text'] = ui.label('').classes('bench-activity-text')

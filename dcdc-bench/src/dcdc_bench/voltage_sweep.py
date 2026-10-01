@@ -312,10 +312,10 @@ def _validated_12v_attempt(directory: Path, config_path: Path) -> dict:
     """Read-only prerequisite for one fixed 24/near36 continuation, not resume."""
     from benchctl.config import load_config
     directory = Path(directory).resolve()
-    verify_integrity(directory)
     manifest = json.loads((directory / "integrity.json").read_text())
     if not {"run.json", "plan.json", "raw/samples.jsonl", "request.json"} <= set(manifest.get("files", {})):
         raise ExtendedAbort("Prior integrity manifest does not cover the required continuation evidence")
+    verify_integrity(directory)
     previous = json.loads((directory / "run.json").read_text())
     prior_plan = Plan.model_validate_json((directory / "plan.json").read_text())
     expected = voltage_sweep_plan()

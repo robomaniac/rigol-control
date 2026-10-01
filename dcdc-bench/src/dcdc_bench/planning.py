@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from decimal import Decimal, ROUND_CEILING
 from itertools import groupby
 from pathlib import Path
 from typing import TypeVar
@@ -358,18 +359,85 @@ def mock_acquisition_seconds(plan: Plan) -> float:
     return mock_run_estimate(plan)["typical_s"]
 
 
+def live_step_count(start_V: float, target_V: float, step_V: float) -> int:
+    """Count implicit ramp commands without constructing the requested list.
+
+    Decimal keeps even a very small positive step from overflowing a float
+    division. The tolerance matches the live-step sequence's endpoint rule.
+    """
+    span = abs(Decimal(str(target_V)) - Decimal(str(start_V)))
+    if not span:
+        return 0
+    return max(1, int((span / Decimal(str(step_V)) - Decimal("1e-9")).to_integral_value(rounding=ROUND_CEILING)))
+
+
+def phase_scoped_mock_estimate(plan: Plan) -> dict:
+    """Budget UVLO/ramp/staircase evidence, including commands between observation levels.
+
+    Every cycle writes the four electrical readings. Count polls without
+    subtracting query time, so this is an upper estimate; each procedure
+    also records one point event per level and its lifecycle events.
+    """
+    poll = Decimal(str(plan.recipe.acquisition.target_poll_interval_s))
+    def polls(duration):
+        return int((Decimal(str(duration)) / poll).to_integral_value(rounding=ROUND_CEILING))
+
+    cycles, steps, levels = 0, 0, 0
+    acquisition = max(polls(plan.recipe.acquisition.duration_s), plan.recipe.acquisition.minimum_complete_cycles)
+    for test in plan.recipe.tests:
+        policy = test.uvlo if test.type == UVLO_TEST_TYPE else test.supply_profile
+        if policy is None or test.type not in (UVLO_TEST_TYPE, *SUPPLY_PROFILE_TEST_TYPES):
+            raise ValueError("Phase-scoped budget requires UVLO or supply-profile tests")
+        count = len(test.input_voltage_targets_V)
+        levels += count
+        cycles += polls(policy.startup_interval_s) + count * acquisition
+        if test.type == RESET_STAIRCASE_TEST_TYPE:
+            cycles += ((count + 1) // 2) * polls(policy.recovery_hold_s) + (count // 2) * polls(policy.low_hold_s)
+        else:
+            cycles += count * polls(plan.recipe.settling.minimum_dwell_s)
+        if test.type == SLOW_SUPPLY_RAMP_TEST_TYPE:
+            steps += sum(live_step_count(a, b, policy.step_V)
+                         for a, b in zip(test.input_voltage_targets_V, test.input_voltage_targets_V[1:]))
+    records = len(REQUIRED_MEASUREMENTS) * (cycles + steps) + 2 * levels + 12 * len(plan.recipe.tests)
+    deadline = Decimal(str(MOCK_DEADLINE_FIXED_S)) + Decimal(str(MOCK_DEADLINE_SECONDS_PER_RECORD)) * records
+    typical = Decimal(str(MOCK_ESTIMATE_FIXED_S)) + Decimal(str(MOCK_ESTIMATE_SECONDS_PER_RECORD)) * records
+    # Avoid publishing nonfinite JSON values even for an extreme finite input.
+    if not math.isfinite(float(deadline)) or not math.isfinite(float(typical)):
+        raise ValueError("Simulated phase-scoped run volume exceeds the finite run budget; increase the step or poll interval")
+    within = deadline <= MOCK_RUN_BUDGET_S
+    reason = None if within else (
+        f"the simulated phase-scoped run would write about {records} fsync'd records "
+        f"({steps} intermediate ramp steps); its worst-case deadline {deadline:.0f} s exceeds the "
+        f"{MOCK_RUN_BUDGET_S:.0f} s simulated-run budget (RuntimeMaxSec 2700 s minus margin); "
+        "split the recipe, increase the ramp step or poll interval, or shorten its observation windows")
+    return {"records": records, "live_steps": steps, "observation_levels": levels,
+            "typical_s": float(typical), "deadline_s": float(deadline), "budget_s": MOCK_RUN_BUDGET_S,
+            "within_budget": within, "reason": reason}
+
+
+def require_phase_scoped_mock_budget(plan: Plan) -> dict:
+    estimate = phase_scoped_mock_estimate(plan)
+    if not estimate["within_budget"]:
+        raise ValueError("Simulated run refused: " + estimate["reason"])
+    return estimate
+
+
 def prepare_mock_plan(plan: Plan) -> tuple[Plan, list[str], float]:
     """Preview counterpart of ``real_backend.prepare_real_plan`` for a mock bench: the plan is returned
     unchanged (its hash stands), ``errors`` names why the simulated worker would refuse it, and the
-    seconds are the typical wall-time estimate. Only steady-state load sweeps run through the generic
-    mock loop; the phase-scoped procedures have their own bounded volume and get no estimate here."""
+    seconds are the typical wall-time estimate. Phase-scoped procedures include their intermediate
+    commands and observation polls in the same evidence-volume budget."""
     if not verify_plan_hash(plan):
         raise ValueError("Plan hash mismatch")
     if plan.bench.mode != "mock":
         raise ValueError("prepare_mock_plan accepts mock bench profiles only")
-    if any(test.type != "steady_state_load_sweep" for test in plan.recipe.tests):
+    types = {test.type for test in plan.recipe.tests}
+    if types <= {UVLO_TEST_TYPE, *SUPPLY_PROFILE_TEST_TYPES}:
+        estimate = phase_scoped_mock_estimate(plan)
+    elif types == {"steady_state_load_sweep"}:
+        estimate = mock_run_estimate(plan)
+    else:
         return plan, [], 0.0
-    estimate = mock_run_estimate(plan)
     errors = [] if estimate["within_budget"] else [f"Simulated run refused: {estimate['reason']}"]
     return plan, errors, estimate["typical_s"]
 

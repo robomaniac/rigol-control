@@ -98,13 +98,25 @@ class RunStore:
 
 
 def verify_integrity(run_dir: Path) -> None:
-    """Fail on missing/changed evidence or an unsafe manifest path."""
-    run_dir = Path(run_dir)
+    """Fail on incomplete coverage, missing/changed evidence or an unsafe path.
+
+    The core entries were present in the first acquisition format; later
+    optional entries (for example SCPI transcripts) remain optional here.
+    An empty or truncated manifest cannot certify an unverified run.
+    """
+    run_dir = Path(run_dir).resolve()
     manifest = json.loads((run_dir / "integrity.json").read_text())
-    for name, expected in manifest["files"].items():
+    files = manifest.get("files") if isinstance(manifest, dict) else None
+    required = {"run.json", "plan.json", "request.json", "raw/samples.jsonl"}
+    if not isinstance(files, dict) or not required <= files.keys():
+        raise ValueError("Integrity manifest does not cover required report evidence")
+    if manifest.get("algorithm") != "sha256":
+        raise ValueError("Unsupported acquisition integrity algorithm")
+    for name, expected in files.items():
         relative = Path(name)
-        if relative.is_absolute() or ".." in relative.parts:
+        path = (run_dir / relative).resolve()
+        if relative.is_absolute() or ".." in relative.parts or not path.is_relative_to(run_dir):
             raise ValueError("invalid integrity path")
-        actual = hashlib.sha256((run_dir / relative).read_bytes()).hexdigest()
+        actual = hashlib.sha256(path.read_bytes()).hexdigest()
         if actual != expected:
             raise ValueError(f"acquisition integrity mismatch: {name}")

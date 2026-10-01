@@ -5,6 +5,7 @@ None of these numbers describes the first DUT's bench.
 """
 import json
 import math
+from itertools import combinations
 
 import pytest
 from pydantic import ValidationError
@@ -17,7 +18,7 @@ from dcdc_bench.planning import load_profile
 from dcdc_bench.services import PROJECT_ROOT, default_plan
 from dcdc_bench.uncertainty import (CHANNELS, DERIVED, LINEAR_MODEL_FLAG, SCHEMA_VERSION, channel_specification_review,
                                     channel_standard_uncertainty, difference_uncertainty, evaluate_point,
-                                    evaluate_run_budget, evaluated_quantity, format_efficiency_label)
+                                    evaluate_run_budget, evaluated_quantity, format_efficiency_label, propagate)
 
 CAL = CalibrationRecord(status="within_interval", certificate="fixture-only",
                         note="synthetic fixture record; no instrument or certificate exists")
@@ -166,6 +167,63 @@ def test_unc03_covariance_changes_the_difference_and_the_efficiency_budget():
     with pytest.raises(ValidationError):
         bench.readback_correlations = [ChannelCorrelation(quantity_a="Vin_V", quantity_b="Tcase_C", coefficient=.5,
                                                           justification="unbound channel")]
+
+
+def correlation_record(a, b, coefficient):
+    return dict(quantity_a=a, quantity_b=b, coefficient=coefficient,
+                justification="synthetic covariance regression fixture")
+
+
+@pytest.mark.parametrize("coefficients", [(-1., -1., -1.), (.9, .9, -.9)])
+def test_invalid_combined_correlation_matrix_is_rejected(coefficients):
+    data = default_plan().bench.model_dump()
+    pairs = list(combinations(CHANNELS[:3], 2))
+    data["readback_correlations"] = [correlation_record(a, b, r)
+                                     for (a, b), r in zip(pairs, coefficients)]
+    with pytest.raises(ValidationError, match="positive semidefinite"):
+        BenchProfile.model_validate(data)
+    # The arithmetic entry point also refuses invalid covariance instead of
+    # clamping a negative variance to a fictitious zero uncertainty.
+    with pytest.raises(ValueError, match="positive semidefinite"):
+        propagate(dict.fromkeys(CHANNELS[:3], 1.), dict.fromkeys(CHANNELS[:3], 1.),
+                  {frozenset(pair): r for pair, r in zip(pairs, coefficients)})
+
+
+def test_correlation_pairs_cannot_be_redeclared_in_reverse():
+    data = default_plan().bench.model_dump()
+    data["readback_correlations"] = [correlation_record("Vin_V", "Vout_V", .2),
+                                     correlation_record("Vout_V", "Vin_V", .8)]
+    with pytest.raises(ValidationError, match="pairs must be unique"):
+        BenchProfile.model_validate(data)
+
+
+@pytest.mark.parametrize("signs", [(1., 1., 1., 1.), (-1., -1., 1., 1.)])
+def test_physically_valid_singular_correlation_matrix_is_supported(signs):
+    data = default_plan().bench.model_dump()
+    data["readback_correlations"] = [correlation_record(a, b, signs[i] * signs[j])
+                                     for (i, a), (j, b) in combinations(enumerate(CHANNELS), 2)]
+    bench = BenchProfile.model_validate(data)
+    corr = {frozenset((item.quantity_a, item.quantity_b)): item.coefficient
+            for item in bench.readback_correlations}
+    assert propagate(dict.fromkeys(CHANNELS, 1.), dict.fromkeys(CHANNELS, 1.), corr) == pytest.approx(abs(sum(signs)))
+
+
+def test_shared_systematic_error_does_not_cancel_independent_repeatability():
+    bench = unc01_bench()
+    for q in CHANNELS:
+        bench.measurements[q].readback_specification = fixture_spec(
+            percent_of_reading=0., absolute_offset=.01 if q.endswith("_V") else 0.)
+    values = dict(Vin_V=1., Iin_A=.1, Vout_V=1., Iout_A=.09)
+    point = dict(point_id="repeatability", qualification="valid", **values, **dc_metrics(values, 1.))
+    result = evaluate_point(point, reviews(bench), policy=UncertaintyPolicy(),
+                            correlations={frozenset(("Vin_V", "Vout_V")): 1.},
+                            samples={"Vin_V": [.99, 1.01], "Vout_V": [.99, 1.01]})
+    # Voltage systematic terms cancel exactly in Vout/Vin. Each voltage's
+    # independent standard error remains 0.01 V: 90 * sqrt(2) * 0.01 pp.
+    expected = 90. * math.sqrt(2.) * .01
+    assert result["quantities"]["efficiency_pct"]["standard"] == pytest.approx(expected)
+    assert result["quantities"]["efficiency_pct"]["expanded"] == pytest.approx(2 * expected)
+    assert result["quantities"]["efficiency_pct"]["standard"] > 0
 
 
 def test_unc04_systematic_terms_are_never_divided_by_sample_count():

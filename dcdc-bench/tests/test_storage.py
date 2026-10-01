@@ -44,3 +44,44 @@ def test_failed_transcript_fsync_cannot_issue_an_integrity_manifest(tmp_path, mo
     with pytest.raises(PersistenceError, match="cannot persist scpi.jsonl"):
         store.finalize({"execution_status": "completed"})
     assert not (store.path / "integrity.json").exists()
+
+
+@pytest.mark.parametrize('missing', [None, 'run.json', 'plan.json', 'request.json', 'raw/samples.jsonl'])
+def test_integrity_rejects_empty_or_incomplete_coverage(tmp_path, missing):
+    store = RunStore(tmp_path / 'run')
+    store.initialize({}, {}, {})
+    store.finalize({})
+    path = store.path / 'integrity.json'
+    manifest = json.loads(path.read_text())
+    if missing is None:
+        manifest['files'] = {}
+    else:
+        del manifest['files'][missing]
+    path.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match='required report evidence'):
+        verify_integrity(store.path)
+
+
+def test_integrity_rejects_symlink_outside_run_even_with_matching_bytes(tmp_path):
+    store = RunStore(tmp_path / 'run')
+    store.initialize({}, {}, {})
+    store.finalize({})
+    original = store.path / 'raw/samples.jsonl'
+    outside = tmp_path / 'outside.jsonl'
+    outside.write_bytes(original.read_bytes())
+    original.unlink()
+    original.symlink_to(outside)
+    with pytest.raises(ValueError, match='invalid integrity path'):
+        verify_integrity(store.path)
+
+
+def test_legacy_manifest_without_optional_transcript_remains_verifiable(tmp_path):
+    store = RunStore(tmp_path / 'run')
+    store.initialize({}, {}, {})
+    store.finalize({})
+    path = store.path / 'integrity.json'
+    manifest = json.loads(path.read_text())
+    manifest['files'] = {name: manifest['files'][name] for name in
+                         ('run.json', 'plan.json', 'request.json', 'raw/samples.jsonl')}
+    path.write_text(json.dumps(manifest))
+    verify_integrity(store.path)

@@ -125,17 +125,19 @@ bench: …* and the catalog's one-sentence reason (a transient generator, an EMC
 chamber, a shaker, a climatic chamber); red is reserved for a test you chose
 that cannot run now. The ISO 16750-2 card carries a **12 V system** / **24 V
 system** badge and prints the catalog's count for the selected converter and
-bench, for example *19 clauses: 1 clause runnable now, 2 after approval*.
+bench, for example *19 clauses: 1 DC level subset available, 2 after approval*.
 
 Selecting the ISO 16750-2 card expands it into a **clause checklist** and
-ticks every clause that runs here now; selecting it again folds it. The
+ticks the available DC level subset; selecting it again folds it. The
 **12 V / 24 V** toggle switches every row to the other system's parameters
 (supply codes, UA, levels) and is remembered on the converter profile
 (`system_voltage_class`, default 12 V). Each row shows the clause, its levels
 for this converter, and the catalog's status word as a badge:
 
-- **runs here** (green, ticked by default): §4.2 for the 12T12-4A on either
-  system class.
+- **DC level subset** (green, ticked by default): §4.2 supplies the voltage
+  levels for partial characterization on either system class. The standard's
+  t1/t2 holds and 1 V/s transitions are not reproduced; no clause-compliance
+  result is claimed.
 - **runs here after approval** (amber, tickable but not ticked by default):
   §4.5 and §4.6.2. The recipes they generate step below the converter's stated
   minimum and are written unapproved, so their cards stay greyed with the
@@ -157,19 +159,21 @@ for this converter, and the catalog's status word as a badge:
   tickable), with the catalog's reason under the row. Load dump, reversed
   voltage, short circuit and overload stay excluded by policy (brief §2, §7.5).
 
-The checklist footer counts *N of 19 clauses runnable now on this bench · M
+The checklist footer counts *N test subsets available now · 19 clauses reviewed · M
 after approval*.
 
 **Add as tests** saves one recipe per ticked clause under the category
-*ISO 16750-2 supply profiles*, titled like `ISO 16750-2 §4.2 — supply voltage
-range (12 V system)` with the clause as its badge:
+*ISO 16750-2 supply profiles*, titled like `ISO 16750-2 §4.2 — DC level subset
+(12 V system)` with the clause as its badge:
 
 - §4.2 becomes an ordinary `steady_state_load_sweep` at UA, Usmin and Usmax
   (14 / 9 / 16 V for code C at 12 V; 28 / 10 / 32 V for code E at 24 V) with a
   0.1 / 0.25 / 0.5 A load grid. A level above the bench envelope or the
   input over-voltage guard stays in the plan and Preview explains it; nothing
   is dropped. Each level is a separate cold-started DC point; the standard's
-  t1/t2 hold profile is not reproduced.
+  t1/t2 hold profile and 1 V/s transitions are not reproduced. The recipe's
+  title, referenced clause and scope description travel into the HTML/PDF
+  method section, including these deviations.
 - §4.5 becomes a `slow_supply_ramp` and §4.6.2 a `reset_staircase`. Both run
   in the **simulation only**: the real bench refuses them at Preview as
   *not yet approved for real hardware*. The ramp walks UA down to 1 V and back

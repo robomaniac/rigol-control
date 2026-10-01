@@ -36,6 +36,54 @@ def test_voltage_error_and_regulation_span_have_distinct_references():
     assert regulation_span([12.12, 12.18], 12.) == pytest.approx(.5)
 
 
+def test_standard_recipe_scope_survives_into_shared_html_pdf_body():
+    from dcdc_bench.domain import TestRecipe
+    from dcdc_bench.planning import build_plan
+    from dcdc_bench.reporting.renderer import _body
+    from dcdc_bench.standard_recipes import build_recipe
+
+    base = default_plan()
+    recipe = TestRecipe.model_validate(build_recipe("4.2", "12V", base.dut, base.bench))
+    plan = build_plan(base.dut, base.bench, recipe)
+    run = {"run_id": "scope-regression", "execution_status": "not-started"}
+    analysis = analyze_evidence(plan, run, [])
+    analysis["analysis_id"] = "fixture-only"
+    model = build_report_model(plan, run, analysis, [])
+    notes = model.method.procedure_notes
+    assert f"Recipe: {recipe.title}." in notes
+    assert f"Declared recipe scope: {recipe.description}" in notes
+    assert any(recipe.standard_clause in note and "does not establish standards compliance" in note for note in notes)
+    # One source body feeds both HTML and PDF: the deviation must appear in
+    # that source, not only in the saved plan or interactive metadata.
+    body = _body(model.model_dump())
+    assert "DC level subset" in body
+    assert "the 1 V/s transitions are not reproduced" in body
+    assert "does not establish standards compliance" in body
+
+
+def test_limitations_respect_supplied_dut_identity_and_do_not_deny_attachments():
+    plan = default_plan().model_copy(deep=True)
+    plan.dut.ratings.origin = "manufacturer_datasheet"
+    plan.dut.ratings.verified_from_sample_label = True
+    plan.dut.construction.topology = "buck"
+    plan.dut.construction.controller_part_number = "fixture-controller"
+    plan.dut.construction.isolation = "nonisolated"
+    run = {"run_id": "declaration-regression", "execution_status": "not-started",
+           "attachment_descriptors": [{"purpose": "schematic", "filename": "example.pdf"}]}
+    analysis = analyze_evidence(plan, run, [])
+    analysis["analysis_id"] = "fixture-only"
+    model = build_report_model(plan, run, analysis, [])
+    limitations = " ".join(model.limitations)
+    assert "manufacturer datasheet" in limitations
+    assert "records sample-label verification by the operator" in limitations
+    assert "not verified against the sample label" not in limitations
+    assert "Topology, controller, isolation, calibration and protection behavior are unknown" not in limitations
+    # Images can be added after acquisition, independently of this model's
+    # captured descriptors. The renderer owns actual attachment availability.
+    assert "No schematic" not in limitations
+    assert "No temperature channels were bound for this acquisition" in limitations
+
+
 def test_data04_transition_is_bracket_not_exact():
     bracket = transition_bracket(9.1, 9.0)
     assert bracket["lower_V"] == 9

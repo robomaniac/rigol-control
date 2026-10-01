@@ -1,6 +1,7 @@
 """Versioned contracts. Importing this module never opens an instrument."""
 from __future__ import annotations
 
+import math
 from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -307,6 +308,34 @@ class ChannelCorrelation(Contract):
         return self
 
 
+def validate_correlation_matrix(correlations: dict[frozenset[str], float]) -> None:
+    """Reject mutually inconsistent pairwise correlations; singular matrices are valid.
+
+    Missing pairs mean zero correlation. Checking each coefficient in [-1, 1]
+    is insufficient for three or more channels. Pivoted Schur complements
+    check positive semidefiniteness without adding a numerical dependency.
+    """
+    if any(len(pair) != 2 or not math.isfinite(value) or not -1 <= value <= 1
+           for pair, value in correlations.items()):
+        raise ValueError("Correlations need two distinct channels and finite coefficients in [-1, 1]")
+    channels = sorted({q for pair in correlations for q in pair})
+    matrix = [[1. if a == b else correlations.get(frozenset((a, b)), 0.)
+               for b in channels] for a in channels]
+    tolerance = 1e-12
+    while matrix:
+        pivot = max(range(len(matrix)), key=lambda i: matrix[i][i])
+        diagonal = matrix[pivot][pivot]
+        if diagonal < -tolerance or any(row[i] < -tolerance for i, row in enumerate(matrix)):
+            raise ValueError("Readback correlation matrix must be positive semidefinite")
+        if diagonal <= tolerance:
+            if any(abs(value) > tolerance for row in matrix for value in row):
+                raise ValueError("Readback correlation matrix must be positive semidefinite")
+            return
+        remaining = [i for i in range(len(matrix)) if i != pivot]
+        matrix = [[matrix[i][j] - matrix[i][pivot] * matrix[pivot][j] / diagonal
+                   for j in remaining] for i in remaining]
+
+
 MOCK_THERMAL_ADAPTER = "mock_thermal"
 TEMPERATURE_UNIT = "C"
 ANNOTATIONS_SCHEMA_VERSION = "1.0"
@@ -372,9 +401,15 @@ class BenchProfile(Contract):
 
     @model_validator(mode="after")
     def correlations_reference_bound_channels(self) -> BenchProfile:
+        pairs = {}
         for item in self.readback_correlations:
             if item.quantity_a not in self.measurements or item.quantity_b not in self.measurements:
                 raise ValueError("Readback correlations must reference bound measurement channels")
+            pair = frozenset((item.quantity_a, item.quantity_b))
+            if pair in pairs:
+                raise ValueError("Readback correlation pairs must be unique, including reversed pairs")
+            pairs[pair] = item.coefficient
+        validate_correlation_matrix(pairs)
         return self
 
     @model_validator(mode="after")

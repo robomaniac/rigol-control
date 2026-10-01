@@ -55,6 +55,26 @@ def tree_hash(folder):
     return digest.hexdigest()
 
 
+def issue_test_report(report):
+    """Finalize fixture output hashes after constructing its intended document.
+
+    Tests that deliberately corrupt issued files do not call this helper.
+    """
+    path = report / "build_manifest.json"
+    manifest = json.loads(path.read_text())
+    sha = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
+    for fmt in ("html", "pdf"):
+        artifact = report / f"report.{fmt}"
+        if artifact.is_file():
+            manifest.setdefault("artifacts", {}).setdefault(fmt, {})["sha256"] = sha(artifact)
+    manifest["model_sha256"] = sha(report / "report_model.json")
+    manifest["exports"] = {p.name: {"sha256": sha(p)} for p in (report / "exports").iterdir() if p.is_file()}
+    manifest["figures"] = [{"id": p.stem, "svg_sha256": sha(p),
+                             **({"pdf_sha256": sha(p.with_suffix('.pdf'))} if p.with_suffix('.pdf').exists() else {})}
+                            for p in (report / "figures").glob("*.svg")]
+    path.write_text(json.dumps(manifest))
+
+
 def synthetic_run(tmp_path, *, revision="r0001", with_pdf=True, build_status="success"):
     run_dir = tmp_path / "runs" / RUN_ID
     store = RunStore(run_dir)
@@ -102,6 +122,7 @@ def synthetic_run(tmp_path, *, revision="r0001", with_pdf=True, build_status="su
     (report / "figures" / "fig-efficiency.pdf").write_bytes(b"%PDF-1.4 fake")
     if with_pdf:
         (report / "report.pdf").write_bytes(b"%PDF-1.4 fake report " + SERIAL_S.encode())
+    issue_test_report(report)
     return run_dir
 
 
@@ -214,6 +235,7 @@ def test_noindex_retained_by_default_and_injected_if_missing(tmp_path):
     run_dir = synthetic_run(tmp_path)
     html = run_dir / "reports/r0001/report.html"
     html.write_text(html.read_text().replace('<meta name="robots" content="noindex,nofollow">', ""))
+    issue_test_report(html.parent)
     # The synthetic fixture edits its own report before publishing; re-finalize is not needed since reports are not in integrity.
     target = publish_run(run_dir, "r0001", tmp_path / "public", approval_file(tmp_path))
     published = (target / "report.html").read_text()
@@ -322,6 +344,38 @@ def test_successful_build_publishes_without_the_override_and_records_it(tmp_path
     target = publish_run(synthetic_run(tmp_path), "r0001", tmp_path / "public", approval_file(tmp_path))
     manifest = json.loads((target / "publication_manifest.json").read_text())
     assert manifest["approval"]["allow_unverified"] is False and manifest["build_status"] == "success"
+    assert manifest["source_verification"]["acquisition_integrity"] == "verified"
+    assert {"report.html", "report.pdf", "report_model.json", "exports/points.csv", "figures/fig-efficiency.svg"} <= set(
+        manifest["source_verification"]["issued_hashes_verified"])
+
+
+@pytest.mark.parametrize("relative", ["raw/samples.jsonl", "run.json", "reports/r0001/report.html",
+    "reports/r0001/report.pdf", "reports/r0001/report_model.json", "reports/r0001/exports/points.csv",
+    "reports/r0001/figures/fig-efficiency.svg", "reports/r0001/figures/fig-efficiency.pdf"])
+@pytest.mark.parametrize("allow_unverified", [False, True])
+def test_publication_rejects_changed_evidence_and_issued_artifacts_before_writing(tmp_path, relative, allow_unverified):
+    run_dir = synthetic_run(tmp_path)
+    source = run_dir / relative
+    source.write_bytes(source.read_bytes() + b"\nchanged after issuance\n")
+    before = tree_hash(run_dir)
+    with pytest.raises(ValueError, match="integrity mismatch"):
+        publish_run(run_dir, "r0001", tmp_path / "public", approval_file(tmp_path, allow_unverified=allow_unverified))
+    assert not (tmp_path / "public").exists()
+    assert tree_hash(run_dir) == before
+
+
+def test_successful_build_without_issued_html_hash_requires_explicit_unverified_override(tmp_path):
+    run_dir = synthetic_run(tmp_path)
+    path = run_dir / "reports/r0001/build_manifest.json"
+    manifest = json.loads(path.read_text())
+    del manifest["artifacts"]["html"]["sha256"]
+    path.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="no recorded HTML hash"):
+        publish_run(run_dir, "r0001", tmp_path / "public", approval_file(tmp_path))
+    assert not (tmp_path / "public").exists()
+    target = publish_run(run_dir, "r0001", tmp_path / "public", approval_file(tmp_path, allow_unverified=True))
+    record = json.loads((target / "publication_manifest.json").read_text())
+    assert "report.html" not in record["source_verification"]["issued_hashes_verified"]
 
 
 def sensor_placement_revision(tmp_path, photo, name="private-lab-photo.png"):
@@ -338,6 +392,7 @@ def sensor_placement_revision(tmp_path, photo, name="private-lab-photo.png"):
     section = body.split("```{=html}", 1)[1].split("```", 1)[0]
     html = report / "report.html"
     html.write_text(html.read_text().replace("</body>", section + "</body>"))
+    issue_test_report(report)
     return run_dir, entry
 
 
@@ -420,6 +475,7 @@ def test_plotly_runtime_is_left_intact_while_prose_hostnames_are_redacted(tmp_pa
         f'<script id="dcdc-plotly-runtime">{PLOTLY_EXCERPT}</script></body>'))
     built = json.loads((report / "build_manifest.json").read_text())
     built["plotly_js_sha256"] = hashlib.sha256(PLOTLY_EXCERPT.encode()).hexdigest()
+    built["artifacts"]["html"]["sha256"] = hashlib.sha256(html.read_bytes()).hexdigest()
     (report / "build_manifest.json").write_text(json.dumps(built))
     target = publish_run(run_dir, "r0001", tmp_path / "verified", approval_file(tmp_path))
     published = (target / "report.html").read_text()

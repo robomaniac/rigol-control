@@ -82,6 +82,37 @@ def test_static_plot_uses_supplied_results_keeps_gaps_and_full_auto_range(model)
     assert model == before
 
 
+def test_dut_body_displays_declared_construction_and_attachment_references(model):
+    model["dut"]["construction"] = {"topology": "buck", "controller_part_number": "fixture-controller",
+                                    "isolation": "nonisolated"}
+    model["provenance"] = {"attachment_descriptors": [{"purpose": "schematic", "filename": "example.pdf"}]}
+    body = renderer._body(model)
+    assert "buck / fixture-controller / nonisolated" in body
+    assert "unknown — black-box characterization" not in body
+    assert "Attachment references: 1 supplied with acquisition metadata" in body
+    assert "References alone do not establish that a schematic or photograph is embedded" in body
+    assert "Schematic and sample photographs: not supplied" not in body
+    assert "Photographic sensor-placement documentation is included" not in body
+
+
+def test_dut_body_distinguishes_rendered_sensor_documentation_from_default_absence(model):
+    default = renderer._body(model)
+    assert "unknown — black-box characterization" in default
+    assert "Schematic and sample photographs: not supplied in this report model." in default
+    with_photograph = renderer._body(model, sensor_placement_present=True)
+    assert "Photographic sensor-placement documentation is included" in with_photograph
+    assert "[Sensor placement section](#sensor-placement)" in with_photograph
+    assert "Schematic and sample photographs: not supplied" not in with_photograph
+    assert "Attachment references:" not in with_photograph
+
+
+def test_dut_body_keeps_unknown_construction_fields_without_discarding_known_values(model):
+    model["dut"]["construction"] = {"topology": "buck"}
+    body = renderer._body(model)
+    assert "buck / unknown / unknown" in body
+    assert "unknown — black-box characterization" not in body
+
+
 def test_equipment_report_separates_fields_and_escapes_instrument_replies(model):
     model["provenance"] = {"instrument_identities": {
         "source": {"model": "DP821A", "serial": 'DP8|<script>bad()</script>',
@@ -874,6 +905,9 @@ def test_paper_selection_reaches_the_typst_template_partial_and_manifest(model, 
     assert (tmp_path / "letter/typst-show.typ").read_text() == (renderer.TEMPLATES / "theme/typst-show.typ").read_text()
     assert manifest["paper"] == "letter"
     assert {"print-theme.typ", "typst-show.typ", "print-tables.typ"} <= set(manifest["render_sources_sha256"])
+    metadata = (tmp_path / "letter/metadata.html").read_text()
+    assert '<script id="dcdc-report-head">' in metadata
+    assert (renderer.TEMPLATES / "web/report-head.js").read_text() in metadata
     manifest = render_report(model, tmp_path / "a4", formats=("html",), paper="a4")
     assert manifest["paper"] == "a4"
     assert "papersize: a4" in (tmp_path / "a4/report.qmd").read_text()

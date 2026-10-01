@@ -34,10 +34,10 @@ import math
 from statistics import stdev
 from typing import Any
 
-from .domain import MeasurementBinding, Plan, ReadbackSpecification, UncertaintyPolicy
+from .domain import MeasurementBinding, Plan, ReadbackSpecification, UncertaintyPolicy, validate_correlation_matrix
 
 SCHEMA_VERSION = "uncertainty-budget-1.0"
-METHOD_VERSION = "readback-budget-1.0"
+METHOD_VERSION = "readback-budget-1.1"
 CHANNELS = ("Vin_V", "Iin_A", "Vout_V", "Iout_A")
 CURRENT_CHANNELS = ("Iin_A", "Iout_A")
 DERIVED = ("Pin_W", "Pout_W", "efficiency_pct", "loss_W")
@@ -208,14 +208,31 @@ def sensitivity_coefficients(quantity: str, means: dict[str, float]) -> dict[str
 
 
 def propagate(coefficients: dict[str, float], standard: dict[str, float],
-              correlations: dict[frozenset, float] | None = None) -> float:
-    """u_c = sqrt(sum_i sum_j c_i c_j u(x_i, x_j)) with u(x_i, x_j) = r_ij u_i u_j."""
+              correlations: dict[frozenset, float] | None = None, *,
+              systematic_standard: dict[str, float] | None = None) -> float:
+    """Propagate total variances and declared systematic covariances.
+
+    Repeatability is independent between channels in this model; a shared
+    systematic reference must not cancel that independent contribution.
+    Without a separate systematic mapping, all supplied uncertainty is
+    treated as systematic (the general covariance calculation).
+    """
     correlations = correlations or {}
-    variance = 0.
+    validate_correlation_matrix(correlations)
+    systematic = standard if systematic_standard is None else systematic_standard
+    for q, coefficient in coefficients.items():
+        if (not _finite(coefficient) or not _finite(standard[q]) or not _finite(systematic[q])
+                or not 0 <= systematic[q] <= standard[q]):
+            raise ValueError("Propagation needs finite coefficients and nonnegative systematic uncertainty within total uncertainty")
+    terms = []
     for a, ca in coefficients.items():
         for b, cb in coefficients.items():
-            r = 1. if a == b else correlations.get(frozenset((a, b)), 0.)
-            variance += ca * cb * r * standard[a] * standard[b]
+            covariance = (standard[a] ** 2 if a == b else
+                          correlations.get(frozenset((a, b)), 0.) * systematic[a] * systematic[b])
+            terms.append(ca * cb * covariance)
+    variance = math.fsum(terms)
+    if variance < -1e-12 * math.fsum(abs(term) for term in terms):
+        raise ValueError("Propagated variance is negative; check the declared covariance")
     return math.sqrt(max(variance, 0.))
 
 
@@ -246,7 +263,7 @@ def _quantity_result(name: str, value: float, u_c: float, k: float, coefficients
         label = (format_efficiency_label(value, expanded) if name == "efficiency_pct"
                  else format_quantity_label(value, expanded, unit))
     else:
-        label = f"{value:g} {'%' if name == 'efficiency_pct' else unit} ± 0 {unit} (all declared terms are zero)"
+        label = f"{value:g} {'%' if name == 'efficiency_pct' else unit} ± 0 {unit} (zero under the declared covariance model)"
     return {"status": "evaluated", "value": value, "unit": unit, "standard": u_c, "expanded": expanded, "k": k,
             "lower": value - expanded, "upper": value + expanded, "label": label,
             "sensitivity_coefficients": coefficients, "independence_assumed": independence_assumed,
@@ -340,6 +357,7 @@ def evaluate_point(point: dict[str, Any], reviews: dict[str, dict[str, Any]], *,
                                   else f"{channel['mean']:g} {review['unit']} ± 0 {review['unit']} (all declared terms are zero)"))
         channels[q] = channel
     standard = {q: channels[q]["standard"] for q in CHANNELS if channels[q]["status"] == "evaluated"}
+    systematic = {q: channels[q]["systematic_standard"] for q in standard}
     means = {q: _number(point.get(q)) for q in CHANNELS}
     bound = policy.linear_model_relative_uncertainty_bound
     independence_assumed = not correlations
@@ -368,7 +386,7 @@ def evaluate_point(point: dict[str, Any], reviews: dict[str, dict[str, Any]], *,
                                           "unit": DERIVED_UNITS[name]}
             continue
         coefficients = sensitivity_coefficients(name, means)
-        u_c = propagate(coefficients, standard, correlations)
+        u_c = propagate(coefficients, standard, correlations, systematic_standard=systematic)
         result["quantities"][name] = _quantity_result(name, value, u_c, policy.coverage_factor, coefficients,
                                                       independence_assumed, flags)
     evaluated_channels = [q for q in CHANNELS if channels[q]["status"] == "evaluated"]
@@ -419,7 +437,8 @@ def evaluate_run_budget(plan: Plan, points: list[dict[str, Any]], accepted_value
             "coverage_factor_note": policy.coverage_factor_note, "policy": policy.model_dump(),
             "channels": reviews,
             "correlations": {"declared": [c.model_dump() for c in bench.readback_correlations],
-                             "independence_assumed": not correlations},
+                             "independence_assumed": not correlations,
+                             "scope": "declared correlations apply to systematic channel uncertainty only; repeatability is independent between channels"},
             "systematic_terms": SYSTEMATIC_SCALING_NOTE,
             "repeatability": ("Type A standard error of the mean of the accepted readings, recorded per channel; "
                               + ("included in the combined standard uncertainty" if policy.include_repeatability_in_combined

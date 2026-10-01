@@ -176,6 +176,32 @@ def test_protective_settings_cannot_exceed_smaller_saved_equipment_limits():
     assert "Output voltage guard exceeds the saved load capability" in errors
 
 
+@pytest.mark.parametrize("window,samples,poll,timeout", [(15., 5, 1., 5.), (5., 15, 2., 29.), (5., 5, 1., 5.)])
+def test_impossible_settling_timeout_is_refused_before_instrument_access(tmp_path, monkeypatch, window, samples, poll, timeout):
+    fake = bench(tmp_path, monkeypatch)
+    base, _, _ = plan(loads=(.1,))
+    base.recipe.settling.window_s = window
+    base.recipe.settling.minimum_fresh_samples = samples
+    base.recipe.settling.timeout_s = timeout
+    base.recipe.acquisition.target_poll_interval_s = poll
+    checked, errors, _ = prepare_real_plan(build_plan(base.dut, base.bench, base.recipe))
+    assert any("Settling timeout must exceed" in error for error in errors)
+    with pytest.raises(ValueError, match="Settling timeout must exceed"):
+        run_real(checked, fake.config, fake.out, confirmation=confirmed(checked))
+    assert fake.commands == []
+    assert not fake.out.exists()
+
+
+def test_settling_timeout_allows_window_samples_and_communication_margin():
+    base, _, _ = plan(loads=(.1,))
+    base.recipe.settling.window_s = 15.
+    base.recipe.settling.minimum_fresh_samples = 15
+    base.recipe.acquisition.target_poll_interval_s = 2.
+    base.recipe.settling.timeout_s = 35.
+    _, errors, _ = prepare_real_plan(build_plan(base.dut, base.bench, base.recipe))
+    assert not errors
+
+
 def test_cancellation_during_configuration_never_enables_source(tmp_path, monkeypatch):
     fake = bench(tmp_path, monkeypatch)
     p, _, _ = plan()

@@ -33,7 +33,6 @@ measurement.
 """
 from __future__ import annotations
 
-import math
 from pathlib import Path
 from statistics import mean
 from typing import Any
@@ -41,7 +40,8 @@ from typing import Any
 from .analysis import level_observation
 from .domain import RESET_STAIRCASE_TEST_TYPE, SLOW_SUPPLY_RAMP_TEST_TYPE, SUPPLY_PROFILE_TEST_TYPES, Plan, TestDefinition
 from .mock_uvlo import SyntheticUvlo, UvloMockBench
-from .planning import supply_profile_level_kinds, supply_profile_needs_approval, uvlo_approval_gaps, verify_plan_hash
+from .planning import (live_step_count, require_phase_scoped_mock_budget, supply_profile_level_kinds,
+                       supply_profile_needs_approval, uvlo_approval_gaps, verify_plan_hash)
 from .storage import atomic_json
 from .uvlo import (LOAD_CURRENT_TOLERANCE_A, ProtectiveLimitFault, ReadingOverride, RegulationRuleStop, SourceBoundaryStop,
                    UvloInputRampProcedure, absolute_limits, run_phase_scoped_mock)
@@ -65,7 +65,7 @@ def live_steps(start_V: float, target_V: float, step_V: float) -> list[float]:
     span = target_V - start_V
     if span == 0:
         return []
-    count = max(1, math.ceil(abs(span) / step_V - 1e-9))
+    count = live_step_count(start_V, target_V, step_V)
     direction = 1.0 if span > 0 else -1.0
     steps = [round(start_V + direction * k * step_V, 4) for k in range(1, count)]
     return steps + [target_V]
@@ -102,6 +102,7 @@ class SupplyProfileProcedure(UvloInputRampProcedure):
         if blocked:
             raise ValueError(f"Supply profile refused: {len(blocked)} declared level(s) are not executable and a profile is "
                              f"never run with levels skipped or clipped. First: {blocked[0].point_id} — {blocked[0].reason}")
+        require_phase_scoped_mock_budget(plan)
         self.snapshot = plan.model_copy(deep=True)
         self.kind = tests[0].type
         self.stage = "idle"

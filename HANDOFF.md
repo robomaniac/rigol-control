@@ -196,7 +196,7 @@ low-sensitivity and all now public on the branch:
    — genericize or accept.
 3. **`http://localhost:8081/...` links** in the READMEs — label as local-only
    or replace with relative links.
-4. **12 V cold start** — the converter failed twice to start at 12 V input;
+4. **12 V cold start** — the recorded automated attempt failed to start at 12 V input;
    [cold-start-hypothesis.md](dcdc-bench/docs/cold-start-hypothesis.md)
    ranks the likely causes and proposes discriminating tests. Nothing in it
    authorizes energizing; that decision is the owner's.

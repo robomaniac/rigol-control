@@ -199,7 +199,8 @@ def test_run_panel_offers_stop_for_live_workers_and_dequeue_for_queued_reports()
 
 def test_file_headers_confine_documents_and_download_uploaded_documents():
     html = file_headers(Path('report.html'), 'report/report.html')
-    assert html['Content-Security-Policy'] == 'sandbox allow-scripts allow-downloads allow-popups'
+    assert html['Content-Security-Policy'] == 'sandbox allow-scripts allow-downloads allow-popups allow-modals'
+    assert 'allow-same-origin' not in html['Content-Security-Policy']
     assert 'Content-Disposition' not in html
     name = 'a' * 64
     svg = file_headers(Path(f'/w/run/attachments/originals/{name}.svg'), f'run/attachments/originals/{name}.svg')
@@ -780,7 +781,7 @@ def test_header_shows_background_activity_until_the_job_settles(tmp_path, monkey
                 snapshots['job-1'].update(REPORT_DONE)
                 await poll()
                 assert not pill.visible, 'nothing runs in the background any more'
-                assert find(client, css='bench-idle').visible and find(client, css='bench-idle').text == 'Idle — nothing switched on'
+                assert find(client, css='bench-idle').visible and find(client, css='bench-idle').text == 'Idle — no job running'
                 assert 'Started: ' + local_time_text('2026-09-29T20:40:12+00:00') in texts(find(client, css='bench-run-section'))
                 assert time_legend() in texts(client.layout)
             assert page.errors == []
@@ -1170,7 +1171,7 @@ def test_standards_group_lists_every_standard_and_greys_those_not_on_this_bench(
                 rows = iso_rows(page.service)
                 now = sum(1 for row in rows if row['badge'] == 'runs_here')
                 assert 'greyed' not in iso.classes and '12 V system' in texts(iso)
-                assert any(str(now) in text and 'runnable now' in text for text in texts(iso)), texts(iso)
+                assert any(str(now) in text and 'available' in text for text in texts(iso)), texts(iso)
                 assert not find_all(client, tag='q-checkbox', text='§4.2 Direct current (DC) supply voltage'), 'folded until selected'
             assert page.errors == []
         finally:
@@ -1190,7 +1191,7 @@ def test_iso_card_expands_into_a_clause_checklist_with_one_badge_per_status(tmp_
                 rows = {row['number']: row for row in iso_rows(page.service)}
                 now = sum(1 for row in rows.values() if row['badge'] == 'runs_here')
                 later = sum(1 for row in rows.values() if row['tickable'] and row['badge'] != 'runs_here')
-                assert f'{now} of 19 clauses runnable now on this bench' + (f' · {later} after approval' if later else '') in shown
+                assert f'{now} test subset{"s" if now != 1 else ""} available now · 19 clauses reviewed' + (f' · {later} after approval' if later else '') in shown
                 assert rows['4.2']['badge'] == 'runs_here' and clause_box(client, '4.2').value is True
                 for number, row in rows.items():
                     box, badge = clause_box(client, number), badge_of(client, number)
@@ -1244,7 +1245,7 @@ def test_system_toggle_switches_to_24_v_levels_and_is_remembered_on_the_converte
                 assert badge_of(client, '4.3.1.2').text == 'not applicable'
                 assert all(clause_box(client, n).value is default_ticked(rows[n]) for n in ('4.2', '4.5', '4.6.2'))
                 now = sum(1 for row in rows.values() if row['badge'] == 'runs_here')
-                assert any(text.startswith(f'{now} of 19 clauses runnable now on this bench') for text in texts(client.layout))
+                assert any(text.startswith(f'{now} test subset') and 'available now · 19 clauses reviewed' in text for text in texts(client.layout))
             assert page.errors == []
             # A fresh page for the same converter opens on the remembered class.
             again = await open_bench_page(monkeypatch, tmp_path, {})
@@ -1274,7 +1275,7 @@ def test_add_as_tests_saves_one_recipe_per_ticked_runnable_clause_with_the_catal
                 assert 'iso16750-2-4-2-12v' in saved and 'iso16750-2-4-5-12v' in saved and 'iso16750-2-4-6-2-12v' not in saved
                 assert not any(name.startswith('iso16750-2-4-3') for name in saved), 'a clause without a procedure never becomes a test'
                 sweep = service.load_profile('recipe', 'iso16750-2-4-2-12v')
-                assert sweep['title'] == 'ISO 16750-2 §4.2 — supply voltage range (12 V system)'
+                assert sweep['title'] == 'ISO 16750-2 §4.2 — DC level subset (12 V system)'
                 assert sweep['category'] == 'ISO 16750-2 supply profiles' and sweep['standard_clause'] == 'ISO 16750-2:2023 §4.2'
                 assert sweep['dut_profile_id'] == '12t12-4a' and sweep['execution_mode'] is None
                 assert sweep['tests'][0]['type'] == 'steady_state_load_sweep' and sweep['tests'][0]['input_voltage_targets_V'] == [14., 9., 16.]
@@ -1287,7 +1288,7 @@ def test_add_as_tests_saves_one_recipe_per_ticked_runnable_clause_with_the_catal
                 assert (policy['step_V'], policy['step_interval_s'], policy['expected_off_below_V'], policy['output_on_minimum_V']) == (.02, 2.4, 9., 10.8)
                 assert ramp['authorization']['uvlo_approved'] is False
                 assert 'ISO 16750-2 supply profiles' in texts(client.layout), 'the new cards are grouped under the standard'
-                sweep_card = card_named(client, 'ISO 16750-2 §4.2 — supply voltage range (12 V system)')
+                sweep_card = card_named(client, 'ISO 16750-2 §4.2 — DC level subset (12 V system)')
                 assert 'greyed' not in sweep_card.classes and 'ISO 16750-2:2023 §4.2' in texts(sweep_card) and '9 points · simulated' in texts(sweep_card)
                 ramp_card = card_named(client, 'ISO 16750-2 §4.5 — slow decrease and increase (12 V system)')
                 assert 'selected' in ramp_card.classes, 'the last added test is selected'
@@ -1336,8 +1337,8 @@ def test_an_approval_first_clause_is_amber_unticked_and_names_where_approval_hap
                 footer = find(client, css='bench-checklist-footer').text
                 # The footer counts follow the catalog: 4.2 runs now, 4.5 and 4.6.2 need approval, whatever the
                 # catalog version says about the exact split.
-                assert ' of 19 clauses runnable now on this bench · ' in footer and footer.endswith(' after approval'), footer
-                runnable_now = int(footer.split(' of ')[0]); after = int(footer.split('· ')[1].split(' after')[0])
+                assert ' available now · 19 clauses reviewed · ' in footer and footer.endswith(' after approval'), footer
+                runnable_now = int(footer.split(' test ')[0]); after = int(footer.rsplit('· ', 1)[1].split(' after')[0])
                 assert runnable_now + after == 3 and after >= 1, footer
             assert page.errors == []
         finally:
@@ -1711,7 +1712,9 @@ NOT_UI_LABELS = {'8082', '8081', 'Ports → Forward a Port → 8082', 'no job is
                  'REAL HARDWARE, read-only `*IDN?`', 'both with `expected_serial` set', '26 V input OVP',
                  'Exit 0', 'Exit 4', 'Exit 2'}
 # Labels the guide quotes with a placeholder or a runtime value: the literal fragments the page source must contain.
-COMPOSED_LABELS = {'Acquiring… point n of m': ('Acquiring… point ', ' of '),
+COMPOSED_LABELS = {'Measured input / Supply current / Measured output / Load current':
+                       ('Measured', "reading_kind + ' input'", 'Supply current', "reading_kind + ' output'", 'Load current'),
+                   'Acquiring… point n of m': ('Acquiring… point ', ' of '),
                    'Simulation: Acquiring… point 2 of 21': ('Simulation: ', 'Acquiring… point ', ' of '),
                    'Waiting for free memory: 96 MiB available, 150 MiB needed': ('Waiting for free memory: ', ' MiB available', ' MiB needed'),
                    'Report generation needs attention: PDF. Saved measurements are preserved.':
@@ -1771,4 +1774,228 @@ def test_glossary_page_renders_the_docs_glossary(tmp_path, monkeypatch):
         finally:
             glossary.delete()
             page.client.delete()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('selection', ['dut', 'mode', 'bench'])
+def test_selection_invalidates_before_io_and_discards_late_feasibility(tmp_path, monkeypatch, selection):
+    """An old Preview must never remain startable during a slow selection update.
+
+    A second selection wins even when the first feasibility response arrives last.
+    All profiles and handlers are real; only the I/O scheduling is controlled.
+    """
+    seeded = JobService(tmp_path / 'workspace')
+    if selection == 'dut':
+        other = seeded.load_profile('dut', '12t12-4a')
+        other['profile_id'], other['identity']['model'] = 'z-other-dut', 'Other converter'
+        seeded.save_profile('dut', other)
+    if selection == 'bench':
+        other = seeded.load_profile('bench', 'mock-dp821-envelope')
+        other['bench_id'], other['title'] = 'z-other-mock', 'Other simulation'
+        seeded.save_profile('bench', other)
+
+    async def scenario():
+        from nicegui import run
+        from nicegui.events import GenericEventArguments
+        page = await open_bench_page(monkeypatch, tmp_path, {})
+        client = page.client
+        entered, release = asyncio.Event(), asyncio.Event()
+        task = None
+        try:
+            with client:
+                await click(button(client, 'Preview'))
+                assert button(client, 'Start simulation').enabled
+                original_summary = find(client, css='bench-summary-text').text
+
+                async def delayed(callback, *args, **kwargs):
+                    if getattr(callback, '__name__', '') == 'compute_feasibility' and not entered.is_set():
+                        entered.set()
+                        await release.wait()
+                        return {name: {'runnable': False, 'reason': 'STALE RESPONSE'} for name in args[2]}
+                    return callback(*args, **kwargs)
+
+                monkeypatch.setattr(run, 'io_bound', delayed)
+                if selection == 'dut':
+                    target = card_named(client, 'Other converter')
+                elif selection == 'mode':
+                    target = find_all(client, css='bench-tile')[1]
+                else:
+                    target = button(client, 'Other simulation')
+                target = click_target(target)
+                listener = next(listener for listener in target._event_listeners.values() if listener.type.startswith('click'))
+                task = asyncio.create_task(listener.handler(GenericEventArguments(sender=target, client=client, args={})))
+                await asyncio.wait_for(entered.wait(), 5)
+                start = button(client, 'Start test on the real bench' if selection == 'mode' else 'Start simulation')
+                assert not start.enabled, 'the previous plan is invalidated before the feasibility await'
+                assert 'Settings changed — Preview again before starting.' in texts(find(client, css='bench-plan'))
+                # Dispatch the next selection directly: click() waits for all pending
+                # handlers, including the deliberately delayed first one.
+                if selection == 'dut':
+                    target = card_named(client, '12T12-4A')
+                elif selection == 'mode':
+                    target = find_all(client, css='bench-tile')[0]
+                else:
+                    target = next(item for item in find_all(client, css='bench-pill')
+                                  if item._props['label'] != 'Other simulation')
+                target = click_target(target)
+                listener = next(listener for listener in target._event_listeners.values() if listener.type.startswith('click'))
+                await listener.handler(GenericEventArguments(sender=target, client=client, args={}))
+                release.set()
+                await task
+                assert find(client, css='bench-summary-text').text == original_summary
+                assert not any('STALE RESPONSE' in text for text in texts(client.layout))
+                assert not button(client, 'Start simulation').enabled
+            assert page.errors == []
+        finally:
+            release.set()
+            if task is not None:
+                await task
+            client.delete()
+    asyncio.run(scenario())
+
+
+def test_editing_real_limits_preserves_simulation_and_inputs_stop_tile_events(tmp_path, monkeypatch):
+    async def scenario():
+        page = await open_bench_page(monkeypatch, tmp_path, {})
+        client = page.client
+        try:
+            with client:
+                checkbox(client, 'I reviewed these limits — required once').set_value(True)
+                await settle()
+                assert 'selected' in find_all(client, css='bench-tile')[0].classes
+                assert button(client, 'Start simulation')
+                assert page.service.load_profile('bench', 'rigol-local-limited')['protective_controls']['approved']
+                await click(button(client, 'Change limits…'))
+                control = field(client, 'Supply current limit (A)')
+                boundary = next(parent for parent in ancestors(control) if 'bench-real-details' in parent.classes)
+                assert {listener.type for listener in boundary._event_listeners.values()} >= {'click.stop', 'keydown.stop'}
+                control.set_value(.5)
+                await click(button(client, 'Save limits'))
+                assert 'selected' in find_all(client, css='bench-tile')[0].classes
+                assert button(client, 'Start simulation')
+                saved = page.service.load_profile('bench', 'rigol-local-limited')['protective_controls']
+                assert saved['source_current_limit_A'] == .5 and not saved['approved']
+            assert page.errors == []
+        finally:
+            client.delete()
+    asyncio.run(scenario())
+
+
+def test_running_lock_refuses_selection_callbacks_and_recent_events_stay_open(tmp_path, monkeypatch):
+    jobs = {'job-1': snapshot('job-1', 'acquiring', events=[{'event': 'started'}])}
+
+    async def scenario():
+        page = await open_bench_page(monkeypatch, tmp_path, jobs)
+        client = page.client
+        try:
+            with client:
+                summary = find(client, css='bench-summary-text').text
+                run_labels = texts(find(client, css='bench-run'))
+                assert 'Simulated input' in run_labels and 'Simulated output' in run_labels
+                assert 'Measured input' not in run_labels and 'Measured output' not in run_labels
+                sections = find_all(client, css='bench-question')
+                assert all(section._props.get('inert') for section in sections)
+                # Deliberately bypass native inert and dispatch callbacks. They must
+                # reject queued keyboard/socket events while a job owns the bench.
+                await click(find_all(client, css='bench-tile')[1])
+                await click(card_named(client, SMALL_GRID_TITLE))
+                await click(find(client, css='bench-pill'))
+                assert find(client, css='bench-summary-text').text == summary
+                checkbox(client, 'I reviewed these limits — required once').set_value(True)
+                await settle()
+                assert not page.service.load_profile('bench', 'rigol-local-limited')['protective_controls']['approved'], \
+                    'a queued profile mutation must not bypass the running lock'
+                from nicegui import ui
+                events = next(element for element in client.elements.values()
+                              if isinstance(element, ui.expansion) and element.text == 'Recent events')
+                events.open()
+                await page.poll()
+                refreshed = next(element for element in client.elements.values()
+                                 if isinstance(element, ui.expansion) and element.text == 'Recent events')
+                assert refreshed.value, 'polling must preserve an open event log'
+                jobs['job-1']['state'] = 'completed'
+                await page.poll()
+                assert all('inert' not in section._props for section in sections)
+                assert find(client, css='bench-idle').text == 'Idle — no job running'
+            assert page.errors == []
+        finally:
+            client.delete()
+    asyncio.run(scenario())
+
+
+def test_profile_save_invalidates_before_io_and_does_not_replace_newer_selection(tmp_path, monkeypatch):
+    async def scenario():
+        from nicegui import run
+        from nicegui.events import GenericEventArguments
+        page = await open_bench_page(monkeypatch, tmp_path, {})
+        client = page.client
+        entered, release = asyncio.Event(), asyncio.Event()
+        try:
+            with client:
+                await click(button(client, 'Preview'))
+                assert button(client, 'Start simulation').enabled
+
+                async def delayed(callback, *args, **kwargs):
+                    if getattr(callback, '__name__', '') == '<lambda>' and not entered.is_set():
+                        entered.set()
+                        await release.wait()
+                    return callback(*args, **kwargs)
+
+                monkeypatch.setattr(run, 'io_bound', delayed)
+                checkbox(client, 'I reviewed these limits — required once').set_value(True)
+                await asyncio.wait_for(entered.wait(), 5)
+                assert not button(client, 'Start simulation').enabled
+                assert 'Settings changed — Preview again before starting.' in texts(find(client, css='bench-plan'))
+                target = click_target(card_named(client, SMALL_GRID_TITLE))
+                listener = next(listener for listener in target._event_listeners.values() if listener.type.startswith('click'))
+                await listener.handler(GenericEventArguments(sender=target, client=client, args={}))
+                release.set()
+                await settle()
+                assert find(client, css='bench-summary-text').text == f'12T12-4A · Simulation · {SMALL_GRID_TITLE}'
+                assert page.service.load_profile('bench', 'rigol-local-limited')['protective_controls']['approved']
+                assert not button(client, 'Start simulation').enabled
+            assert page.errors == []
+        finally:
+            release.set()
+            await settle()
+            client.delete()
+    asyncio.run(scenario())
+
+
+def test_save_rename_delete_notifications_survive_deleted_event_slots(tmp_path, monkeypatch):
+    """Exercise NiceGUI's real notify/context resolution, which a recorder stub misses.
+
+    Limits refresh deletes the originating editor; rename/delete dismiss the
+    originating dialog before their asynchronous action completes.
+    """
+    async def scenario():
+        import gc
+        from nicegui import ui
+        real_notify = ui.notify
+        page = await open_bench_page(monkeypatch, tmp_path, {})
+        client = page.client
+
+        def actual_notification(message, **kwargs):
+            gc.collect()  # release detached editors instead of accidentally retaining their weak slot parents
+            real_notify(message, **kwargs)
+
+        monkeypatch.setattr(ui, 'notify', actual_notification)
+        try:
+            with client:
+                await click(button(client, 'Change limits…'))
+                field(client, 'Supply current limit (A)').set_value(.5)
+                await click(button(client, 'Save limits'))
+                await click(link_in(card_named(client, QUICK_TITLE), 'Rename'))
+                field(client, 'New name').set_value('Renamed sweep')
+                await click(button(client, 'Save'))
+                await click(link_in(card_named(client, 'Renamed sweep'), 'Delete'))
+                await click(button(client, 'Delete'))
+            assert page.errors == []
+            notifications = [data['message'] for target, kind, data in client.outbox.messages
+                             if target == client.id and kind == 'notify']
+            assert any(message.startswith('Limits saved') for message in notifications)
+            assert 'Renamed.' in notifications
+            assert any(message.startswith(f'Deleted “{QUICK}”') for message in notifications)
+        finally:
+            client.delete()
     asyncio.run(scenario())

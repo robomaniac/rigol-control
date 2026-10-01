@@ -16,6 +16,8 @@ context can drive ``execute``; that context does not exist here.
 from __future__ import annotations
 
 import math
+import signal
+import threading
 import uuid
 from contextlib import ExitStack
 from datetime import datetime, timezone
@@ -29,8 +31,8 @@ from filelock import FileLock
 from .adapters import MODEL_PARAMETERS, MODEL_VERSION
 from .domain import UVLO_TEST_TYPE, Plan, RawSample, TestDefinition, uvlo_ramp_phases
 from .mock_uvlo import UVLO_MODEL_VERSION, SyntheticUvlo, UvloMockBench
-from .planning import uvlo_approval_gaps, verify_plan_hash
-from .runner import QUANTITIES, Clock, _lock_paths, _provenance
+from .planning import require_phase_scoped_mock_budget, uvlo_approval_gaps, verify_plan_hash
+from .runner import QUANTITIES, Clock, WorkerTerminated, _lock_paths, _provenance
 from .storage import PersistenceError, RunStore, atomic_json
 
 LOAD_CURRENT_TOLERANCE_A = .02
@@ -97,6 +99,7 @@ class UvloInputRampProcedure:
         if blocked:
             raise ValueError(f"UVLO input ramp refused: {len(blocked)} declared step(s) are not executable and a ramp is "
                              f"never run with steps skipped or clipped. First: {blocked[0].point_id} — {blocked[0].reason}")
+        require_phase_scoped_mock_budget(plan)
         self.snapshot = plan.model_copy(deep=True)
         self.stage = "idle"
         self.policy = None
@@ -444,6 +447,16 @@ def run_phase_scoped_mock(plan: Plan, out: Path, *, procedure_factory: Callable[
         run["shutdown"] = {role: {"state": "OFF", "verified": True} for role in ("source", "load")}
 
     locks = ExitStack()
+    previous_signals = {}
+    if threading.current_thread() is threading.main_thread():
+        def interrupt(signum, frame):
+            if signum == signal.SIGINT:
+                raise KeyboardInterrupt("Operator cancelled the simulation")
+            raise WorkerTerminated("SIGTERM received: simulated acquisition interrupted")
+
+        for number in (signal.SIGINT, signal.SIGTERM):
+            previous_signals[number] = signal.signal(number, interrupt)
+            locks.callback(signal.signal, number, previous_signals[number])
     try:
         transition("PLAN_READY")
         transition("AWAITING_ARM")
@@ -479,17 +492,27 @@ def run_phase_scoped_mock(plan: Plan, out: Path, *, procedure_factory: Callable[
             event("fault", classification=stop.classification, reason=message)
         except PersistenceError:
             pass
-    except Exception as exc:
-        state = "error"
-        message = f"{type(exc).__name__}: {exc}"
+    except BaseException as exc:
+        # UI Stop sends SIGINT to this in-process owner. Record the incomplete
+        # acquisition before finalizing; an interrupt must never retain the
+        # optimistic initial "completed" state. SIGTERM follows the same
+        # durable shutdown path when a worker service stops or times out.
+        state = "aborted" if isinstance(exc, KeyboardInterrupt) else "interrupted" if isinstance(exc, WorkerTerminated) else "error"
+        message = ("Operator cancelled the simulation before completion" if isinstance(exc, KeyboardInterrupt)
+                   else f"{type(exc).__name__}: {exc}")
         run["errors"].append(message)
         if active is not None:
-            active.update(qualification="error", reason=message, acquisition_cycle_ids=[])
+            active.update(qualification="inconclusive" if state != "error" else "error",
+                          reason=message, acquisition_cycle_ids=[])
         try:
             event("fault", reason=message)
         except PersistenceError:
             pass
     finally:
+        # A repeated Stop/service signal must not interrupt OFF verification or
+        # the integrity manifest. Restore the caller's handlers when closing.
+        for number in previous_signals:
+            signal.signal(number, signal.SIG_IGN)
         run["lifecycle_state"] = "STOPPING"
         try:
             event("lifecycle", state="STOPPING")

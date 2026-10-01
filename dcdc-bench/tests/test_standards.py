@@ -231,7 +231,8 @@ def test_runnable_verdicts_carry_their_conditions(real_bench, mock_bench, dut):
     assert reset_12_real.status == "mock_only" and reset_12_real.coverage == "none"
     assert any("UVLO" in c and "§7.5" in c for c in reset_12_real.conditions), "the conditions travel with the verdict"
     dc_12 = S.feasibility(iso("4.2"), real_bench, dut, "12V")
-    assert dc_12.status == "runs_here" and dc_12.coverage == "room_temperature_only" and not dc_12.needs_approval
+    assert dc_12.status == "runs_here" and dc_12.coverage == "partial" and not dc_12.needs_approval
+    assert any("t1/t2 holds and 1 V/s transitions are not reproduced" in c for c in dc_12.conditions)
     assert not any("UVLO" in c for c in dc_12.conditions), "code C's 9 V minimum is not below the DUT minimum"
     assert any("9.1 V" in c for c in dc_12.conditions)
     dc_24 = S.feasibility(iso("4.2"), real_bench, dut, "24V")
@@ -484,7 +485,9 @@ def test_bench_page_rows_badge_mock_only_and_after_approval_and_never_pretick_th
     mock_rows = {row["number"]: row for row in R.clause_rows(mock_bench, dut, "12V")}
     real_rows = {row["number"]: row for row in R.clause_rows(real_bench, dut, "12V")}
     assert len(mock_rows) == len(real_rows) == 19
-    assert mock_rows["4.2"]["badge"] == "runs_here" and mock_rows["4.2"]["badge_label"] == "runs here"
+    assert mock_rows["4.2"]["badge"] == "runs_here" and mock_rows["4.2"]["badge_label"] == "DC level subset"
+    assert "not reproduced" in mock_rows["4.2"]["text"]
+    assert "t1" not in mock_rows["4.2"]["levels"]
     assert mock_rows["4.2"]["tickable"] and mock_rows["4.2"]["ticked_by_default"] and not mock_rows["4.2"]["needs_approval"]
     assert mock_rows["4.2"]["approval"] is None and mock_rows["4.2"]["test_type"] == "steady_state_load_sweep"
     for number, test_type in (("4.5", "slow_supply_ramp"), ("4.6.2", "reset_staircase")):
@@ -511,14 +514,14 @@ def test_bench_page_card_counts_now_after_approval_and_mock_only_separately(real
     mock_card = R.standard_cards(mock_bench, dut, "12V")[0]
     assert (mock_card["runnable_count"], mock_card["after_approval_count"], mock_card["mock_only_count"],
             mock_card["tickable_count"]) == (1, 2, 0, 3)
-    assert mock_card["summary"] == "1 clause runnable now, 2 after approval" and mock_card["summary"] in mock_card["subtitle"]
+    assert mock_card["summary"] == "1 DC level subset available, 2 after approval" and mock_card["summary"] in mock_card["subtitle"]
     assert mock_card["runnable"] and mock_card["reason"] is None and mock_card["clause_count"] == 19
     for system in S.SYSTEMS:
         real_card = R.standard_cards(real_bench, dut, system)[0]
         assert (real_card["runnable_count"], real_card["after_approval_count"], real_card["mock_only_count"],
                 real_card["tickable_count"]) == (1, 0, 2, 1), system
-        assert real_card["summary"] == "1 clause runnable now, 2 mock only (simulated bench)" and real_card["runnable"]
-    assert R.card_summary([]) == "0 clauses runnable now"
+        assert real_card["summary"] == "1 DC level subset available, 2 mock only (simulated bench)" and real_card["runnable"]
+    assert R.card_summary([]) == "0 DC level subsets available"
 
 
 def test_generated_mock_only_recipes_ship_unapproved_and_say_where_approval_happens(mock_bench, dut):

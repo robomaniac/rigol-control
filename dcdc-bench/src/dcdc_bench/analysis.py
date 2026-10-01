@@ -24,7 +24,7 @@ from .storage import atomic_json, verify_integrity
 from .uncertainty import DERIVED as UNCERTAINTY_DERIVED, evaluate_run_budget, evaluated_quantity
 from .thermal import annotate_thermal_points, thermal_report_contribution
 
-FORMULA_VERSION = "settled-dc-1.3"
+FORMULA_VERSION = "settled-dc-1.4"
 QUANTITIES = ("Vin_V", "Iin_A", "Vout_V", "Iout_A")
 # Enabled no-load (brief 9.1, plan Gap E): input consumption with the load input OFF.
 NO_LOAD_METRIC_PREFIX = "enabled-no-load-input-consumption-"
@@ -860,6 +860,13 @@ def _report_method(plan: Plan, run: dict, analysis: dict, raw_samples: list[dict
     clock = run.get("clock", {})
     recorded_method = run.get("method", {})
     notes = []
+    if plan.recipe.title:
+        notes.append(f"Recipe: {plan.recipe.title}.")
+    if plan.recipe.standard_clause:
+        notes.append(f"Referenced clause: {plan.recipe.standard_clause}. A clause reference identifies the source of "
+                     "the selected test conditions; it does not establish standards compliance.")
+    if plan.recipe.description:
+        notes.append(f"Declared recipe scope: {plan.recipe.description}")
     if recorded_method.get("configured_dc_sweep"):
         notes.append("This configured DC sweep cold-starts each input-voltage phase with both outputs OFF before reconfiguration. "
                      "Startup readings must establish output voltage before the load is enabled; a boundary or fault stops the run.")
@@ -1752,12 +1759,15 @@ def build_report_model(plan: Plan, run: dict, analysis: dict, raw_samples: list[
         (f"MEASURED: these observations were acquired from the connected {plan.dut.identity.model}; scope is limited to this run."
          if evidence_label == "MEASURED" else
          f"SYNTHETIC: these observations come from a deterministic plant model, not the physical {plan.dut.identity.model}."),
-        "DUT ratings were supplied by the owner and are not verified against the sample label.",
+        (f"DUT ratings source: {plan.dut.ratings.origin.replace('_', ' ')}. "
+         + ("The DUT profile records sample-label verification by the operator."
+            if plan.dut.ratings.verified_from_sample_label else "Sample-label verification is not recorded.")),
         f"Measurement locations — {locations}. The declared boundary is {boundary}; path loss is not solely module heat.",
         uncertainty["note"],
-        "Topology, controller, isolation, calibration and protection behavior are unknown.",
-        ("No schematic or board photograph was supplied; bound temperature channels are described below."
-         if plan.bench.temperature_sensors else "No schematic, board photograph or temperature channels were supplied."),
+        "Construction details are recorded from the DUT profile; these DC observations do not verify topology, "
+        "controller identity or isolation. Protection behavior is not established by this run.",
+        ("Bound temperature channels and sensor metadata are described in the temperature section."
+         if plan.bench.temperature_sensors else "No temperature channels were bound for this acquisition."),
         f"This DC grid does not by itself qualify the claimed {plan.dut.ratings.output_power_rated_W:g} W rating, ripple, transient or thermal behavior.",
         ("At qualified no-load points, input consumption is reported; output power, path loss and efficiency are not evaluated because load-off current readback can contain an offset."
          if any(p["qualification"] == "valid" and p["iout_target_A"] == 0 for p in points) else

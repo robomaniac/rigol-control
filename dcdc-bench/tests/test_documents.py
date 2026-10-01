@@ -95,8 +95,12 @@ def viewer(documents):
         executable = _browser_path()
         browser = playwright.chromium.launch(executable_path=executable, headless=True,
             args=["--disable-dev-shm-usage", "--disable-gpu", "--no-sandbox", "--renderer-process-limit=1"])
+        # Playwright's service_workers="block" injects an unguarded read of
+        # navigator.serviceWorker, which itself throws in the served report's
+        # opaque sandbox. Offline mode and request routing enforce isolation;
+        # the served-report gate also checks native worker access is denied.
         context = browser.new_context(viewport={"width": 1365, "height": 980}, accept_downloads=True,
-                                      service_workers="block", offline=True)
+                                      offline=True)
         blocked = []
         def block(route):
             if route.request.url.startswith(("http:", "https:")):
@@ -133,6 +137,87 @@ def test_web01_web02_offline_exact_shipped_runtime(viewer, documents):
     assert not errors
     assert not blocked, f"Report attempted external requests: {blocked}"
     _open_report(page, documents[0] / "report.html")
+
+
+@pytest.mark.browser
+def test_served_report_opaque_origin_draws_and_prints_without_page_errors(viewer, documents):
+    """The real artifact headers add restrictions absent from a file:// view.
+
+    Reuse the release-gate browser; allow only this loopback URL through its
+    existing external-request block. A native print event verifies the modal
+    permission without substituting window.print or dispatching fake events.
+    """
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import threading
+    from dcdc_bench.ui import file_headers
+
+    page, errors, blocked = viewer
+    artifact = documents[0] / "report.html"
+    document = artifact.read_bytes()
+    headers = file_headers(artifact)
+    assert "allow-same-origin" not in headers["Content-Security-Policy"]
+
+    class ReportHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path != "/report.html":
+                self.send_error(404)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(document)))
+            for name, value in headers.items():
+                self.send_header(name, value)
+            self.end_headers()
+            self.wfile.write(document)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), ReportHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    url = f"http://127.0.0.1:{server.server_port}/report.html"
+    allow_loopback = lambda route: route.continue_()
+    page.route(url, allow_loopback)
+    page.context.set_offline(False)
+    initial_errors = len(errors)
+    try:
+        response = page.goto(url, wait_until="load", timeout=120000)
+        assert response.status == 200
+        assert response.headers["content-security-policy"] == headers["Content-Security-Policy"]
+        page.wait_for_function("document.documentElement.dataset.reportReady === 'true'", timeout=60000)
+        assert page.locator('.js-plotly-plot').count() == 3
+        assert page.evaluate("window.origin") == "null"
+        assert page.evaluate("""() => {
+            try { void window.sessionStorage; return false; }
+            catch (error) { return error.name === 'SecurityError'; }
+        }"""), "The report must retain an opaque origin with native storage denied"
+        assert page.evaluate("""() => {
+            try { void navigator.serviceWorker; return false; }
+            catch (error) { return error.name === 'SecurityError'; }
+        }"""), "The opaque report sandbox must deny service worker access"
+        assert page.locator('head #dcdc-report-head').count() == 1
+        page.evaluate("""() => {
+            localStorage.setItem('report-gate', 'document only');
+            window.__printEvents = [];
+            addEventListener('beforeprint', () => __printEvents.push('before'));
+            addEventListener('afterprint', () => __printEvents.push('after'));
+        }""")
+        assert page.evaluate("localStorage.getItem('report-gate')") == "document only"
+        # Quarto also reads storage in its resize/reader-mode handlers.
+        page.set_viewport_size({"width": 1000, "height": 850})
+        page.locator('#print-view').click()
+        page.wait_for_function("window.__printEvents.join(',') === 'before,after'", timeout=30000)
+        assert errors[initial_errors:] == []
+        assert not blocked, f"Served report attempted external requests: {blocked}"
+    finally:
+        page.unroute(url, allow_loopback)
+        page.context.set_offline(True)
+        page.set_viewport_size({"width": 1365, "height": 980})
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+        _open_report(page, artifact)
 
 
 @pytest.mark.browser

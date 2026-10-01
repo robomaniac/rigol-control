@@ -23,7 +23,8 @@ What it contains
 Verdicts
 --------
 ``runs_here``
-    The bench runs the clause's procedure as it is (4.2 on either bench).
+    A procedure or explicitly bounded subset is available (4.2 is a DC-level
+    subset on either bench; inspect coverage and conditions).
 ``runs_after_approval``
     The procedure exists on this bench but the generated recipe steps below
     the DUT's stated minimum, so it plans as ``approval_blocked`` until the
@@ -618,6 +619,11 @@ def feasibility(clause: Clause, bench: BenchProfile, dut: DutProfile, system: st
         coverage = "room_temperature_only" if coverage == "full" else coverage
         conditions.append(f"Temperature conditioning needs {_describe(sorted(clause.environment - env.tokens))}; "
                           f"the electrical part runs at room temperature and the deviation is recorded")
+    if clause.recipe_kind == "steady_min_max":
+        coverage = "partial"
+        conditions.append("DC level subset only: separate cold-started load sweeps at UA, Usmin and Usmax; "
+                          "the t1/t2 holds and 1 V/s transitions are not reproduced. This is partial characterization, "
+                          "not execution of the complete clause procedure.")
     if env.max_current_A is not None and ratings.output_power_rated_W > 0:
         conditions.append(f"Rated-load operating mode 3.4 is not reachable from a {env.max_current_A:g} A source; the run "
                           f"uses the bounded load grid the planner accepts (brief §3.2)")
@@ -660,6 +666,8 @@ def feasibility(clause: Clause, bench: BenchProfile, dut: DutProfile, system: st
         reason = (f"{clause.title} is an ordinary DC supply and load measurement within the source's "
                   f"{env.max_voltage_V:g} V envelope and the DUT's {ratings.input_voltage_min_V:g}-{ratings.input_voltage_max_V:g} V rating"
                   if env.max_voltage_V is not None else f"{clause.title} is an ordinary DC supply and load measurement")
+    if clause.recipe_kind == "steady_min_max":
+        reason += "; only a DC level subset is implemented, with no t1/t2 hold profile or 1 V/s transitions"
     if needs_approval:
         reason += (f", and its levels below the DUT's {ratings.input_voltage_min_V:g} V minimum plan as executable only after "
                    f"the saved recipe is approved under the bench's protective policy (brief §7.5)")

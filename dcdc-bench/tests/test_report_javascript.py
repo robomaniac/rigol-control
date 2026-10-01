@@ -24,6 +24,64 @@ def _run_node(harness: str, payload: dict) -> dict:
     return json.loads(result.stdout)
 
 
+def test_report_head_keeps_accessible_native_storage_unchanged():
+    result = _run_node(r"""
+const {script} = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+const native = {length: 1, getItem: () => 'saved preference'};
+global.window = {};
+const getter = () => native;
+Object.defineProperty(window, 'localStorage', {configurable:true, get:getter});
+eval(script);
+process.stdout.write(JSON.stringify({same: window.localStorage === native,
+    getterUnchanged: Object.getOwnPropertyDescriptor(window, 'localStorage').get === getter}));
+""", {"script": (TEMPLATES / "web/report-head.js").read_text()})
+    assert result == {"same": True, "getterUnchanged": True}
+
+
+def test_report_head_fallback_storage_semantics_and_document_lifetime():
+    result = _run_node(r"""
+const {script} = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+const blockedDocument = () => {
+    global.window = {};
+    Object.defineProperty(window, 'localStorage', {configurable:true, get() {
+        const error = new Error('opaque sandbox origin'); error.name = 'SecurityError'; throw error;
+    }});
+    eval(script);
+    return window.localStorage;
+};
+const storage = blockedDocument(), observed = {};
+observed.empty = [storage.length, storage.getItem('missing'), storage.key(0)];
+observed.undefinedReturns = [storage.setItem(12, 34), storage.setItem(null, undefined),
+    storage.setItem('__proto__', 'safe')].every(value => value === undefined);
+observed.strings = [storage.getItem('12'), storage.getItem(null), storage.getItem('__proto__')];
+observed.keys = [storage.length, storage.key(0), storage.key('1'), storage.key(2.9),
+    storage.key(3), storage.key(-1)];
+storage.setItem(12, 'updated');
+observed.replace = [storage.length, storage.key(0), storage.getItem(12)];
+observed.removeUndefined = storage.removeItem(null) === undefined;
+storage.removeItem('missing');
+observed.removed = [storage.length, storage.getItem(null), storage.key(1)];
+observed.invalid = [() => storage.key(), () => storage.getItem(), () => storage.setItem('key'),
+    () => storage.removeItem(), () => storage.getItem(Symbol()), () => storage.setItem('key', Symbol())]
+    .every(action => { try { action(); return false; } catch (error) { return error instanceof TypeError; } });
+eval(script);
+observed.reentryRetains = window.localStorage === storage && storage.getItem(12) === 'updated';
+observed.reloadEmpty = blockedDocument().length === 0;
+observed.clearUndefined = storage.clear() === undefined;
+observed.cleared = [storage.length, storage.getItem('__proto__'), storage.key(0)];
+process.stdout.write(JSON.stringify(observed));
+""", {"script": (TEMPLATES / "web/report-head.js").read_text()})
+    assert result == {
+        "empty": [0, None, None], "undefinedReturns": True,
+        "strings": ["34", "undefined", "safe"],
+        "keys": [3, "12", "null", "__proto__", None, None],
+        "replace": [3, "12", "updated"], "removeUndefined": True,
+        "removed": [2, None, "__proto__"], "invalid": True,
+        "reentryRetains": True, "reloadEmpty": True, "clearUndefined": True,
+        "cleared": [0, None, None],
+    }
+
+
 # Slices of the shipped script, taken between stable function boundaries, run
 # against a minimal document/Plotly stand-in. A moved boundary fails loudly.
 SLICE_SUPPORT = r"""
