@@ -404,3 +404,240 @@ def test_iso16750_2_clause_4_2_recipe_keeps_out_of_envelope_levels_as_unsupporte
     assert levels[0] == levels[-1] == 28. and min(levels) == 1. and len(levels) == 55
     assert ramp.tests[0].supply_profile.step_V == .02 and ramp.tests[0].supply_profile.step_interval_s == 2.4
     assert ramp.tests[0].supply_profile.expected_off_below_V == 9. == ramp.tests[0].supply_profile.expected_on_above_V
+
+
+# --- ISO 16750-2 best-effort procedures: mock-only types, the UVLO-style approval gate and the deviation sheet hash -------
+
+def _best_effort_bench(bench, policy_id="synthetic-best-effort-v1"):
+    bench = bench.model_copy(deep=True)
+    bench.protective_controls.policy_id = policy_id
+    bench.protective_controls.source_current_limit_A = .5
+    bench.protective_controls.dut_input_overvoltage_V = 28.
+    bench.protective_controls.dut_output_overvoltage_V = 13.2
+    bench.protective_controls.output_overcurrent_A = .15
+    return bench
+
+
+def _approve(recipe, *, uvlo=False, policy_id="synthetic-best-effort-v1"):
+    from dcdc_bench.planning import recipe_deviations_sha256
+    recipe = recipe.model_copy(deep=True)
+    recipe.authorization.best_effort_approved = True
+    recipe.authorization.accepted_deviations_sha256 = recipe_deviations_sha256(recipe)
+    recipe.authorization.protective_policy_id = policy_id
+    recipe.authorization.uvlo_approved = uvlo
+    return recipe
+
+
+def _generated(number, system, dut, bench, **kwargs):
+    from dcdc_bench.standard_recipes import build_recipe
+    return TestRecipe.model_validate(build_recipe(number, system, dut, bench, **kwargs))
+
+
+def test_best_effort_contracts_validate_their_shape():
+    from dcdc_bench import standards as S
+    from dcdc_bench.domain import BEST_EFFORT_TEST_TYPES, AuthorizationPolicy, BestEffortPolicy, TestDefinition
+    dut = load_profile(PROFILES / "dut/12t12-4a.yaml", DutProfile)
+    sheet = S.deviation_sheet("4.6.1.1", "12V", dut, variant="A")
+    policy = BestEffortPolicy(clause="4.6.1.1", variant="A", drop_level_V=4.5, drop_s=.1, repeats=1, recovery_s=5., mechanism="lan_voltage_step",
+                              deviation_sheet=sheet)
+    assert policy.longest_phase_s("momentary_drop") == 5.
+    good = TestDefinition(id="drop", type="momentary_drop", input_voltage_targets_V=[9., 4.5], output_current_targets_A=[.1], best_effort=policy)
+    assert good.best_effort is policy and good.supply_profile is None, "the output-threshold block is optional on a best-effort test"
+    with pytest.raises(ValidationError, match="requires a declared best_effort block"):
+        TestDefinition(id="t", type="momentary_drop", input_voltage_targets_V=[9., 4.5], output_current_targets_A=[.1])
+    with pytest.raises(ValidationError, match="holds one fixed load"):
+        TestDefinition(id="t", type="momentary_drop", input_voltage_targets_V=[9., 4.5], output_current_targets_A=[.1, .2], best_effort=policy)
+    with pytest.raises(ValidationError, match=r"\[from_V, drop_level_V\]"):
+        TestDefinition(id="t", type="momentary_drop", input_voltage_targets_V=[9., 5.], output_current_targets_A=[.1], best_effort=policy)
+    with pytest.raises(ValidationError, match="only valid for the transient_hold"):
+        TestDefinition(id="t", input_voltage_targets_V=[24.], output_current_targets_A=[.1], best_effort=policy)
+    with pytest.raises(ValidationError, match="must carry the declared variant"):
+        BestEffortPolicy(clause="4.6.1.1", variant="B", drop_level_V=4.5, drop_s=1., mechanism="supply_timer", deviation_sheet=sheet)
+    with pytest.raises(ValidationError, match="declared clause's sheet"):
+        BestEffortPolicy(clause="4.3.2", variant="A", level_V=18., hold_s=.4, repeats=5, mechanism="lan_voltage_step", deviation_sheet=sheet)
+    hold_sheet = S.deviation_sheet("4.3.1.2", "12V", dut)
+    hold = BestEffortPolicy(clause="4.3.1.2", level_V=26., hold_s=60., repeats=1, recovery_s=120., mechanism="lan_voltage_step", deviation_sheet=hold_sheet)
+    assert hold.longest_phase_s("transient_hold") == 120.
+    with pytest.raises(ValidationError, match=r"\[base_V, level_V\]"):
+        TestDefinition(id="t", type="transient_hold", input_voltage_targets_V=[26.], output_current_targets_A=[.1], best_effort=hold)
+    with pytest.raises(ValidationError, match="requires best_effort.level_V, hold_s and repeats"):
+        TestDefinition(id="t", type="transient_hold", input_voltage_targets_V=[10.8, 26.], output_current_targets_A=[.1],
+                       best_effort=hold.model_copy(update={"hold_s": None}))
+    line_sheet = S.deviation_sheet("4.9.2", "12V", dut)
+    line = BestEffortPolicy(clause="4.9.2", interruption_s=10., recovery_s=10., repeats=1, mechanism="lan_output_off", deviation_sheet=line_sheet)
+    with pytest.raises(ValidationError, match=r"\[base_V\]"):
+        TestDefinition(id="t", type="line_interruption", input_voltage_targets_V=[12., 0.5], output_current_targets_A=[.1], best_effort=line)
+    assert set(BEST_EFFORT_TEST_TYPES) == {"transient_hold", "momentary_drop", "micro_interruption", "line_interruption"}
+    authorization = AuthorizationPolicy()
+    assert (authorization.best_effort_approved, authorization.accepted_deviations_sha256, authorization.instrument_timed_bound_s,
+            authorization.program_clause_level_exactly) == (False, None, None, False), "existing recipes validate unchanged"
+    with pytest.raises(ValidationError):
+        AuthorizationPolicy(accepted_deviations_sha256="not-a-hash")
+
+
+def test_best_effort_types_plan_on_the_mock_only_after_approval_and_are_refused_on_a_real_bench(profiles):
+    from dcdc_bench.planning import IMPLEMENTED_TEST_TYPES, MOCK_ONLY_TEST_TYPES, best_effort_approval_gaps, recipe_deviations_sha256
+    dut, bench, _ = profiles
+    bench = _best_effort_bench(bench)
+    assert set(MOCK_ONLY_TEST_TYPES) <= set(IMPLEMENTED_TEST_TYPES) and "momentary_drop" in MOCK_ONLY_TEST_TYPES
+    drop = _generated("4.6.1.1", "12V", dut, bench)
+    assert drop.authorization.protective_policy_id == bench.protective_controls.policy_id, "generated against this bench"
+    # Written unapproved: every level is approval_blocked and the reason lists the gaps, including the UVLO one for 4.5 V.
+    blocked = build_plan(dut, bench, drop)
+    assert [p.status for p in blocked.points] == ["approval_blocked"] * 4 and verify_plan_hash(blocked)
+    assert all("best_effort_approved is false" in p.reason and "accepted_deviations_sha256 is not declared" in p.reason for p in blocked.points)
+    assert all("uvlo_approved is false" in p.reason for p in blocked.points), "the 4.5 V drop is below the 9 V minimum"
+    gaps = best_effort_approval_gaps(bench, drop)
+    assert gaps[:2] == ["recipe authorization.best_effort_approved is false", "recipe authorization.accepted_deviations_sha256 is not declared"]
+    # Approved with the matching hash: executable; the drop level is an expected-off point with no load budget.
+    approved = _approve(drop, uvlo=True)
+    assert not best_effort_approval_gaps(bench, approved)
+    plan = build_plan(dut, bench, approved)
+    assert [p.status for p in plan.points] == ["executable"] * 4
+    start, low = plan.points[0], plan.points[1]
+    assert "start of the best-effort momentary drop (ISO 16750-2 clause 4.6.1.1, variant B)" in start.reason
+    assert "drop level" in low.reason and "output-off at the drop level is the recipe's documented expectation" in low.reason
+    assert low.planning_output_current_limit_A is None and low.estimated_input_current_A is None
+    assert "variant A" in plan.points[3].reason
+    # The 24 V drop to 9 V equals the DUT minimum: no UVLO approval is needed and the drop level is not an expected-off point.
+    drop_24 = _approve(_generated("4.6.1.1", "24V", dut, bench), uvlo=False)
+    plan_24 = build_plan(dut, bench, drop_24)
+    assert all(p.status == "executable" for p in plan_24.points) and "documented expectation" not in plan_24.points[1].reason
+    # Interruptions take the input to 0 V: uvlo_approved is required even though the only level is 12 V.
+    micro = _approve(_generated("4.6.1.2", "12V", dut, bench), uvlo=False)
+    assert all(p.status == "approval_blocked" and "uvlo_approved is false" in p.reason for p in build_plan(dut, bench, micro).points)
+    micro_ok = build_plan(dut, bench, _approve(_generated("4.6.1.2", "12V", dut, bench), uvlo=True))
+    assert [p.status for p in micro_ok.points] == ["executable"] * 6 and len({p.test_id for p in micro_ok.points}) == 6
+    line = build_plan(dut, bench, _approve(_generated("4.9.1", "12V", dut, bench), uvlo=True))
+    assert all(p.status == "executable" and "base of the best-effort line interruption" in p.reason for p in line.points)
+    # Editing the sheet after approval invalidates it (hash binding); so does an accepted hash of another recipe.
+    edited = approved.model_copy(deep=True)
+    edited.tests[0].best_effort.deviation_sheet.entries[0].note = "edited after approval"
+    assert recipe_deviations_sha256(edited) != approved.authorization.accepted_deviations_sha256
+    assert all(p.status == "approval_blocked" and "does not match the declared deviation sheet" in p.reason for p in build_plan(dut, bench, edited).points)
+    foreign = approved.model_copy(deep=True)
+    foreign.authorization.accepted_deviations_sha256 = recipe_deviations_sha256(_generated("4.9.2", "12V", dut, bench))
+    assert all(p.status == "approval_blocked" for p in build_plan(dut, bench, foreign).points)
+    assert len(recipe_deviations_sha256(approved)) == 64 and recipe_deviations_sha256(approved) != approved.tests[0].best_effort.deviation_sheet.sha256(), \
+        "two tests: the recipe hash combines both sheets"
+    single = _generated("4.9.2", "12V", dut, bench)
+    assert recipe_deviations_sha256(single) == single.tests[0].best_effort.deviation_sheet.sha256(), "one test: the sheet's own hash"
+    assert recipe_deviations_sha256(profiles[2]) is None
+    # A bench whose policy id or limits differ blocks the plan; a recipe mixing a best-effort type with another is unsupported.
+    other = bench.model_copy(deep=True)
+    other.protective_controls.policy_id = "another-policy"
+    assert all("does not name the recipe's protective policy" in p.reason for p in build_plan(dut, other, approved).points)
+    bare = bench.model_copy(deep=True)
+    bare.protective_controls.dut_input_overvoltage_V = None
+    assert all("dut_input_overvoltage_V must be declared" in p.reason for p in build_plan(dut, bare, approved).points)
+    mixed = approved.model_copy(deep=True)
+    mixed.tests = mixed.tests + [profiles[2].tests[0]]
+    assert all(p.status == "unsupported" and "mixes momentary_drop with other test types" in p.reason for p in build_plan(dut, bench, mixed).points)
+    # Real bench: refused at planning and by the real backend's preview, like the supply profiles.
+    real = bench.model_copy(deep=True)
+    real.mode = "real"
+    real_plan = build_plan(dut, real, approved)
+    assert all(p.status == "unsupported" and "'momentary_drop' is not yet approved for real hardware" in p.reason for p in real_plan.points)
+    from dcdc_bench.real_backend import prepare_real_plan
+    _, errors, _ = prepare_real_plan(real_plan)
+    assert any("not yet approved for real hardware" in error or "steady_state_load_sweep only" in error for error in errors)
+    from dcdc_bench.runner import run_mock
+    with pytest.raises(ValueError, match="steady_state_load_sweep tests only"):
+        run_mock(plan, PROFILES.parent / "never-created")
+
+
+def test_best_effort_levels_never_exceed_the_dut_maximum_and_36_v_needs_the_exact_level_flag(profiles):
+    from dcdc_bench.planning import best_effort_approval_gaps, best_effort_level_gaps
+    dut, bench, _ = profiles
+    bench = _best_effort_bench(bench)
+    bench.protective_controls.dut_input_overvoltage_V = 38.
+    default = _approve(_generated("4.3.1.1", "24V", dut, bench))
+    plan = build_plan(dut, bench, default)
+    assert [p.vin_target_V for p in plan.points] == [28., 35.8] and all(p.status == "executable" for p in plan.points)
+    assert not best_effort_level_gaps(dut, default)
+    exact = _approve(_generated("4.3.1.1", "24V", dut, bench, program_clause_level_exactly=True))
+    assert exact.tests[0].input_voltage_targets_V == [28., 36.] and exact.authorization.program_clause_level_exactly
+    assert all(p.status == "executable" for p in build_plan(dut, bench, exact).points), "36.0 V is allowed with the flag"
+    # The same levels without the flag: refused, request retained; the approval gaps say so as well.
+    unflagged = exact.model_copy(deep=True)
+    unflagged.authorization.program_clause_level_exactly = False
+    plan = build_plan(dut, bench, unflagged)
+    assert plan.points[1].status == "unsupported", "the 36 V point itself is refused, request retained"
+    assert "equals the converter's stated maximum" in plan.points[1].reason and "program_clause_level_exactly" in plan.points[1].reason
+    assert plan.points[0].status == "approval_blocked" and "without authorization.program_clause_level_exactly" in plan.points[0].reason, \
+        "the recipe as a whole is not approvable while it carries an unflagged 36 V level"
+    assert best_effort_level_gaps(dut, unflagged) == ["test iso16750-2-4-3-1-1-24v requests 36 V, the converter's stated maximum, without "
+                                                      "authorization.program_clause_level_exactly (owner decision 6)"]
+    above = exact.model_copy(deep=True)
+    above.tests[0].best_effort.level_V = 37.  # the policy first: the test's validator wants targets[1] == level_V
+    above.tests[0].input_voltage_targets_V = [28., 37.]
+    plan = build_plan(dut, bench, above)
+    assert plan.points[1].status == "unsupported" and "above the DUT maximum input rating" in plan.points[1].reason
+    assert any("above the DUT's stated 36 V maximum" in gap for gap in best_effort_level_gaps(dut, above))
+    # Below the DUT minimum anywhere but a declared drop level is refused, never clipped.
+    jump = _approve(_generated("4.3.1.2", "12V", dut, bench))
+    low_base = jump.model_copy(deep=True)
+    low_base.tests[0].input_voltage_targets_V = [8., 26.]
+    plan = build_plan(dut, bench, low_base)
+    assert plan.points[0].status == "unsupported" and "not the declared drop level" in plan.points[0].reason
+    assert plan.points[1].status == "approval_blocked" and "uvlo_approved is false" in plan.points[1].reason, \
+        "a level below the minimum anywhere in the test brings the UVLO gate with it"
+    assert not best_effort_approval_gaps(bench, jump)
+    assert all(p.status == "executable" and ("base of" in p.reason or "hold level of the best-effort transient hold" in p.reason)
+               for p in build_plan(dut, bench, jump).points)
+
+
+def test_instrument_timed_bound_replaces_the_source_timer_only_when_declared_and_approved(profiles):
+    from dcdc_bench import standards as S
+    from dcdc_bench.planning import REAL_SOFTWARE_DEADLINE_S, REAL_SOURCE_TIMER_S, best_effort_approval_gaps, phase_duration_bound_s
+    assert (REAL_SOFTWARE_DEADLINE_S, REAL_SOURCE_TIMER_S) == (S.REAL_SOFTWARE_DEADLINE_S, S.REAL_SOURCE_TIMER_S) == (660., 720.)
+    dut, bench, _ = profiles
+    bench = _best_effort_bench(bench)
+    hold = _generated("4.3.1.1", "12V", dut, bench)
+    assert hold.authorization.instrument_timed_bound_s == 3700. and hold.tests[0].best_effort.longest_phase_s("transient_hold") == 3600.
+    assert phase_duration_bound_s(bench, hold) == 720., "declared but not approved: the policy constant stays in force"
+    unapproved = build_plan(dut, bench, hold)
+    assert all(p.status == "approval_blocked" for p in unapproved.points), "the bound is declared, the approval is missing"
+    approved = _approve(hold)
+    assert phase_duration_bound_s(bench, approved) == 3700. and not best_effort_approval_gaps(bench, approved)
+    plan = build_plan(dut, bench, approved)
+    assert [p.status for p in plan.points] == ["executable"] * 2
+    # Without the declaration a 3600 s hold is refused against the 720 s timer, with the owner's decision named.
+    undeclared = approved.model_copy(deep=True)
+    undeclared.authorization.instrument_timed_bound_s = None
+    plan = build_plan(dut, bench, undeclared)
+    assert all(p.status == "unsupported" and "exceeds the 720 s per-phase source timer" in p.reason
+               and "declares no authorization.instrument_timed_bound_s" in p.reason for p in plan.points)
+    assert any("declares no authorization.instrument_timed_bound_s" in gap for gap in best_effort_approval_gaps(bench, undeclared))
+    # A declared bound shorter than the hold is refused against the declared bound.
+    short = approved.model_copy(deep=True)
+    short.authorization.instrument_timed_bound_s = 1800.
+    plan = build_plan(dut, bench, short)
+    assert all(p.status == "unsupported" and "exceeds the recipe's own instrument_timed_bound_s of 1800 s" in p.reason for p in plan.points)
+    # A short recipe needs no bound at all.
+    jump = _approve(_generated("4.3.1.2", "12V", dut, bench))
+    assert jump.authorization.instrument_timed_bound_s is None and phase_duration_bound_s(bench, jump) == 720.
+    assert all(p.status == "executable" for p in build_plan(dut, bench, jump).points)
+
+
+def test_prepare_mock_plan_budgets_best_effort_recipes_conservatively(profiles):
+    from dcdc_bench.planning import MOCK_RUN_BUDGET_S, best_effort_mock_estimate, prepare_mock_plan
+    dut, bench, _ = profiles
+    bench = _best_effort_bench(bench)
+    for number, system in (("4.3.1.1", "12V"), ("4.3.1.2", "12V"), ("4.3.2", "12V"), ("4.6.1.1", "12V"), ("4.6.1.2", "24V"),
+                           ("4.9.1", "12V"), ("4.9.2", "24V")):
+        plan = build_plan(dut, bench, _approve(_generated(number, system, dut, bench), uvlo=True))
+        estimate = best_effort_mock_estimate(plan)
+        _, errors, seconds = prepare_mock_plan(plan)
+        assert not errors and 0 < seconds == estimate["typical_s"] and estimate["deadline_s"] < MOCK_RUN_BUDGET_S, (number, system)
+    hold = build_plan(dut, bench, _approve(_generated("4.3.1.1", "12V", dut, bench)))
+    estimate = best_effort_mock_estimate(hold)
+    assert estimate["records"] >= 4 * 3600 / 2, "every second of the hold is polled at the recipe's 2 s cadence"
+    assert estimate["declared_repeats"] == 1 and estimate["observation_levels"] == 2
+    fast = hold.recipe.model_copy(deep=True)
+    fast.acquisition.target_poll_interval_s = .1
+    plan = build_plan(dut, bench, fast)
+    _, errors, _ = prepare_mock_plan(plan)
+    assert errors and "simulated best-effort run would write about" in errors[0] and "increase the poll interval" in errors[0]
+    transient = build_plan(dut, bench, _approve(_generated("4.3.2", "12V", dut, bench)))
+    assert best_effort_mock_estimate(transient)["declared_repeats"] == 10, "five pulses in each of the two variants"

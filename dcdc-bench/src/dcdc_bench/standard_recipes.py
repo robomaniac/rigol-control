@@ -301,11 +301,11 @@ def _output_thresholds(dut: DutProfile, floor_V: float, *, startup_interval_s: f
             "output_off_maximum_V": off_maximum, "expected_off_below_V": minimum, "expected_on_above_V": minimum}
 
 
-def _best_effort_notes(number: str, sheets: list[DeviationSheet], params: dict[str, Any], *, below_minimum: bool,
+def _best_effort_notes(number: str, sheets: list[DeviationSheet], params: dict[str, Any], *, top_level_V: float, below_minimum: bool,
                        bound_s: float | None, exact: bool) -> str:
     """The shared tail of a best-effort recipe description: statements, OVP suggestion, mock-only refusal, approvals."""
     statements = " ".join(sheet.statement for sheet in sheets)
-    text = (f"{statements} Suggested source OVP {params['ovp_suggestion_V']:g} V (acts between -0.5 % - 0.5 V and +0.5 % + 0.5 V of "
+    text = (f"{statements} Suggested source OVP {S.ovp_suggestion_V(top_level_V):g} V (acts between -0.5 % - 0.5 V and +0.5 % + 0.5 V of "
             f"that setting, DS5); the bench's protective policy must set dut_input_overvoltage_V above the top level and never "
             f"treats the source OVP as protection of the converter output (brief 7.4). Observed output states come from about 1 s "
             f"polling; states shorter than the poll interval are not visible to this bench. Synthetic plant only: a real bench "
@@ -506,5 +506,6 @@ def _best_effort_recipe(number: str, system: str, dut: DutProfile, params: dict[
                     f"{params['recovery_window_s']:g} s; {params['method']}; not covered: {params['not_covered']}")
     data["description"] = (f"{clause.citation} as a best-effort procedure on the synthetic plant (owner decisions of 2026-10-01): {stimulus} "
                            f"at a fixed {PROFILE_LOAD_A:g} A load (rated-load mode 3.4 is not reachable from the 1 A source). "
-                           + _best_effort_notes(number, sheets, params, below_minimum=below_minimum, bound_s=bound_s, exact=exact))
+                           + _best_effort_notes(number, sheets, params, top_level_V=max(max(t["input_voltage_targets_V"]) for t in tests),
+                                                below_minimum=below_minimum, bound_s=bound_s, exact=exact))
     return TestRecipe.model_validate(data).model_dump()

@@ -122,7 +122,7 @@ def best_effort_approval_gaps(bench: BenchProfile, recipe: TestRecipe) -> list[s
     Real execution additionally needs ``missing_approvals`` to be empty.
     """
     gaps = []
-    authorization, controls, ratings_max = recipe.authorization, bench.protective_controls, None
+    authorization, controls = recipe.authorization, bench.protective_controls
     tests = [test for test in recipe.tests if test.type in BEST_EFFORT_TEST_TYPES and test.best_effort is not None]
     if not authorization.best_effort_approved:
         gaps.append("recipe authorization.best_effort_approved is false")

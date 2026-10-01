@@ -235,7 +235,7 @@ ENDPOINT_REASON = "equals the DUT ceiling; endpoint method not approved"
 # Owner decision 6 (2026-10-01): for the overvoltage holds the endpoint is the owner's call per recipe.
 EXACT_LEVEL_RECIPE_KINDS: frozenset[str] = frozenset({"overvoltage_hold", "transient_overvoltage"})
 EXACT_LEVEL_NOTE = ("equals the converter's stated maximum; programmed exactly only with program_clause_level_exactly, "
-                    f"otherwise {{margin:g}} V (approximated)")
+                    "otherwise {margin:g} V (approximated)")  # .format(margin=...) with the programmed margin level
 POLICY_CITATION = "implementation brief §2 and §7.5"
 
 # --- Tagged bounds of the deviation sheets (docs/standards/best-effort-proposal.md, basis tags) -----------------

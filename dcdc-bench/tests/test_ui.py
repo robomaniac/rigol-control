@@ -1216,8 +1216,10 @@ def test_iso_card_expands_into_a_clause_checklist_with_one_badge_per_status(tmp_
                         assert any(text.endswith('.') and len(text) > 40 for text in texts(clause_row(client, number))), 'the reason sentence is shown'
                     if row.get('needs_approval') and row.get('approval'):
                         assert any(row['approval'] in text for text in texts(clause_row(client, number))), 'where approval is recorded is said on the row'
-                assert badge_of(client, '4.3.1.1').text == 'procedure not yet implemented' and not clause_box(client, '4.3.1.1').enabled
-                assert rows['4.3.1.1']['text'] in texts(clause_row(client, '4.3.1.1'))
+                # Owner decision 1 (2026-10-01): the long hold declares its own instrument-timed bound and runs after approval.
+                assert badge_of(client, '4.3.1.1').text == 'runs here after approval' and clause_box(client, '4.3.1.1').enabled
+                assert clause_box(client, '4.3.1.1').value is False and any(rows['4.3.1.1']['text'] in text for text in texts(clause_row(client, '4.3.1.1')))
+                assert badge_of(client, '4.6.1.1').text == 'best effort (deviations recorded)' and clause_box(client, '4.6.1.1').value is False
                 assert badge_of(client, '4.6.4').text == 'excluded by policy' and rows['4.6.4']['text'] in texts(clause_row(client, '4.6.4'))
                 assert any('code C: UA 14 V, Usmin 9 V, Usmax 16 V' in text for text in texts(clause_row(client, '4.2')))
                 assert rows['4.5']['levels'] in texts(clause_row(client, '4.5'))
@@ -1247,8 +1249,10 @@ def test_system_toggle_switches_to_24_v_levels_and_is_remembered_on_the_converte
                 rows = {row['number']: row for row in iso_rows(service, '24V')}
                 assert any('code E: UA 28 V, Usmin 10 V, Usmax 32 V' in text for text in texts(clause_row(client, '4.2')))
                 assert rows['4.5']['levels'].startswith('28 V → 1 V → 28 V') and rows['4.5']['levels'] in texts(clause_row(client, '4.5'))
-                assert badge_of(client, '4.3.1.1').text == rows['4.3.1.1']['badge_label'] == 'outside DUT rating' and not clause_box(client, '4.3.1.1').enabled
-                assert any('36 V level' in text and 'equals the DUT ceiling' in text for text in texts(clause_row(client, '4.3.1.1')))
+                # Owner decision 6 (2026-10-01): 36 V equals the converter's maximum and is the owner's call per recipe, not a refusal.
+                assert badge_of(client, '4.3.1.1').text == rows['4.3.1.1']['badge_label'] == 'runs here after approval' and clause_box(client, '4.3.1.1').enabled
+                assert any("36 V level equals the converter's stated maximum" in text and 'program_clause_level_exactly' in text
+                           for text in texts(clause_row(client, '4.3.1.1')))
                 assert badge_of(client, '4.3.1.2').text == 'not applicable'
                 assert all(clause_box(client, n).value is default_ticked(rows[n]) for n in ('4.2', '4.5', '4.6.2'))
                 now = sum(1 for row in rows.values() if row['badge'] == 'runs_here')
@@ -1347,11 +1351,13 @@ def test_an_approval_first_clause_is_amber_unticked_and_names_where_approval_hap
                 assert any(how in text for text in texts(clause_row(client, '4.5'))), 'where approval is recorded is said on the row'
                 assert clause_box(client, '4.2').value is True and 'bench-badge-ok' in badge_of(client, '4.2').classes
                 footer = find(client, css='bench-checklist-footer').text
-                # The footer counts follow the catalog: 4.2 runs now, 4.5 and 4.6.2 need approval, whatever the
-                # catalog version says about the exact split.
+                # The footer counts follow the catalog: 4.2 runs now, every other tickable clause needs approval first,
+                # whatever the catalog version says about the exact split.
                 assert ' available now · 19 clauses reviewed · ' in footer and footer.endswith(' after approval'), footer
                 runnable_now = int(footer.split(' test ')[0]); after = int(footer.rsplit('· ', 1)[1].split(' after')[0])
-                assert runnable_now + after == 3 and after >= 1, footer
+                tickable = sum(1 for row in real_rows(page.service.load_profile('bench', 'mock-dp821-envelope'),
+                                                      page.service.load_profile('dut', '12t12-4a'), '12V') if row['tickable'])
+                assert runnable_now + after == tickable and after >= 1 and runnable_now == 1, footer
             assert page.errors == []
         finally:
             client.delete()
