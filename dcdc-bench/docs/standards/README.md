@@ -55,6 +55,7 @@ Rules that apply to everything in this folder:
 | --- | --- |
 | [iso16750-2.md](iso16750-2.md) | ISO 16750-2:2023 section 4, clause by clause: 12 V and 24 V parameters, functional status class, capability needed, bench verdict for the 12T12-4A, the capability-token mapping and the recipe numbers for the clauses that run here. |
 | [instrument-sequencing-dp800.md](instrument-sequencing-dp800.md) | What the DP821A's own Timer, Delayer, Monitor, Trigger I/O and Recorder can and cannot do for ISO 16750-2 section 4 (whole-second timing, measured rise/fall bounds, Timer/Delayer exclusivity), with a clause-by-clause instrument-timed verdict, a fail-closed `SupplyProgram` design and the bench checks it needs; sourced to the DP800 datasheet, user guide and programming guide by page. |
+| [load-programs-dl3000.md](load-programs-dl3000.md) | What the DL3031A's own transient (continuous/pulse/toggle), list, OCP/OPP and battery modes can and cannot do on this bench: a bus-fired CC pulse is a defined stimulus with an unmeasured response until a scope or DAQ is added; the OCP application cannot replace the software source-limit search because the 1 A supply limit is reached first; the fail-closed arming design and the read-only bench checks; sourced to the DL3000 user guide, datasheet and programming guide by page. |
 
 ## Categories on the bench page
 
