@@ -16,13 +16,15 @@ from pathlib import Path
 from .standard_recipes import (OTHER_LABORATORIES_NOTE, STANDARDS_GROUP, build_recipe, clause_rows, default_system,
                                standard_cards)
 from .ui_models import (BENCH_NAMES, DEFAULT_CATEGORY, DELETE_PROMPTS, PLAN_STATUS_LEGEND, REAL_CAN, REAL_CANNOT,
-                        SIMULATION_CAN, SIMULATION_CANNOT, SIMULATION_SEQUENCE, SIMULATION_TIME_ESTIMATE, START_LABELS, simulation_time_text,
+                        REPORTS_PAGE, SIMULATION_CAN, SIMULATION_CANNOT, SIMULATION_SEQUENCE, SIMULATION_TIME_ESTIMATE,
+                        START_LABELS, simulation_time_text,
                         SYNTHETIC_UNCERTAINTY_NOTE, WORKING_STATES, activity_text, artifact_url, bench_equipment, bench_job,
                         bench_title, card_meta, deferred_text, dequeued, dut_approved, dut_subtitle, duration_text,
-                        edited_dut, edited_recipe, elapsed_text, envelope_rows, event_text, friendly_error, grouped_recipes,
-                        job_actions, limits_rows, limits_summary, local_time_text, plan_rows, quantity, recipe_grid,
-                        recipe_title, report_became_ready, report_link_rows, report_rows, saved_runs_key, sequence_step,
-                        shutdown_label, skip_reasons, state_label, summary_text, time_legend, time_lines)
+                        edited_dut, edited_recipe, elapsed_text, envelope_rows, event_text, filter_report_rows, friendly_error,
+                        grouped_recipes, job_actions, limits_rows, limits_summary, local_time_text, plan_rows, quantity,
+                        recipe_grid, recipe_title, report_became_ready, report_link_rows, report_rows, reports_count_text,
+                        saved_runs_key, sequence_step, shutdown_label, skip_reasons, state_label, summary_text, time_legend,
+                        time_lines)
 
 
 STYLE = '''
@@ -148,6 +150,9 @@ body{background:#fff;color:#183047;font-family:system-ui,-apple-system,"Segoe UI
 .bench-locked{pointer-events:none;opacity:.55}
 .bench-dialog{min-width:min(92vw,420px)}
 .bench-shell .q-field{width:100%}.bench-shell .q-checkbox__label{overflow-wrap:anywhere}
+/* Reports: the text filter above the list and the "Newest 30 of N" line with "Show older runs" under it. */
+.bench-report-tools{margin:2px 0 10px}.bench-shell .bench-report-filter.q-field{width:min(100%,380px)}
+.bench-report-paging{padding:8px 8px 0}
 .bench-shell .q-table td{white-space:normal;overflow-wrap:anywhere}
 .bench-shell .q-table td.nowrap,.bench-shell .q-table th.nowrap{white-space:nowrap}
 /* Shared with the /annotations editor page (annotation_editor.py builds its own layout on this sheet). */
@@ -450,6 +455,9 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                  # Reports auto-refresh and the "Report ready" notice from the same poll.
                  'seen': {},
                  'events_open': {},
+                 # Reports: the number of (matching) saved runs listed, 30 more per "Show older runs", and the
+                 # text filter; both survive the list's own refreshes and reset only when the filter changes.
+                 'reports_shown': REPORTS_PAGE, 'reports_filter': '',
                  # Real-start confirmation widgets; emptied whenever the panel is cleared so a
                  # later invalidation never touches deleted inputs.
                  'confirm': {}, 'stop_armed': False, 'stop_key': None, 'editor': None,
@@ -1778,13 +1786,33 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
             state['active'] = bool(active)
             state['active_job_id'] = active['job_id'] if active else None
 
+        def filter_reports(e):
+            """Typing in "Filter runs": every word must appear in a row's run, bench, status or start time. A new
+            filter lists the newest page of matches; "Show older runs" extends it. The field itself is built once
+            with the layout, so keystrokes never rebuild it."""
+            query = str(e.value or '').strip()
+            if query == state['reports_filter']:
+                return
+            state['reports_filter'] = query
+            state['reports_shown'] = REPORTS_PAGE
+            render_reports(state['jobs'])
+
+        def show_older_reports():
+            state['reports_shown'] += REPORTS_PAGE
+            render_reports(state['jobs'])
+
         def render_reports(jobs):
             panels['reports'].clear()
             with panels['reports']:
                 if not jobs:
                     ui.label('Your completed and interrupted runs will appear here.').classes('bench-muted')
                     return
-                rows = report_rows(jobs[:30], recipes=state['catalog']['recipe'])
+                query = state['reports_filter']
+                matching = filter_report_rows(report_rows(jobs, recipes=state['catalog']['recipe']), query)
+                rows = matching[:state['reports_shown']]
+                if not rows:
+                    ui.label(reports_count_text(0, 0, len(jobs), query)).classes('bench-muted bench-report-paging')
+                    return
                 # One grid: the header and every row are subgrids sharing its five columns, so the headings sit over
                 # their cells whatever the longest time, badge or action list in the rows below.
                 with ui.element('div').classes('bench-report-grid'):
@@ -1819,8 +1847,13 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                                 if row['dequeue']:
                                     ui.button('Remove from report queue', on_click=lambda _=None, job_id=row['job_id']: dequeue_report(job_id),
                                               icon='playlist_remove').props('flat dense no-caps size=sm')
-                if len(jobs) > 30:
-                    ui.label(f'Newest 30 of {len(jobs)} saved runs shown.').classes('bench-muted')
+                count = reports_count_text(len(rows), len(matching), len(jobs), query)
+                if count:
+                    with ui.row().classes('bench-report-paging items-center gap-3'):
+                        ui.label(count).classes('bench-muted')
+                        if len(matching) > len(rows):
+                            ui.button('Show older runs', on_click=show_older_reports, icon='history').props(
+                                'flat dense no-caps size=sm aria-label="Show older runs"')
 
         async def refresh_reports():
             jobs = await run.io_bound(service.list_jobs)
@@ -1976,6 +2009,10 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                     with ui.row().classes('items-center gap-2').style('margin-left:auto'):
                         ui.label('Times are local').classes('bench-lbl')
                         ui.button('Refresh saved runs', on_click=refresh_reports, icon='refresh').props('flat dense no-caps size=sm aria-label="Refresh saved runs"')
+                with ui.row().classes('bench-report-tools w-full items-center gap-3'):
+                    widgets['report_filter'] = ui.input('Filter runs', placeholder='Converter, test, bench or status',
+                                                        on_change=filter_reports).props(
+                        'outlined dense clearable aria-label="Filter runs"').classes('bench-report-filter')
                 panels['reports'] = ui.column().classes('bench-reports gap-0')
             ui.label('Local bench control · Data stays in your workspace · Closing this tab does not restart or cancel acquisition.').classes('bench-muted mt-6')
             ui.label(time_legend()).classes('bench-muted')

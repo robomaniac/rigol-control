@@ -14,15 +14,16 @@ from dcdc_bench.cli import main
 from dcdc_bench.job_service import JobService
 from dcdc_bench.standard_recipes import clause_rows
 from dcdc_bench.ui import GLOSSARY_PATH, RequestBodyLimit, file_headers, published_file, require_loopback, run_ui, unique_name
-from dcdc_bench.ui_models import (PLAN_STATUS_LEGEND, REAL_CAN, REAL_CANNOT, SIMULATION_CAN, SIMULATION_CANNOT,
+from dcdc_bench.ui_models import (PLAN_STATUS_LEGEND, REAL_CAN, REAL_CANNOT, REPORTS_PAGE, SIMULATION_CAN, SIMULATION_CANNOT,
                                   SIMULATION_SEQUENCE, SIMULATION_TIME_ESTIMATE, SYNTHETIC_UNCERTAINTY_NOTE, activity_text,
                                   artifact_url, bench_equipment, bench_job, bench_title, card_meta, deferred_text, dequeued,
                                   dut_approved, dut_subtitle, duration_text, edited_dut, edited_recipe, elapsed_text,
-                                  envelope_rows, event_text, friendly_error, grouped_recipes, job_actions, job_title,
-                                  limits_rows, limits_summary, local_time_text, number, plan_rows, point_count, quantity,
-                                  recipe_category, recipe_grid, recipe_title, report_became_ready, report_link_rows,
-                                  report_rows, run_option_text, saved_runs_key, sequence_step, shutdown_label, skip_reasons,
-                                  state_label, summary_text, target_values, time_legend, time_lines)
+                                  envelope_rows, event_text, filter_report_rows, friendly_error, grouped_recipes, job_actions,
+                                  job_title, limits_rows, limits_summary, local_time_text, number, plan_rows, point_count,
+                                  quantity, recipe_category, recipe_grid, recipe_title, report_became_ready, report_link_rows,
+                                  report_rows, reports_count_text, run_option_text, saved_runs_key, sequence_step,
+                                  shutdown_label, skip_reasons, state_label, summary_text, target_values, time_legend,
+                                  time_lines)
 
 LOS_ANGELES = ZoneInfo('America/Los_Angeles')
 DOCS = Path(__file__).resolve().parents[1] / 'docs'
@@ -2010,6 +2011,27 @@ def test_time_lines_split_the_local_time_for_a_narrow_column():
     assert time_lines(local_time_text('2026-09-29T20:37:14+00:00', zone=LOS_ANGELES)) == ('13:37:14 PDT', '2026-09-29')
 
 
+def test_report_filter_matches_every_word_and_the_count_line_says_what_is_listed():
+    """Codex review item 1: the Reports filter and the line under the list, as pure text rules."""
+    when = local_time_text('2026-09-29T20:40:12+00:00')
+    rows = [{'job_id': 'job-3', 'run': '12T12-4A · Quick sweep', 'bench': 'Simulation · synthetic data', 'status': 'Complete', 'when': when},
+            {'job_id': 'job-2', 'run': 'Other-5V', 'bench': 'Real bench · measured', 'status': 'Needs attention', 'when': when},
+            {'job_id': 'job-1', 'run': '12T12-4A · 24 V small grid', 'bench': 'Real bench · measured', 'status': 'Complete', 'when': when}]
+    ids = lambda query: [row['job_id'] for row in filter_report_rows(rows, query)]
+    assert filter_report_rows(rows, '') == rows and filter_report_rows(rows, '   ') == rows and filter_report_rows(rows, None) == rows
+    assert ids('REAL') == ['job-2', 'job-1'], 'case-insensitive, matches the bench label'
+    assert ids('real complete') == ['job-1'], 'every word must match the same row'
+    assert ids('12t12 quick') == ['job-3'] and ids('attention') == ['job-2'] and ids('job-1') == ['job-1']
+    assert ids(when.split(' ')[0]) == ['job-3', 'job-2', 'job-1'], 'the local start time is searchable'
+    assert ids('thermal') == []
+    assert REPORTS_PAGE == 30
+    assert reports_count_text(30, 30, 30) == '' and reports_count_text(5, 5, 5) == ''
+    assert reports_count_text(30, 45, 45) == 'Newest 30 of 45 saved runs shown.'
+    assert reports_count_text(3, 3, 45, 'real') == '3 of 45 saved runs match "real".'
+    assert reports_count_text(30, 33, 45, 'real') == 'Newest 30 of 33 saved runs matching "real" shown (45 saved).'
+    assert reports_count_text(0, 0, 45, 'zzz') == 'No saved run matches "zzz". Clear the filter to see all 45 saved runs.'
+
+
 def test_exactly_one_test_is_selected_and_the_iso_card_is_an_editor_not_a_second_selection(tmp_path, monkeypatch):
     """Owner: 'Is it normal I can select Normal operating voltage and Automotive supply standards at the same time?!'
     What they saw: a selected test card in one group while the open ISO 16750-2 card in the standards group was drawn
@@ -2130,6 +2152,80 @@ def test_reports_list_is_one_grid_whose_header_and_rows_share_the_columns(tmp_pa
                 assert '.bench-report-row{display:grid;grid-template-columns:subgrid;grid-column:1 / -1' in STYLE
                 assert '.bench-shell{max-width:1280px' in STYLE and '.bench-header-inner{max-width:1280px' in STYLE and '.bench-bar-inner{max-width:1280px' in STYLE
                 assert '.bench-report-grid,.bench-report-row{grid-template-columns:minmax(0,1fr)}' in STYLE.split('@media(max-width:650px)')[1]
+            assert page.errors == []
+        finally:
+            client.delete()
+    asyncio.run(scenario())
+
+
+def test_reports_page_through_older_runs_and_filter_by_converter_bench_or_status(tmp_path, monkeypatch):
+    """Codex review item 1: Reports stopped at the newest 30 runs with no way to reach older ones or to find one.
+    "Show older runs" adds 30 at a time; "Filter runs" narrows the list by converter, test, bench or status words.
+    The filter field is built once with the layout, so typing never rebuilds it; the list's own refreshes keep both."""
+    snapshots = {}
+    for index in range(1, 41):
+        extra = dict(REPORT_DONE)
+        if index <= 5:
+            extra['dut_model'] = 'Other-5V'
+        if 6 <= index <= 8:
+            extra['mode'] = 'real'
+        if index == 9:
+            extra = {'state': 'failed', 'run_dir': '/w/jobs/job-09/runs/r', 'error': 'worker exited'}
+        snapshots[f'job-{index:02d}'] = snapshot(f'job-{index:02d}', **extra)
+
+    def grid_rows(reports):
+        grids = [child for child in descendants(reports) if 'bench-report-grid' in child.classes]
+        if not grids:
+            return []
+        return [child for child in grids[0].default_slot.children
+                if 'bench-report-row' in child.classes and 'bench-report-head' not in child.classes]
+
+    def older_button(reports):
+        return [child for child in descendants(reports) if child._props.get('label') == 'Show older runs']
+
+    async def scenario():
+        page = await open_bench_page(monkeypatch, tmp_path, snapshots)
+        client = page.client
+        try:
+            with client:
+                reports = find(client, css='bench-reports')
+                assert len(grid_rows(reports)) == 30 and 'Newest 30 of 40 saved runs shown.' in texts(reports)
+                assert grid_rows(reports)[0].default_slot.children[1].text == '12T12-4A', 'newest first'
+                await click(older_button(reports)[0])
+                assert len(grid_rows(reports)) == 40 and older_button(reports) == []
+                assert not any(text.startswith('Newest') for text in texts(reports)), 'nothing left to page through'
+                assert grid_rows(reports)[-1].default_slot.children[1].text == 'Other-5V'
+                filter_field = field(client, 'Filter runs')
+                filter_field.set_value('other')
+                await settle()
+                rows = grid_rows(reports)
+                assert len(rows) == 5 and all(row.default_slot.children[1].text == 'Other-5V' for row in rows)
+                assert '5 of 40 saved runs match "other".' in texts(reports) and older_button(reports) == []
+                filter_field.set_value('Real complete')
+                await settle()
+                rows = grid_rows(reports)
+                assert len(rows) == 3 and all(row.default_slot.children[2].text == 'Real bench · measured' for row in rows)
+                filter_field.set_value('attention')
+                await settle()
+                rows = grid_rows(reports)
+                assert len(rows) == 1 and 'Needs attention' in [child.text for child in rows[0].default_slot.children[3].default_slot.children]
+                filter_field.set_value('nothing like this')
+                await settle()
+                assert grid_rows(reports) == []
+                assert 'No saved run matches "nothing like this". Clear the filter to see all 40 saved runs.' in texts(reports)
+                filter_field.set_value(None)  # Quasar's clear button
+                await settle()
+                assert len(grid_rows(reports)) == 30 and len(older_button(reports)) == 1, 'a changed filter starts from the newest page'
+                assert field(client, 'Filter runs') is filter_field, 'the field is never rebuilt while typing'
+                # The list's own refresh (poll transitions, Refresh saved runs) keeps the filter and the paging.
+                filter_field.set_value('12t12')
+                await settle()
+                assert len(grid_rows(reports)) == 30 and 'Newest 30 of 35 saved runs matching "12t12" shown (40 saved).' in texts(reports)
+                await click(older_button(reports)[0])
+                assert len(grid_rows(reports)) == 35 and '35 of 40 saved runs match "12t12".' in texts(reports)
+                await click(button(client, 'Refresh saved runs'))
+                assert len(grid_rows(reports)) == 35 and '35 of 40 saved runs match "12t12".' in texts(reports)
+                assert field(client, 'Filter runs') is filter_field and filter_field.value == '12t12'
             assert page.errors == []
         finally:
             client.delete()

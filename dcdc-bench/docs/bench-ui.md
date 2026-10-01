@@ -262,7 +262,9 @@ bench: a new test may be started while reports are queued, and while an older
 report renders the header and the lock follow that render. **Remove from
 report queue** leaves the measurements saved; the job then reads *Removed from
 the report queue*, never *needs attention*. **Reports** lists the newest 30
-saved runs (it says so when there are more) in bench-local time with the run
+saved runs (it says so when there are more; **Show older runs** adds the next
+30, and **Filter runs** narrows the list to runs whose converter, test, bench or
+status contain the typed words) in bench-local time with the run
 (converter · test), bench (**Simulation · synthetic data** or **Real bench ·
 measured**), status and **Open HTML**, **Open PDF**, **View run** and
 **Regenerate report**, which makes a new report revision from the preserved

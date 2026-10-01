@@ -693,6 +693,36 @@ def report_rows(jobs: list[dict], *, zone: tzinfo | None = None, recipes: dict[s
     return rows
 
 
+REPORTS_PAGE = 30  # saved runs listed at once; "Show older runs" adds the next page
+
+
+def filter_report_rows(rows: list[dict], query: str) -> list[dict]:
+    """The Reports rows whose run (converter · test), bench, status, start time or job id contain every word of
+    ``query``, case-insensitively; an empty query keeps every row. Order is preserved (newest first)."""
+    words = [word.casefold() for word in str(query or '').split()]
+    if not words:
+        return list(rows)
+    kept = []
+    for row in rows:
+        haystack = ' '.join(str(row.get(key) or '') for key in ('run', 'bench', 'status', 'when', 'job_id')).casefold()
+        if all(word in haystack for word in words):
+            kept.append(row)
+    return kept
+
+
+def reports_count_text(shown: int, matching: int, total: int, query: str = '') -> str:
+    """The line under the Reports list: how many saved runs are listed, out of how many match, out of how many exist.
+    Empty when every saved run is listed and no filter is set."""
+    query = str(query or '').strip()
+    if not query:
+        return f'Newest {shown} of {total} saved runs shown.' if matching > shown else ''
+    if matching == 0:
+        return f'No saved run matches "{query}". Clear the filter to see all {total} saved runs.'
+    if matching > shown:
+        return f'Newest {shown} of {matching} saved runs matching "{query}" shown ({total} saved).'
+    return f'{matching} of {total} saved runs match "{query}".'
+
+
 def run_option_text(job: dict, *, zone: tzinfo | None = None) -> str:
     """'<converter> · <local start> · Simulation · synthetic data · Complete' for a run chooser such as /annotations."""
     return ' · '.join((job_title(job, zone=zone), REPORT_BENCH_LABELS['real' if job.get('mode') == 'real' else 'mock'],
