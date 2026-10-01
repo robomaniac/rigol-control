@@ -10,10 +10,11 @@ open an instrument, or rewrite finalized evidence.
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 from .annotations import (AnnotationError, annotation_document, load_annotations, marker_overlay_svg,
-                          nearest_marker, new_sensor_id, normalized_point, nudge_marker)
+                          nearest_marker, new_sensor_id, normalized_point, nudge_marker, validate_marker)
 from .attachments import (BYTE_LIMITS, IMAGE_TYPES, MEDIA_TYPES, AssetHashMismatch, AssetNotFound, AssetStore,
                           AttachmentRejected)
 from .ui_models import artifact_url, run_option_text
@@ -26,12 +27,41 @@ EDITOR_STYLE = '''
 .bench-editor-image img{max-width:100%;height:auto;display:block}
 .bench-marker-row{display:grid;grid-template-columns:2.2rem minmax(0,1fr) minmax(0,2fr) 9rem auto auto;gap:8px;align-items:center;width:100%}
 .bench-marker-row .q-field{min-width:0}
-@media(max-width:760px){.bench-marker-row{grid-template-columns:2rem minmax(0,1fr) minmax(0,1fr)}}
+/* The keyboard path to a marker: two coordinate fields and "Add marker", built once above the marker list. */
+.bench-marker-add{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto;gap:8px;align-items:center;width:100%;max-width:560px}
+.bench-marker-add .q-field{min-width:0}.bench-marker-add-note{grid-column:1 / -1}
+@media(max-width:760px){.bench-marker-row{grid-template-columns:2rem minmax(0,1fr) minmax(0,1fr)}
+.bench-marker-add{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}}
 '''
 HELP = ('Click the photograph where a sensor is attached to add a marker; drag a marker to move it. '
         'Keyboard: Tab to a marker\'s Select button and press Enter, then use the arrow keys to nudge it '
-        '(Shift for larger steps) and Delete to remove it. Positions are stored as normalized image '
+        '(Shift for larger steps) and Delete to remove it. Without a pointer, type the x and y position '
+        '(0 to 1 from the top-left corner) and press Add marker; the new marker is selected for nudging. '
+        'Positions are stored as normalized image '
         'coordinates bound to this exact photograph\'s hash, so any later resize keeps them on the same spot.')
+ADD_MARKER_NOTE = ('Without a pointer: type where the sensor sits as fractions of the photograph (x from the left edge, '
+                   'y from the top edge, 0 to 1) and press Add marker.')
+
+
+def typed_marker(markers: list[dict], x, y) -> dict:
+    """A new marker at typed normalized coordinates (0–1 from the top-left corner), validated like a saved one.
+
+    The keyboard path to a first marker: no pointer is needed. The sensor id is the next free ``S<n>``;
+    the label starts empty. Raises AnnotationError in operator words for a blank, non-numeric,
+    non-finite or out-of-image coordinate.
+    """
+    coordinates = {}
+    for name, value in (('x', x), ('y', y)):
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            raise AnnotationError(f'Type the {name} coordinate as a number from 0 to 1 '
+                                  '(0 is the left or top edge of the photograph, 1 the right or bottom edge).') from None
+        if not math.isfinite(number) or not 0 <= number <= 1:
+            raise AnnotationError(f'The {name} coordinate must be from 0 to 1; {value} lies outside the photograph.')
+        coordinates[name] = round(number, 6)
+    return validate_marker({'sensor_id': new_sensor_id(markers), 'x_norm': coordinates['x'], 'y_norm': coordinates['y'],
+                            'label': ''})
 
 
 def eligible_jobs(jobs: list[dict]) -> list[dict]:
@@ -126,7 +156,9 @@ def register_annotation_editor(ui, run, service, style: str) -> None:
             return
         loading.delete()
         state = {'job_id': None, 'run_dir': None, 'assets': [], 'asset': None, 'markers': [],
-                 'selected': None, 'dragging': False, 'busy': False}
+                 'selected': None, 'dragging': False, 'busy': False,
+                 # The typed coordinates of the "Add marker" row; they stay as typed between additions.
+                 'add_x': .5, 'add_y': .5}
         widgets: dict = {}
         coordinate_labels: list = []
 
@@ -164,7 +196,8 @@ def register_annotation_editor(ui, run, service, style: str) -> None:
                     ui.label('Choose a photograph to start placing markers.').classes('bench-muted')
                     return
                 if not state['markers']:
-                    ui.label('No markers yet. Click the photograph where a sensor is attached.').classes('bench-muted')
+                    ui.label('No markers yet. Click the photograph where a sensor is attached, or type x and y above '
+                             'and press Add marker.').classes('bench-muted')
                     return
                 for index, marker in enumerate(state['markers']):
                     with ui.element('div').classes('bench-marker-row'):
@@ -192,6 +225,23 @@ def register_annotation_editor(ui, run, service, style: str) -> None:
                 state['selected'] = None
                 refresh_image()
                 refresh_markers()
+
+        def add_marker():
+            """The keyboard path: the typed x and y (0–1) become a new, selected marker; the arrow keys then nudge
+            it. The row itself is built once with the page, so pressing its button never moves the focus."""
+            if state['asset'] is None:
+                return
+            try:
+                marker = typed_marker(state['markers'], state['add_x'], state['add_y'])
+            except AnnotationError as exc:
+                ui.notify(str(exc), type='warning', timeout=8000, multi_line=True)
+                return
+            state['markers'].append(marker)
+            state['selected'] = len(state['markers']) - 1
+            refresh_image()
+            refresh_markers()
+            ui.notify(f"Added marker {marker['sensor_id']} at x {marker['x_norm']:.4f} · y {marker['y_norm']:.4f}; "
+                      'the arrow keys nudge it.', type='positive', timeout=5000)
 
         def handle_mouse(e):
             asset = state['asset']
@@ -246,6 +296,7 @@ def register_annotation_editor(ui, run, service, style: str) -> None:
                     widgets['image'] = ui.interactive_image(asset_url(state['job_id'], asset), content=overlay(),
                         events=['mousedown', 'mousemove', 'mouseup'], on_mouse=handle_mouse, cross=True).classes('bench-editor-image')
             refresh_markers()
+            widgets['add_row'].set_visibility(asset is not None)
             widgets['save'].set_enabled(asset is not None and not state['busy'])
 
         def choose_asset(e):
@@ -397,6 +448,16 @@ def register_annotation_editor(ui, run, service, style: str) -> None:
             with ui.card().classes('bench-card gap-4'):
                 ui.label('3. Sensor markers').classes('bench-section-title')
                 ui.label(HELP).classes('bench-muted')
+                with ui.element('div').classes('bench-marker-add') as add_row:
+                    ui.number('Marker x (0–1)', value=state['add_x'], min=0, max=1, step=.01,
+                              on_change=lambda e: state.__setitem__('add_x', e.value)).props('outlined dense')
+                    ui.number('Marker y (0–1)', value=state['add_y'], min=0, max=1, step=.01,
+                              on_change=lambda e: state.__setitem__('add_y', e.value)).props('outlined dense')
+                    ui.button('Add marker', icon='add_location_alt', on_click=add_marker).props(
+                        'outline no-caps aria-label="Add marker"')
+                    ui.label(ADD_MARKER_NOTE).classes('bench-muted bench-marker-add-note')
+                widgets['add_row'] = add_row
+                add_row.set_visibility(False)  # shown once a photograph is chosen (show_asset)
                 widgets['markers'] = ui.column().classes('w-full gap-2')
                 widgets['save'] = ui.button('Save as new report revision', icon='save', on_click=save).props(
                     'unelevated no-caps aria-label="Save as new report revision"')
