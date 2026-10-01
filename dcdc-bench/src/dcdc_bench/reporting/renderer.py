@@ -28,7 +28,8 @@ from types import SimpleNamespace
 from typing import Any
 
 # The issued CSV export guards text cells exactly as the analysis export does.
-from ..analysis import READBACK_METRIC_PREFIX, _safe_cell, is_flagged_implausible
+from ..analysis import (BEST_EFFORT_CLASSIFICATIONS, BEST_EFFORT_POLL_NOTE, BEST_EFFORT_STATEMENT, DEVIATION_COLUMNS,
+                        DEVIATION_HEADERS, READBACK_METRIC_PREFIX, _safe_cell, deviation_sheet_rows, is_flagged_implausible)
 from ..annotations import load_annotations
 from .sensor_placement import with_sensor_placement
 from ..resources import children_peak_rss_mib, session_survivors, terminate_group, try_log_event
@@ -52,7 +53,10 @@ TABLE_LAYOUTS = {
     "startup-readings": (25, 25, 25, 25),
     "exclusions": (10, 13, 17, 20, 40),
     "about": (22, 78),
+    "deviations": (12, 14, 22, 11, 11, 12, 18),
 }
+# A deviation sheet of at most this many rows is one unbreakable PDF block with its legend and statement.
+DEVIATION_KEEP_TOGETHER_ROWS = 8
 # ReportProfile.paper -> the Quarto/Typst paper name; Letter is the default (brief §12.6).
 PAPER_SIZES = {"letter": "us-letter", "a4": "a4"}
 # Plain-language reading of a measurement-binding location (bench-profile vocabulary).
@@ -229,6 +233,17 @@ def validate_report_model(model: dict) -> dict:
             raise ValueError("Metric references a missing point")
         if not set(metric.get("figure_ids", [])) <= figure_ids:
             raise ValueError("Metric references a missing figure")
+    sheet = model.get("best_effort")
+    if sheet is not None:
+        # The best-effort deviation sheet (proposal §2.3): a clause and classified entries, nothing inferred.
+        if (not isinstance(sheet, dict) or not isinstance(sheet.get("clause"), str)
+                or not isinstance(sheet.get("deviations"), list)):
+            raise ValueError("Best-effort sheet must record a clause and a list of deviations")
+        for entry in sheet["deviations"]:
+            if not isinstance(entry, dict) or not isinstance(entry.get("parameter"), str):
+                raise ValueError("Deviation entry must name its parameter")
+            if entry.get("classification") not in BEST_EFFORT_CLASSIFICATIONS:
+                raise ValueError(f"Deviation {entry.get('parameter')!r} has an unknown classification")
     return model
 
 
@@ -748,6 +763,38 @@ def _phase_outcome(value: Any) -> str:
     return labels.get(value, str(value).replace("_", " ").replace("-", " ").capitalize()) if value else "Not reported"
 
 
+def _deviation_sheet_section(model: dict) -> list[str]:
+    """The best-effort deviation sheet under the test's results (best-effort proposal §2.3 item 1).
+
+    One Markdown source serves HTML and PDF. A sheet of a few rows is one
+    unbreakable Typst block, the DUT-section pattern, so its basis legend and
+    statement stay with the table; a longer sheet is left to the theme's table
+    pagination rule. The no-compliance statement is renderer-owned text, so no
+    model can leave it out, and no cell uses the verb "achieved": the bench
+    commands, the host clock times, and the converter side is "not measured".
+    """
+    sheet = model.get("best_effort")
+    if not sheet:
+        return []
+    rows = deviation_sheet_rows(sheet)
+    title = sheet.get("title") or f"Deviations from ISO 16750-2 clause {sheet.get('clause', 'unknown')}"
+    out = [f"### {_md(title)} {{#deviations}}", ""]
+    keep_together = len(rows) <= DEVIATION_KEEP_TOGETHER_ROWS
+    if keep_together:
+        out += ["```{=typst}", "#block(breakable: false)[", "```", ""]
+    out += [_rows_table(list(DEVIATION_HEADERS), rows, layout="deviations"), ""]
+    bases = sheet.get("bases") or {}
+    if isinstance(bases, dict) and bases:
+        out += ["Basis tags: " + "; ".join(f"{_md(tag)} = {_md(text)}" for tag, text in bases.items()) + ".", ""]
+    out += [_md(sheet.get("poll_note") or BEST_EFFORT_POLL_NOTE), ""]
+    if isinstance(sheet.get("procedure_statement"), str) and sheet["procedure_statement"].strip():
+        out += ["Recorded by the procedure: " + _md(sheet["procedure_statement"]), ""]
+    out += [f"**{_md(BEST_EFFORT_STATEMENT)}**", ""]
+    if keep_together:
+        out += ["```{=typst}", "]", "```", ""]
+    return out
+
+
 def _body(model: dict, *, sensor_placement_present: bool = False) -> str:
     if model.get("kind") == "comparison":
         from .comparison import comparison_body
@@ -1082,6 +1129,8 @@ def _body(model: dict, *, sensor_placement_present: bool = False) -> str:
                 '<button type="button" data-action="svg">Export SVG</button>'
                 '<button type="button" data-action="png">Export PNG</button></div>'
                 f'<p class="figure-status" id="status-{fid}" aria-live="polite"></p>', "```", "", "::: ", ""]
+    # A best-effort ISO 16750-2 run: its deviation sheet follows the test's results.
+    out += _deviation_sheet_section(model)
     out += ["```{=html}", '<section class="raw-evidence" aria-labelledby="evidence-title">'
             '<h3 id="evidence-title">Point results and raw evidence</h3>'
             '<label for="point-picker">Inspect point (keyboard accessible)</label><br>'
@@ -1180,7 +1229,8 @@ def _body(model: dict, *, sensor_placement_present: bool = False) -> str:
             '<a href="build_manifest.json">build manifest</a> · '
             '<a href="exports/points.csv">issued point results CSV</a> · '
             '<a href="exports/points.meta.json">CSV conditions and columns</a> '
-            '<span id="canonical-pdf-link"></span></p>', "```", ""]
+            + ('· <a href="exports/deviations.json">deviation sheet JSON</a> ' if model.get("best_effort") else "")
+            + '<span id="canonical-pdf-link"></span></p>', "```", ""]
     return "\n".join(out)
 
 
@@ -1375,8 +1425,32 @@ def write_exports(model: dict, out_dir: Path) -> dict[str, dict]:
     }
     meta_path = exports / "points.meta.json"
     _write_atomic(meta_path, _json(metadata))
+    written = {"points.csv": csv_path, "points.meta.json": meta_path}
+    sheet = model.get("best_effort")
+    if sheet:
+        # Best-effort proposal §2.3 item 4: the deviation sheet as recorded (entries verbatim,
+        # with the report's derived cells), its counts, basis legend, the templated summary
+        # sentence and the mandatory statement travel with the issued exports.
+        entries = sheet.get("deviations") or []
+        deviations_path = exports / "deviations.json"
+        _write_atomic(deviations_path, _json({
+            "schema_version": "1.0", "kind": "best-effort-deviation-sheet",
+            "run_id": model["run_id"], "analysis_id": model["analysis_id"],
+            "report_revision": model.get("report_revision"), "evidence_type": model.get("evidence_label"),
+            "dut": _identity(model),
+            "standard": sheet.get("standard") or "ISO 16750-2", "clause": sheet.get("clause"),
+            "variant": sheet.get("variant"), "test_type": sheet.get("test_type"),
+            "summary_sentence": sheet.get("summary_sentence"),
+            "statement": BEST_EFFORT_STATEMENT, "procedure_statement": sheet.get("procedure_statement"),
+            "poll_note": sheet.get("poll_note") or BEST_EFFORT_POLL_NOTE,
+            "classification_counts": sheet.get("counts") or {
+                name: sum(1 for entry in entries if entry.get("classification") == name) for name in BEST_EFFORT_CLASSIFICATIONS},
+            "bases": sheet.get("bases") or {},
+            "columns": [{"name": name, "header": header} for name, header in zip(DEVIATION_COLUMNS, DEVIATION_HEADERS)],
+            "deviations": entries}))
+        written["deviations.json"] = deviations_path
     return {name: {"path": str(path), "sha256": _sha(path), "bytes": path.stat().st_size}
-            for name, path in (("points.csv", csv_path), ("points.meta.json", meta_path))}
+            for name, path in written.items()}
 
 
 def _quarto() -> str:

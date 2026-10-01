@@ -989,3 +989,158 @@ def test_dut_section_is_one_pdf_block_so_its_documentation_note_stays_with_its_t
     section = without_ratings[start:without_ratings.index("\n## ", start + 1)]
     assert section.count(open_block) == 1 and section.count(close_block) == 1 and "Rating / evidence" not in section
     assert body.count(open_block) == 2, "the DUT block and the acquisition-outcome block"
+
+
+# --- Best-effort ISO 16750-2 runs: the deviation sheet (docs/standards/best-effort-proposal.md §2.3) -------------
+BEST_EFFORT_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "best_effort_sheet_4_6_1_1_A.json"
+DEVIATION_HEADER = "| Parameter | Clause asks | This bench | Mechanism | Measured by | Classification | Note |"
+
+
+def _with_deviation_sheet(model, entries=None):
+    """The model as analysis.build_report_model issues it for a best-effort run: sheet, sentence, statement, bullets."""
+    from dcdc_bench.analysis import best_effort_limitations, build_best_effort_sheet
+    recorded = json.loads(BEST_EFFORT_FIXTURE.read_text(encoding="utf-8"))
+    if entries is not None:
+        recorded["deviations"] = entries
+    sheet = build_best_effort_sheet(recorded)
+    model["best_effort"] = sheet
+    model["summary"] = [sheet["summary_sentence"], sheet["statement"]]
+    model["limitations"] = best_effort_limitations(sheet)
+    return model
+
+
+def test_deviation_sheet_follows_the_results_as_one_pdf_block_with_seven_columns_legend_and_statement(model):
+    from dcdc_bench.analysis import BEST_EFFORT_STATEMENT
+    body = renderer._body(_with_deviation_sheet(model))
+    heading = "### Deviations from ISO 16750-2 clause 4.6.1.1, variant A {#deviations}"
+    start = body.index(heading)
+    raw_evidence = body.index('<section class="raw-evidence"')
+    assert body.index("### Path efficiency") < start < raw_evidence < body.index("## Regulation"), "under the test's results"
+    section = body[start:raw_evidence]
+    assert "::: {.report-table .table-deviations}" in section and 'tbl-colwidths="[12,14,22,11,11,12,18]"' in section
+    assert DEVIATION_HEADER in section
+    rows = [line for line in section.splitlines() if line.startswith("| ") and line not in (DEVIATION_HEADER,) and "---" not in line]
+    assert len(rows) == 5
+    assert rows[1] == ("| drop duration (s) | 100 ± 5 ms (ISO) | commanded 100 ms; host-timed 103 ms; bounded 0–270 ms (derived) | "
+                       "LAN voltage step | host clock (write timestamps) | unknown until measured | Two LAN writes, each 4–55 ms "
+                       "transport (LAN) and up to 118 ms processing (DS5); interval between the two write timestamps on the Pi |")
+    assert rows[2].startswith("| edge max (s) | at most 10 ms (ISO) | \\< 110 ms loaded (DS5); not measured at the converter | supply slew |")
+    assert ("Basis tags: ISO = ISO 16750-2 clause text or figure; DS5 = supply datasheet bound; derived = derived from the tagged "
+            "bounds; SEED = seeded bench profile or protective policy." in section)
+    assert "Observed output states come from about 1 s polling; states shorter than the poll interval are not visible to this bench." in section
+    assert "Recorded by the procedure: Variant A commanded over LAN; nothing at the converter terminals is measured." in section
+    assert f"**{BEST_EFFORT_STATEMENT}**" in section
+    open_block, close_block = "```{=typst}\n#block(breakable: false)[\n```", "```{=typst}\n]\n```"
+    assert section.count(open_block) == 1 and section.count(close_block) == 1
+    order = [section.index(text) for text in (heading, open_block, DEVIATION_HEADER, "Basis tags:", "Observed output states",
+                                              "Recorded by the procedure", f"**{BEST_EFFORT_STATEMENT}**", close_block)]
+    assert order == sorted(order), "heading, open, table, legend, poll note, procedure statement, statement, close"
+    assert body.count(open_block) == 3, "the DUT block, the acquisition-outcome block and the deviation sheet"
+    lowered = section.lower()
+    for forbidden in ("achieved", " pass", "fail", "compliant"):
+        assert forbidden not in lowered, forbidden
+    summary = body[body.index("## Summary"):body.index("## Device tested")]
+    assert renderer._md(model["best_effort"]["summary_sentence"]) in summary and BEST_EFFORT_STATEMENT in summary
+    appendix = body[body.index("## Appendix: qualification and provenance"):]
+    assert "- " + renderer._md(model["limitations"][0]) in appendix and f"- {BEST_EFFORT_STATEMENT}" in appendix
+    assert '· <a href="exports/deviations.json">deviation sheet JSON</a> ' in body
+
+
+def test_long_deviation_sheet_is_left_to_the_table_pagination_rule(model):
+    recorded = json.loads(BEST_EFFORT_FIXTURE.read_text(encoding="utf-8"))["deviations"]
+    entries = [{**copy.deepcopy(recorded[index % len(recorded)]), "parameter": f"parameter_{index}_s"}
+               for index in range(renderer.DEVIATION_KEEP_TOGETHER_ROWS + 1)]
+    body = renderer._body(_with_deviation_sheet(model, entries))
+    start = body.index("### Deviations from ISO 16750-2 clause 4.6.1.1, variant A {#deviations}")
+    section = body[start:body.index('<section class="raw-evidence"')]
+    assert section.count("```{=typst}\n#block(breakable: false)[\n```") == 0 and DEVIATION_HEADER in section
+    assert sum(1 for line in section.splitlines() if line.startswith("| parameter ")) == renderer.DEVIATION_KEEP_TOGETHER_ROWS + 1
+    assert body.count("```{=typst}\n#block(breakable: false)[\n```") == 2
+
+
+def test_model_without_a_deviation_sheet_renders_no_sheet_section_or_export_link(model):
+    body = renderer._body(model)
+    assert "Deviations from" not in body and "{#deviations}" not in body and "deviations.json" not in body
+    assert "No clause-compliance result is claimed" not in body
+    assert validate_report_model({**model, "best_effort": None}) is not None
+
+
+@pytest.mark.parametrize("sheet, message", [
+    ("4.6.1.1", "must record a clause"),
+    ({"clause": "4.6.1.1", "deviations": {"parameter": "edge_max_s"}}, "must record a clause and a list"),
+    ({"clause": "4.6.1.1", "deviations": [{"classification": "met"}]}, "must name its parameter"),
+    ({"clause": "4.6.1.1", "deviations": [{"parameter": "edge_max_s", "classification": "pass"}]}, "unknown classification"),
+])
+def test_validation_accepts_a_recorded_sheet_and_refuses_a_malformed_one(model, sheet, message):
+    assert validate_report_model(_with_deviation_sheet(copy.deepcopy(model)))["best_effort"]["clause"] == "4.6.1.1"
+    with pytest.raises(ValueError, match=message):
+        validate_report_model({**model, "best_effort": sheet})
+
+
+def test_deviation_sheet_export_holds_the_recorded_entries_sentence_statement_counts_and_legend(model, tmp_path):
+    from dcdc_bench.analysis import BEST_EFFORT_STATEMENT
+    issued = _with_deviation_sheet(model)
+    before = copy.deepcopy(issued)
+    recorded = renderer.write_exports(issued, tmp_path)
+    assert set(recorded) == {"points.csv", "points.meta.json", "deviations.json"}
+    path = tmp_path / "exports/deviations.json"
+    assert recorded["deviations.json"] == {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                                           "bytes": path.stat().st_size}
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == "1.0" and payload["kind"] == "best-effort-deviation-sheet"
+    assert (payload["run_id"], payload["analysis_id"], payload["report_revision"], payload["evidence_type"], payload["dut"]) == (
+        "synthetic-run", "analysis-1", "r0001", "SYNTHETIC", "Different 5 V DUT")
+    assert (payload["standard"], payload["clause"], payload["variant"], payload["test_type"]) == ("ISO 16750-2", "4.6.1.1", "A", "momentary_drop")
+    assert payload["summary_sentence"] == issued["best_effort"]["summary_sentence"]
+    assert payload["statement"] == BEST_EFFORT_STATEMENT
+    assert payload["procedure_statement"] == "Variant A commanded over LAN; nothing at the converter terminals is measured."
+    assert payload["classification_counts"] == {"met": 1, "approximated": 1, "not_met_but_documented": 1, "unknown_until_measured": 2}
+    assert payload["bases"] == issued["best_effort"]["bases"]
+    assert [column["name"] for column in payload["columns"]] == ["parameter", "clause_asks", "this_bench", "mechanism",
+                                                                  "measured_by", "classification", "note"]
+    assert [column["header"] for column in payload["columns"]] == ["Parameter", "Clause asks", "This bench", "Mechanism",
+                                                                    "Measured by", "Classification", "Note"]
+    assert payload["deviations"] == issued["best_effort"]["deviations"]
+    assert payload["deviations"][1]["achieved"] == {"value": .103, "measured_by": "host_clock",
+                                                    "note": "interval between the two write timestamps on the Pi"}
+    assert issued == before, "Writing exports must not alter the report model"
+
+
+def test_render_lists_the_deviation_sheet_export_in_the_manifest_and_links_it(model, tmp_path, monkeypatch):
+    """Renderer orchestration only, as for the point exports; the browser/PDF suite covers real documents."""
+    from types import SimpleNamespace
+    import plotly.offline
+    monkeypatch.setattr(plotly.offline, "get_plotlyjs", lambda: "window.runtimeFixture=true;")
+    monkeypatch.setattr(renderer, "_quarto", lambda: "quarto-test-fixture")
+
+    async def static_fixture(model, directory):
+        for spec in model["figures"]:
+            for extension in ("svg", "pdf"):
+                (directory / (spec["id"] + "." + extension)).write_text("unit-test fixture")
+    monkeypatch.setattr(renderer, "_write_static_figures", static_fixture)
+
+    def document_fixture(command, **kwargs):
+        if command[-1] == "--version":
+            return SimpleNamespace(stdout="1.10.18\n", stderr="", returncode=0)
+        directory = Path(kwargs["cwd"])
+        assert (directory / "exports/deviations.json").is_file(), "the sheet export precedes the document build"
+        (directory / "report.html").write_text("<!doctype html><html><body>"
+                                               + (directory / "interactions.html").read_text() + "</body></html>")
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+    monkeypatch.setattr(renderer.subprocess, "run", document_fixture)
+
+    def tool_fixture(command, **kwargs):
+        result = document_fixture(command, cwd=kwargs["cwd"])
+        result.usage = {"timed_out": False, "survivors": [], "command": command}
+        return result
+    monkeypatch.setattr(renderer, "_run_tool", tool_fixture)
+    manifest = render_report(_with_deviation_sheet(model), tmp_path, formats=("html",))
+    assert manifest["status"] == "success"
+    assert set(manifest["exports"]) == {"points.csv", "points.meta.json", "deviations.json"}
+    record = manifest["exports"]["deviations.json"]
+    assert Path(record["path"]).resolve() == (tmp_path / "exports/deviations.json").resolve()
+    assert record["sha256"] == hashlib.sha256(Path(record["path"]).read_bytes()).hexdigest()
+    assert json.loads((tmp_path / "build_manifest.json").read_text())["exports"] == manifest["exports"]
+    source = (tmp_path / "report.qmd").read_text()
+    assert 'href="exports/deviations.json"' in source and "{#deviations}" in source
+    assert json.loads((tmp_path / "report_model.json").read_text())["best_effort"]["clause"] == "4.6.1.1"

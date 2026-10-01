@@ -24,11 +24,12 @@ from dcdc_bench.reporting.pdf_check import (BBox, Document, Element, Page, Regio
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "pdf"
 PROJECT = Path(__file__).resolve().parents[1]
 FIXTURE_NAMES = ("clean", "orphan-heading", "lone-table-row", "clipped-text", "caption-without-figure",
-                 "split-table-unguarded", "split-table-guarded")
+                 "split-table-unguarded", "split-table-guarded", "deviation-sheet-keep-together")
 MODELS = {name: {"run_id": f"run-fixture-{suffix}", "dut": {"model": "FIXTURE-DUT"}} for name, suffix in (
     ("clean", "clean"), ("orphan-heading", "orphan"), ("lone-table-row", "lone-row"),
     ("clipped-text", "clipped"), ("caption-without-figure", "caption"),
-    ("split-table-unguarded", "split-unguarded"), ("split-table-guarded", "split-guarded"))}
+    ("split-table-unguarded", "split-unguarded"), ("split-table-guarded", "split-guarded"),
+    ("deviation-sheet-keep-together", "deviation-sheet"))}
 # The guarded fixture imports the print theme's table rule from the templates.
 THEME_TABLES = PROJECT / "templates" / "theme" / "print-tables.typ"
 
@@ -134,6 +135,22 @@ def test_theme_table_rule_moves_a_table_whose_head_would_not_fit_together_with_i
     assert [page["tables"] for page in result.pages] == [0, 1]
     assert "Regulation" not in result.pages[0]["headings"]
     assert "Regulation" in result.pages[1]["headings"]
+
+
+@pytest.mark.integration
+def test_deviation_sheet_block_moves_whole_to_the_next_page_with_its_heading(compiled):
+    """renderer._deviation_sheet_section: the best-effort sheet, its basis legend and its statement are one
+    unbreakable Typst block (the DUT-section pattern). Where only the heading and about one row would fit at the
+    bottom of a page, the whole block moves to the next page and the sticky heading travels with it (PDF-02)."""
+    result = check_pdf(compiled["deviation-sheet-keep-together"], MODELS["deviation-sheet-keep-together"])
+    assert _codes(result, "error") == [], [finding.message for finding in result.errors]
+    assert {"table-split-after-first-row", "orphan-heading", "lone-table-row", "table-header-alone"}.isdisjoint(_codes(result)), \
+        [finding.message for finding in result.findings]
+    assert result.status == "pass"
+    assert result.page_count == 2
+    assert [page["tables"] for page in result.pages] == [0, 1]
+    heading = "Deviations from ISO 16750-2 clause 4.6.1.1, variant A"
+    assert heading not in result.pages[0]["headings"] and heading in result.pages[1]["headings"]
 
 
 @pytest.mark.integration
