@@ -610,7 +610,7 @@ supply's slew. It does not help 4.3.1.2 or 4.3.2 (both levels exceed CH2's
 8 V). A DPDT reversal for 4.7 is physically possible but is the fault
 injection the brief excludes; it is designed only as a policy exception the
 owner must approve explicitly, accepting converter damage. Design document:
-[switch-box-design.md](switch-box-design.md) (pending). Open owner questions:
+[switch-box-design.md](switch-box-design.md). Open owner questions:
 4.6.3 grey or a one-second-segment approximation; 4.7 in or out; drive from
 the Pi's GPIO or from the supply's trigger lines (is the digital I/O terminal
 fitted?).
