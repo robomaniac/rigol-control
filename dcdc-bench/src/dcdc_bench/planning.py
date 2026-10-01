@@ -11,17 +11,24 @@ from typing import TypeVar
 
 import yaml
 
-from .domain import (MOCK_THERMAL_ADAPTER, RESET_STAIRCASE_TEST_TYPE, SLOW_SUPPLY_RAMP_TEST_TYPE, SUPPLY_PROFILE_TEST_TYPES,
-                     UVLO_TEST_TYPE, BenchProfile, Contract, DutProfile, Plan, PlannedPoint, TestDefinition, TestRecipe,
-                     staircase_level_kinds, uvlo_ramp_phases)
+from .domain import (BEST_EFFORT_TEST_TYPES, LINE_INTERRUPTION_TEST_TYPE, MICRO_INTERRUPTION_TEST_TYPE, MOCK_THERMAL_ADAPTER,
+                     MOMENTARY_DROP_TEST_TYPE, RESET_STAIRCASE_TEST_TYPE, SLOW_SUPPLY_RAMP_TEST_TYPE, SUPPLY_PROFILE_TEST_TYPES,
+                     TRANSIENT_HOLD_TEST_TYPE, UVLO_TEST_TYPE, BenchProfile, Contract, DutProfile, Plan, PlannedPoint, TestDefinition,
+                     TestRecipe, staircase_level_kinds, uvlo_ramp_phases)
 
 Profile = TypeVar("Profile", bound=Contract)
 REQUIRED_MEASUREMENTS = {"Vin_V": "V", "Iin_A": "A", "Vout_V": "V", "Iout_A": "A"}
 # Procedure types with an implemented executor. Any other type fails planning.
-# The supply-profile types exist on the synthetic plant only; a real bench refuses them.
-IMPLEMENTED_TEST_TYPES = ("steady_state_load_sweep", UVLO_TEST_TYPE, *SUPPLY_PROFILE_TEST_TYPES)
+# The supply-profile and best-effort types exist on the synthetic plant only; a real bench refuses them.
+MOCK_ONLY_TEST_TYPES = (*SUPPLY_PROFILE_TEST_TYPES, *BEST_EFFORT_TEST_TYPES)
+IMPLEMENTED_TEST_TYPES = ("steady_state_load_sweep", UVLO_TEST_TYPE, *MOCK_ONLY_TEST_TYPES)
 REAL_HARDWARE_NOT_APPROVED = ("is not yet approved for real hardware: the procedure exists on the synthetic plant only "
                               "and no real execution context exists in this release")
+# The real path's run envelope (extended.SOFTWARE_DEADLINE_S / HARDWARE_DEADLINE_S; docs/configured-runs.md). A best-effort
+# recipe whose longest source phase exceeds the source timer declares its own authorization.instrument_timed_bound_s and is
+# approved with it (owner decision 1 of 2026-10-01); the planner then compares the phase with the declared bound instead.
+REAL_SOFTWARE_DEADLINE_S = 660.0
+REAL_SOURCE_TIMER_S = 720.0
 # --- Simulated-run budget (docs/simulation-plant.md, "Run budget") -------------------------------------
 # The mock worker fsyncs every JSONL record, so its wall time follows the record count and host I/O,
 # not model time. The bench service runs it in a transient unit with RuntimeMaxSec=2700 and
@@ -90,6 +97,131 @@ def uvlo_approval_gaps(bench: BenchProfile, recipe: TestRecipe) -> list[str]:
     return gaps
 
 
+def recipe_deviations_sha256(recipe: TestRecipe) -> str | None:
+    """The hash a best-effort approval accepts: the single sheet's ``sha256()``, or for a recipe with several best-effort
+    tests the SHA-256 of the JSON list of their sheet hashes in test order. None when the recipe carries no sheet."""
+    digests = [test.best_effort.deviation_sheet.sha256() for test in recipe.tests if test.best_effort is not None]
+    if not digests:
+        return None
+    if len(digests) == 1:
+        return digests[0]
+    return hashlib.sha256(json.dumps(digests, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def best_effort_approval_gaps(bench: BenchProfile, recipe: TestRecipe) -> list[str]:
+    """Policy gaps that block a best-effort ISO 16750-2 recipe in either execution mode (owner decision 4: the UVLO gate).
+
+    The recipe is refused unless it carries ``best_effort_approved`` with an
+    ``accepted_deviations_sha256`` equal to the hash of the deviation sheet(s)
+    it declares now (an edited sheet invalidates the approval), names the
+    bench's protective policy, and the bench declares the absolute limits and
+    the input overvoltage guard. Levels never exceed the DUT's stated maximum;
+    a level equal to it is allowed only with ``program_clause_level_exactly``
+    (owner decision 6). A phase longer than the real path's source timer
+    needs the recipe's own ``instrument_timed_bound_s`` (owner decision 1).
+    Real execution additionally needs ``missing_approvals`` to be empty.
+    """
+    gaps = []
+    authorization, controls, ratings_max = recipe.authorization, bench.protective_controls, None
+    tests = [test for test in recipe.tests if test.type in BEST_EFFORT_TEST_TYPES and test.best_effort is not None]
+    if not authorization.best_effort_approved:
+        gaps.append("recipe authorization.best_effort_approved is false")
+    declared = recipe_deviations_sha256(recipe)
+    if authorization.accepted_deviations_sha256 is None:
+        gaps.append("recipe authorization.accepted_deviations_sha256 is not declared")
+    elif declared is None:
+        gaps.append("recipe declares no deviation sheet to accept")
+    elif authorization.accepted_deviations_sha256 != declared:
+        gaps.append("recipe authorization.accepted_deviations_sha256 does not match the declared deviation sheet; the sheet "
+                    "changed after approval, so review and approve it again")
+    if authorization.protective_policy_id is None:
+        gaps.append("recipe authorization.protective_policy_id is not declared")
+    elif controls.policy_id != authorization.protective_policy_id:
+        gaps.append("bench protective_controls.policy_id does not name the recipe's protective policy")
+    for field in ("source_current_limit_A", "dut_input_overvoltage_V", "dut_output_overvoltage_V", "output_overcurrent_A"):
+        if getattr(controls, field) is None:
+            gaps.append(f"bench protective_controls.{field} must be declared for the best-effort guard")
+    if any(test.best_effort.longest_phase_s(test.type) > REAL_SOURCE_TIMER_S for test in tests) and authorization.instrument_timed_bound_s is None:
+        gaps.append(f"a declared phase exceeds the {REAL_SOURCE_TIMER_S:g} s source timer and the recipe declares no "
+                    "authorization.instrument_timed_bound_s (owner decision 1)")
+    return gaps
+
+
+def best_effort_level_gaps(dut: DutProfile, recipe: TestRecipe) -> list[str]:
+    """Levels a best-effort recipe may never request: above the DUT maximum, or equal to it without the exact-level flag."""
+    gaps = []
+    maximum, exact = dut.ratings.input_voltage_max_V, recipe.authorization.program_clause_level_exactly
+    for test in recipe.tests:
+        if test.type not in BEST_EFFORT_TEST_TYPES:
+            continue
+        for vin in test.input_voltage_targets_V:
+            if vin > maximum:
+                gaps.append(f"test {test.id} requests {vin:g} V above the DUT's stated {maximum:g} V maximum")
+            elif vin == maximum and not exact:
+                gaps.append(f"test {test.id} requests {vin:g} V, the converter's stated maximum, without "
+                            "authorization.program_clause_level_exactly (owner decision 6)")
+    return gaps
+
+
+def phase_duration_bound_s(bench: BenchProfile, recipe: TestRecipe) -> float:
+    """The per-phase bound in force: the recipe's approved ``instrument_timed_bound_s``, else the real path's source timer."""
+    bound = recipe.authorization.instrument_timed_bound_s
+    if bound is not None and not best_effort_approval_gaps(bench, recipe):
+        return bound
+    return REAL_SOURCE_TIMER_S
+
+
+def best_effort_phase_reasons(recipe: TestRecipe, test: TestDefinition) -> list[str]:
+    """Refuse a best-effort test whose longest source phase exceeds the bound it may use (declared, else the 720 s timer)."""
+    policy = test.best_effort
+    if policy is None:
+        return []
+    longest, declared = policy.longest_phase_s(test.type), recipe.authorization.instrument_timed_bound_s
+    if declared is not None and longest > declared:
+        return [f"The declared {longest:g} s phase of {test.id} exceeds the recipe's own instrument_timed_bound_s of {declared:g} s; "
+                "request retained without clipping"]
+    if declared is None and longest > REAL_SOURCE_TIMER_S:
+        return [f"The declared {longest:g} s phase of {test.id} exceeds the {REAL_SOURCE_TIMER_S:g} s per-phase source timer of the "
+                "real path's policy and the recipe declares no authorization.instrument_timed_bound_s (owner decision 1); "
+                "request retained without clipping"]
+    return []
+
+
+def best_effort_level_kind(test: TestDefinition, level_index: int) -> str:
+    """``base`` / ``hold level`` for a transient hold, ``start`` / ``drop level`` for a drop, ``base`` for an interruption."""
+    if test.type == TRANSIENT_HOLD_TEST_TYPE:
+        return "base" if level_index == 0 else "hold level"
+    if test.type == MOMENTARY_DROP_TEST_TYPE:
+        return "start" if level_index == 0 else "drop level"
+    return "base"
+
+
+def best_effort_needs_uvlo_approval(dut: DutProfile, test: TestDefinition) -> bool:
+    """A drop level below the DUT's stated minimum, or an interruption (output OFF is 0 V), takes the approved UVLO-style path."""
+    if test.type in (MICRO_INTERRUPTION_TEST_TYPE, LINE_INTERRUPTION_TEST_TYPE):
+        return True
+    return any(vin < dut.ratings.input_voltage_min_V for vin in test.input_voltage_targets_V)
+
+
+def best_effort_step_reasons(dut: DutProfile, recipe: TestRecipe, test: TestDefinition, vin: float, level_kind: str) -> list[str]:
+    """Refuse (never clip) best-effort levels above the DUT rating, at its maximum without the exact flag, below the declared
+    drop level, or below the DUT minimum where the recipe declares no drop there."""
+    ratings, authorization, policy = dut.ratings, recipe.authorization, test.best_effort
+    reasons = []
+    if vin > ratings.input_voltage_max_V:
+        reasons.append("Requested input voltage is above the DUT maximum input rating")
+    elif vin == ratings.input_voltage_max_V and not authorization.program_clause_level_exactly:
+        reasons.append(f"Requested input voltage {vin:g} V equals the converter's stated maximum and is programmed exactly only with "
+                       "authorization.program_clause_level_exactly (owner decision 6); request retained without clipping")
+    if vin < ratings.input_voltage_min_V and not (level_kind == "drop level" and policy is not None and vin == policy.drop_level_V):
+        reasons.append(f"Requested input voltage {vin:g} V is below the DUT's stated {ratings.input_voltage_min_V:g} V minimum and is "
+                       "not the declared drop level; request retained without clipping")
+    if test.supply_profile is not None and vin < test.supply_profile.floor_V:
+        reasons.append(f"Requested input voltage {vin:g} V is below the declared supply-profile floor {test.supply_profile.floor_V:g} V; "
+                       "request retained without clipping")
+    return reasons
+
+
 def uvlo_step_reasons(dut: DutProfile, test: TestDefinition, vin: float) -> list[str]:
     """Refuse (never clip) UVLO steps below the declared floor, above the DUT rating, or a start outside it.
 
@@ -143,7 +275,7 @@ def _unsupported_capabilities(dut: DutProfile, bench: BenchProfile, test: TestDe
     reasons: list[str] = []
     if test.type not in IMPLEMENTED_TEST_TYPES:
         reasons.append(f"Test type {test.type!r} is not an implemented procedure")
-    elif test.type in SUPPLY_PROFILE_TEST_TYPES and bench.mode == "real":
+    elif test.type in MOCK_ONLY_TEST_TYPES and bench.mode == "real":
         reasons.append(f"Test type {test.type!r} {REAL_HARDWARE_NOT_APPROVED}")
     for name, instrument in (("Source", bench.source), ("Load", bench.load)):
         if not instrument.capabilities_confirmed:
@@ -193,11 +325,21 @@ def _point(dut: DutProfile, bench: BenchProfile, recipe: TestRecipe, test: TestD
     elif types & set(SUPPLY_PROFILE_TEST_TYPES) and len(types) > 1:
         mixed = sorted(types & set(SUPPLY_PROFILE_TEST_TYPES))[0]
         reasons.append(f"Recipe mixes {mixed} with other test types; plan the supply profile as a separate recipe")
+    elif types & set(BEST_EFFORT_TEST_TYPES) and len(types) > 1:
+        # Several tests of one best-effort type (the variants of a clause) share a recipe; two types never do.
+        mixed = sorted(types & set(BEST_EFFORT_TEST_TYPES))[0]
+        reasons.append(f"Recipe mixes {mixed} with other test types; plan the best-effort procedure as a separate recipe")
     # Supply profiles: the level's kind decides where output-off is an expected, recorded state.
-    profile_kind, off_expected = None, False
+    profile_kind, off_expected, best_effort_kind = None, False, None
     if test.type in SUPPLY_PROFILE_TEST_TYPES and test.supply_profile is not None:
         profile_kind = supply_profile_level_kinds(test)[level_index]
         off_expected = test.supply_profile.off_expected(vin, profile_kind)
+    elif test.type in BEST_EFFORT_TEST_TYPES:
+        # Output-off is expected only at a declared drop level below the recipe's expected-off boundary; the interruption
+        # itself is output OFF, not a level, and the procedure scopes it by time.
+        best_effort_kind = best_effort_level_kind(test, level_index)
+        off_expected = (best_effort_kind == "drop level" and test.supply_profile is not None
+                        and test.supply_profile.off_expected(vin, "low"))
     physical_power = None
     if source.max_current_A is not None and source.max_power_W is not None:
         physical_power = min(vin * source.max_current_A, source.max_power_W)
@@ -224,6 +366,9 @@ def _point(dut: DutProfile, bench: BenchProfile, recipe: TestRecipe, test: TestD
         reasons.extend(uvlo_step_reasons(dut, test, vin))
     elif profile_kind is not None:
         reasons.extend(supply_profile_step_reasons(dut, test, vin, profile_kind))
+    elif best_effort_kind is not None:
+        reasons.extend(best_effort_step_reasons(dut, recipe, test, vin, best_effort_kind))
+        reasons.extend(best_effort_phase_reasons(recipe, test))
     elif not ratings.input_voltage_min_V <= vin <= ratings.input_voltage_max_V:
         reasons.append("Requested input voltage is outside the DUT operating rating")
     if iout > ratings.output_current_rated_A + 1e-12 or pout > ratings.output_power_rated_W + 1e-12:
@@ -277,6 +422,11 @@ def _point(dut: DutProfile, bench: BenchProfile, recipe: TestRecipe, test: TestD
         status = "approval_blocked"
         reason = (f"Supply profile {test.type} steps below the DUT's stated {ratings.input_voltage_min_V:g} V minimum and "
                   "takes the approved UVLO-style path (brief 7.5); blocked by approvals: " + "; ".join(gaps))
+    elif best_effort_kind is not None and (gaps := best_effort_approval_gaps(bench, recipe) + best_effort_level_gaps(dut, recipe)
+                                           + (uvlo_approval_gaps(bench, recipe) if best_effort_needs_uvlo_approval(dut, test) else [])):
+        status = "approval_blocked"
+        reason = (f"Best-effort {test.type} (ISO 16750-2 clause {test.best_effort.clause}) is blocked by approvals: "
+                  + "; ".join(dict.fromkeys(gaps)))
     elif bench.mode == "real":
         status = "approval_blocked"
         missing = missing_approvals(dut, bench)
@@ -297,6 +447,13 @@ def _point(dut: DutProfile, bench: BenchProfile, recipe: TestRecipe, test: TestD
                            "the planning load budget does not apply to an off output")
             elif vin < ratings.input_voltage_min_V:
                 reason += "; below the DUT's stated minimum input, inside the declared floor"
+        if best_effort_kind is not None:
+            reason += (f"; {best_effort_kind} of the best-effort {test.type.replace('_', ' ')} (ISO 16750-2 clause "
+                       f"{test.best_effort.clause}{', variant ' + test.best_effort.variant if test.best_effort.variant else ''}); "
+                       "the deviation sheet travels with the plan")
+            if off_expected:
+                reason += ("; output-off at the drop level is the recipe's documented expectation: recorded as a state, not a "
+                           "fault; the planning load budget does not apply to an off output")
     return PlannedPoint(point_id=point_id, test_id=test.id, vin_target_V=vin, iout_target_A=iout,
                         status=status, reason=reason, estimated_input_current_A=estimated_iin,
                         physical_input_power_limit_W=physical_power, planning_output_current_limit_A=planning_limit)
@@ -422,6 +579,54 @@ def require_phase_scoped_mock_budget(plan: Plan) -> dict:
     return estimate
 
 
+def best_effort_mock_estimate(plan: Plan) -> dict:
+    """Budget a best-effort recipe's evidence conservatively: every second of declared stimulus is polled.
+
+    Per test: the startup interval, then ``repeats`` times the whole declared
+    stimulus (hold plus rest, drop plus recovery window, interruption plus
+    recovery window) at the acquisition poll interval, plus a settling dwell
+    and an acquisition window per declared level. Every cycle writes the four
+    electrical readings; each level adds its point events, each repeat its
+    command events, each test its lifecycle events.
+    """
+    poll = Decimal(str(plan.recipe.acquisition.target_poll_interval_s))
+
+    def polls(duration):
+        return int((Decimal(str(duration)) / poll).to_integral_value(rounding=ROUND_CEILING))
+
+    cycles, levels, repeats_total = 0, 0, 0
+    acquisition = max(polls(plan.recipe.acquisition.duration_s), plan.recipe.acquisition.minimum_complete_cycles)
+    for test in plan.recipe.tests:
+        policy = test.best_effort
+        if policy is None or test.type not in BEST_EFFORT_TEST_TYPES:
+            raise ValueError("Best-effort budget requires best-effort tests with their declared block")
+        repeats = policy.repeats or 1
+        if test.type == TRANSIENT_HOLD_TEST_TYPE:
+            stimulus = (policy.hold_s or 0.0) + (policy.recovery_s or 0.0)
+        elif test.type == MOMENTARY_DROP_TEST_TYPE:
+            stimulus = (policy.drop_s or 0.0) + (policy.recovery_s or 0.0)
+        else:
+            stimulus = (policy.interruption_s or 0.0) + (policy.recovery_s or 0.0)
+        count = len(test.input_voltage_targets_V)
+        levels += count
+        repeats_total += repeats
+        startup = test.supply_profile.startup_interval_s if test.supply_profile is not None else 5.0
+        cycles += polls(startup) + repeats * polls(stimulus) + count * (acquisition + polls(plan.recipe.settling.minimum_dwell_s))
+    records = len(REQUIRED_MEASUREMENTS) * cycles + 2 * levels + 4 * repeats_total + 12 * len(plan.recipe.tests)
+    deadline = Decimal(str(MOCK_DEADLINE_FIXED_S)) + Decimal(str(MOCK_DEADLINE_SECONDS_PER_RECORD)) * records
+    typical = Decimal(str(MOCK_ESTIMATE_FIXED_S)) + Decimal(str(MOCK_ESTIMATE_SECONDS_PER_RECORD)) * records
+    if not math.isfinite(float(deadline)) or not math.isfinite(float(typical)):
+        raise ValueError("Simulated best-effort run volume exceeds the finite run budget; increase the poll interval")
+    within = deadline <= MOCK_RUN_BUDGET_S
+    reason = None if within else (
+        f"the simulated best-effort run would write about {records} fsync'd records ({repeats_total} declared repeats polled "
+        f"for their whole stimulus); its worst-case deadline {deadline:.0f} s exceeds the {MOCK_RUN_BUDGET_S:.0f} s simulated-run "
+        "budget (RuntimeMaxSec 2700 s minus margin); split the recipe or increase the poll interval")
+    return {"records": records, "declared_repeats": repeats_total, "observation_levels": levels,
+            "typical_s": float(typical), "deadline_s": float(deadline), "budget_s": MOCK_RUN_BUDGET_S,
+            "within_budget": within, "reason": reason}
+
+
 def prepare_mock_plan(plan: Plan) -> tuple[Plan, list[str], float]:
     """Preview counterpart of ``real_backend.prepare_real_plan`` for a mock bench: the plan is returned
     unchanged (its hash stands), ``errors`` names why the simulated worker would refuse it, and the
@@ -434,6 +639,8 @@ def prepare_mock_plan(plan: Plan) -> tuple[Plan, list[str], float]:
     types = {test.type for test in plan.recipe.tests}
     if types <= {UVLO_TEST_TYPE, *SUPPLY_PROFILE_TEST_TYPES}:
         estimate = phase_scoped_mock_estimate(plan)
+    elif types <= set(BEST_EFFORT_TEST_TYPES):
+        estimate = best_effort_mock_estimate(plan)
     elif types == {"steady_state_load_sweep"}:
         estimate = mock_run_estimate(plan)
     else:

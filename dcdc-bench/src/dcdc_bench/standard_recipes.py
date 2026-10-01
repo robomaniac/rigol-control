@@ -10,12 +10,30 @@ ISO 16750-2 one row per clause with a badge. Badge kinds and labels:
   default; the generated recipe steps below the converter's stated minimum
   and plans as ``approval_blocked`` until approved (4.5 and 4.6.2 on the
   simulated bench). The row's ``approval`` text says where approval happens;
+* ``best_effort`` "best effort (deviations recorded)": tickable, never
+  pre-ticked, amber; the bench approximates the clause with its own
+  mechanisms and the generated recipe carries a deviation sheet
+  (4.3.1.2, 4.3.2, 4.6.1.1, 4.6.1.2, 4.9.1, 4.9.2 on the simulated bench;
+  docs/standards/best-effort-proposal.md, owner decisions of 2026-10-01);
 * ``mock_only`` "mock only": not tickable; the procedure exists on the
-  synthetic plant only and this is a real bench (4.5 and 4.6.2 on a real
-  profile);
+  synthetic plant only and this is a real bench (4.3.1.1, 4.5, 4.6.2 and
+  every best-effort clause on a real profile);
 * ``procedure_pending`` "procedure not yet implemented": the requirement a
-  procedure would have to meet (4.3.1.1, 4.6.1.2);
+  procedure would have to meet (no ISO 16750-2 clause today);
 * ``needs_split``, ``needs_instrument`` and the grey reasons.
+
+Best-effort recipes (``transient_hold``, ``momentary_drop``,
+``micro_interruption``, ``line_interruption``) carry one ``best_effort`` block
+per test with the stimulus and its ``DeviationSheet`` built by
+``standards.deviation_sheet``; clauses with several variants (4.6.1.1 B then
+A, 4.3.2 A then B, the six 4.6.1.2 cases) hold one test per variant unless
+``build_recipe(..., variant=...)`` asks for one. They are written with
+``authorization.best_effort_approved`` false and no accepted hash: approval
+is the owner's act (``standards.BEST_EFFORT_APPROVAL_HOW``). With
+``program_clause_level_exactly`` the generated levels are the clause values
+(36.0 V at the converter's maximum) and the authorization block says so;
+the default programs the 35.8 V margin setting and the sheet records it as
+approximated (owner decision 6).
 
 ``build_recipe`` turns a tickable clause into a saved-recipe dict for
 ``JobService.save_profile('recipe', ...)``:
@@ -41,7 +59,9 @@ from __future__ import annotations
 from typing import Any
 
 from . import standards as S
-from .domain import RESET_STAIRCASE_TEST_TYPE, SLOW_SUPPLY_RAMP_TEST_TYPE, BenchProfile, DutProfile, TestRecipe
+from .domain import (BEST_EFFORT_TEST_TYPES, LINE_INTERRUPTION_TEST_TYPE, MICRO_INTERRUPTION_TEST_TYPE, MOMENTARY_DROP_TEST_TYPE,
+                     RESET_STAIRCASE_TEST_TYPE, SLOW_SUPPLY_RAMP_TEST_TYPE, TRANSIENT_HOLD_TEST_TYPE, BenchProfile, DeviationSheet,
+                     DutProfile, TestRecipe)
 
 STANDARDS_GROUP = "Automotive supply standards"
 ISO16750_2_CATEGORY = "ISO 16750-2 supply profiles"
@@ -52,8 +72,10 @@ ISO16750_2_CATEGORY = "ISO 16750-2 supply profiles"
 STANDARD_CARD_TITLES = {S.ISO16750_2_ID: "ISO 16750-2:2023 — electrical loads"}
 OTHER_LABORATORIES_NOTE = ("Other automotive standards (ISO 7637-2, CISPR 25, ISO 11452, ISO 10605, ISO 16750-3/-4) "
                            "need other laboratories; see the standards catalog.")
-CLAUSE_SHORT_NAMES = {"4.2": "supply voltage range", "4.3.1.1": "long-term overvoltage hold",
-                      "4.5": "slow decrease and increase", "4.6.1.2": "micro-interruptions", "4.6.2": "reset staircase"}
+CLAUSE_SHORT_NAMES = {"4.2": "supply voltage range", "4.3.1.1": "long-term overvoltage hold", "4.3.1.2": "jump start",
+                      "4.3.2": "transient overvoltage", "4.5": "slow decrease and increase", "4.6.1.1": "momentary drop",
+                      "4.6.1.2": "micro-interruptions", "4.6.2": "reset staircase", "4.9.1": "single line interruption",
+                      "4.9.2": "multiple line interruption"}
 SHORT_INSTRUMENT_NAMES = {
     S.EDGE_10MS: "10 ms edges", S.NEGATIVE_VOLTAGE: "bipolar source", S.AC_SUPERPOSITION: "AC ripple source",
     S.PULSE_MS: "ms pulse generator", S.PULSE_US: "µs switch", S.LOW_SOURCE_IMPEDANCE_PULSE: "low-impedance pulse generator",
@@ -62,12 +84,16 @@ SHORT_INSTRUMENT_NAMES = {
     S.TRANSIENT_GENERATOR: "transient generator", S.EMC_CHAMBER: "EMC chamber", S.ESD_SIMULATOR: "ESD simulator",
     S.SHAKER: "shaker", S.CLIMATIC_CHAMBER: "climatic chamber",
 }
-BADGE_LABELS = {"runs_here": "runs here", "runs_after_approval": "runs here after approval", "mock_only": "mock only",
+BADGE_LABELS = {"runs_here": "runs here", "runs_after_approval": "runs here after approval",
+                "best_effort": "best effort (deviations recorded)", "mock_only": "mock only",
                 "needs_split": "needs split", "procedure_pending": "procedure not yet implemented",
                 "not_on_this_bench": "not on this bench", "outside_dut_rating": "outside DUT rating",
                 "excluded_by_policy": "excluded by policy", "not_applicable": "not applicable"}
-# Badge kinds whose row can be ticked; only ``runs_here`` is ticked when the standard is selected.
-TICKABLE_BADGES = ("runs_here", "runs_after_approval")
+# Badge kinds whose row can be ticked; only ``runs_here`` is ticked when the standard is selected. ``best_effort`` is
+# amber like ``runs_after_approval`` (the page colours every tickable row that is not ``runs_here`` amber).
+TICKABLE_BADGES = ("runs_here", "runs_after_approval", "best_effort")
+# Badge kinds that need the owner's approval in the saved recipe before the plan is executable.
+APPROVAL_BADGES = ("runs_after_approval", "best_effort")
 # Fixed light load for the mock supply profiles; rated-load mode 3.4 is not reachable from the 1 A source.
 PROFILE_LOAD_A = 0.1
 DC_LOAD_GRID_A = [0.1, 0.25, 0.5]
@@ -104,7 +130,7 @@ def badge(entry: S.CatalogEntry) -> dict[str, Any]:
     if verdict.status in S.RUNNABLE_STATUSES and clause.procedure_status in ("recipe", "mock_only") and entry.recipe is not None:
         return {"kind": verdict.status, "label": BADGE_LABELS[verdict.status], "tickable": True,
                 "ticked_by_default": verdict.status == "runs_here",
-                "text": S.APPROVAL_HOW if verdict.status == "runs_after_approval" else None}
+                "text": verdict.approval_how if verdict.status in APPROVAL_BADGES else None}
     if clause.procedure_gap and verdict.status in (*S.RUNNABLE_STATUSES, "needs_instrument", "needs_split"):
         return {"kind": "procedure_pending", "label": BADGE_LABELS["procedure_pending"], "tickable": False,
                 "ticked_by_default": False, "text": clause.procedure_gap}
@@ -128,12 +154,28 @@ def levels_text(entry: S.CatalogEntry, system: str) -> str:
         return (f"code {recipe['supply_code']}: UA {recipe['UA_V']:g} V, Usmin {recipe['Usmin_V']:g} V, "
                 f"Usmax {recipe['Usmax_V']:g} V; separate cold-started DC levels")
     if number == "4.3.1.1":
-        return f"{recipe['level_V']:g} V for {recipe['duration_s'] / 60:g} min"
+        exact = "" if recipe["programmed_level_V"] == recipe["level_V"] else f" (programmed {recipe['programmed_level_V']:g} V by default)"
+        return (f"{recipe['level_V']:g} V for {recipe['duration_s'] / 60:g} min from UA {recipe['base_V']:g} V{exact}; "
+                f"instrument-timed, bound {recipe['instrument_timed_bound_s']:g} s to approve")
+    if number == "4.3.1.2":
+        return (f"{recipe['base_V']:g} V → {recipe['programmed_level_V']:g} V for {recipe['duration_s']:g} s → {recipe['base_V']:g} V, "
+                f"rest {recipe['rest_s']:g} s; edges are the supply's slew")
+    if number == "4.3.2":
+        exact = "" if recipe["programmed_level_V"] == recipe["level_V"] else f" (programmed {recipe['programmed_level_V']:g} V by default)"
+        return (f"{recipe['base_V']:g} V → {recipe['level_V']:g} V{exact} × {recipe['repeats']}; {recipe['duration_s'] * 1000:g} ms plateau "
+                f"commanded over LAN (A) or 1 s timed by the supply (B); rest {recipe['rest_s']:g} s")
     if number == "4.5":
         return (f"{recipe['start_V']:g} V → {RAMP_FLOOR_V:g} V → {recipe['start_V']:g} V at {recipe['rate_V_per_min']:g} V/min "
                 f"({recipe['step_V'] * 1000:g} mV every {recipe['step_interval_s']:g} s)")
+    if number == "4.6.1.1":
+        return (f"Usmin {recipe['from_V']:g} V → {recipe['drop_level_V']:g} V for 1 s timed by the supply (B, default) or "
+                f"{recipe['drop_duration_s'] * 1000:g} ms over LAN (A) → {recipe['from_V']:g} V")
     if number == "4.6.1.2":
-        return f"base {recipe['base_V']:g} V; interruptions of 1 s and longer only"
+        return (f"base {recipe['base_V']:g} V; output OFF 100 ms (LAN), 1 s and 2 s (supply Delayer); recoveries 100 ms, 1 s, "
+                f"5 s and 10 s; below 100 ms not offered")
+    if number in ("4.9.1", "4.9.2"):
+        return (f"base {recipe['base_V']:g} V; output OFF {recipe['interruption_s']:g} ± {recipe['interruption_tolerance_s']:g} s, "
+                f"{recipe['method']}")
     if number == "4.6.2":
         lows = recipe["low_levels_V"]
         positive = [v for v in lows if v > 0]
@@ -147,8 +189,10 @@ def clause_rows(bench: BenchProfile | dict, dut: DutProfile | dict, system: str)
 
     Keys the page renders: ``badge`` (kind), ``badge_label``, ``tickable``,
     ``ticked_by_default``, ``needs_approval``, ``approval`` (where approval is
-    recorded, for rows that need it), ``text``, ``reason``, ``conditions``,
-    ``levels`` and ``test_type`` (the saved-recipe type of a tickable row).
+    recorded, for rows that need it: the verdict's ``approval_how``), ``text``,
+    ``reason``, ``conditions``, ``levels``, ``test_type`` (the saved-recipe
+    type of a tickable row), ``deviation_summary`` (best-effort rows) and
+    ``variants`` (the recipe's variants, default first, when it offers several).
     """
     bench_model, dut_model = _models(bench, dut)
     category = next(c for c in S.catalog(bench_model, dut_model, system) if c.id == S.CATEGORY_ISO16750_2)
@@ -156,24 +200,30 @@ def clause_rows(bench: BenchProfile | dict, dut: DutProfile | dict, system: str)
     for entry in category.entries:
         kind = badge(entry)
         verdict = entry.feasibility
-        rows.append({"number": entry.clause.number, "title": entry.clause.title, "citation": entry.clause.citation,
+        number = entry.clause.number
+        rows.append({"number": number, "title": entry.clause.title, "citation": entry.clause.citation,
                      "status": verdict.status, "badge": kind["kind"], "badge_label": kind["label"],
                      "tickable": kind["tickable"], "ticked_by_default": kind["ticked_by_default"],
-                     "needs_approval": verdict.needs_approval, "approval": S.APPROVAL_HOW if verdict.needs_approval else None,
+                     "needs_approval": verdict.needs_approval, "approval": verdict.approval_how if verdict.needs_approval else None,
                      "text": kind["text"], "reason": verdict.reason,
                      "conditions": list(verdict.conditions), "levels": levels_text(entry, system),
-                     "test_type": S.RECIPE_TEST_TYPES.get(entry.clause.recipe_kind or "") if kind["tickable"] else None})
+                     "test_type": S.RECIPE_TEST_TYPES.get(entry.clause.recipe_kind or "") if kind["tickable"] else None,
+                     "deviation_summary": verdict.deviation_summary,
+                     "variants": list(S.CLAUSE_VARIANTS[number]) if kind["tickable"] and number in S.CLAUSE_VARIANTS else None})
     return rows
 
 
 def card_summary(rows: list[dict[str, Any]]) -> str:
-    """The ISO card's one-line count: runnable now, after approval, and mock only, whichever are non-zero."""
+    """The ISO card's one-line count: runnable now, after approval, best effort and mock only, whichever are non-zero."""
     now = sum(1 for row in rows if row["badge"] == "runs_here")
     after = sum(1 for row in rows if row["badge"] == "runs_after_approval")
+    best_effort = sum(1 for row in rows if row["badge"] == "best_effort")
     mock_only = sum(1 for row in rows if row["badge"] == "mock_only")
     parts = [f"{now} DC level subset{'s' if now != 1 else ''} available"]
     if after:
         parts.append(f"{after} after approval")
+    if best_effort:
+        parts.append(f"{best_effort} best effort (deviations recorded)")
     if mock_only:
         parts.append(f"{mock_only} mock only (simulated bench)")
     return ", ".join(parts)
@@ -183,10 +233,11 @@ def standard_cards(bench: BenchProfile | dict, dut: DutProfile | dict, system: s
     """The standards cards the bench page renders: only ISO 16750-2, as the clause-checklist editor.
 
     ``runnable_count`` counts clauses runnable now (``runs_here``);
-    ``after_approval_count`` and ``mock_only_count`` are separate, and
-    ``summary`` is the sentence the card prints ("1 DC level subset available, 2
-    after approval"). ``tickable_count`` is what "Add as tests" can offer.
-    A standard with no tickable clause carries its one-sentence reason.
+    ``after_approval_count``, ``best_effort_count`` and ``mock_only_count`` are
+    separate, and ``summary`` is the sentence the card prints ("1 DC level
+    subset available, 3 after approval, 6 best effort (deviations recorded)").
+    ``tickable_count`` is what "Add as tests" can offer. A standard with no
+    tickable clause carries its one-sentence reason.
 
     The other standards of ``standards.catalog`` (conducted transients, EMC,
     mechanical and climatic loads) are not cards: none can be tested on this
@@ -198,12 +249,13 @@ def standard_cards(bench: BenchProfile | dict, dut: DutProfile | dict, system: s
     tickable = sum(1 for row in rows if row["tickable"])
     now = sum(1 for row in rows if row["badge"] == "runs_here")
     after = sum(1 for row in rows if row["badge"] == "runs_after_approval")
+    best_effort = sum(1 for row in rows if row["badge"] == "best_effort")
     mock_only = sum(1 for row in rows if row["badge"] == "mock_only")
     summary = card_summary(rows)
     return [{"id": S.ISO16750_2_ID, "title": STANDARD_CARD_TITLES[S.ISO16750_2_ID],
              "subtitle": f"Section 4 supply profiles as a clause checklist: {summary}", "runnable": tickable > 0,
              "reason": None if tickable else "No clause of section 4 can run on this bench for this converter",
-             "runnable_count": now, "after_approval_count": after, "mock_only_count": mock_only,
+             "runnable_count": now, "after_approval_count": after, "best_effort_count": best_effort, "mock_only_count": mock_only,
              "tickable_count": tickable, "summary": summary, "clause_count": len(rows), "expandable": True}]
 
 
@@ -236,7 +288,38 @@ def _base(number: str, system: str, dut: DutProfile, bench: BenchProfile) -> dic
             "acquisition": {"duration_s": 5.0, "target_poll_interval_s": 0.5, "minimum_complete_cycles": 5,
                             "maximum_interchannel_skew_s": 0.5, "settings_origin": "draft_requires_driver_timing_validation"},
             "authorization": {"require_operator_arming": True, "allow_unattended": False,
-                              "protective_policy_id": bench.protective_controls.policy_id, "uvlo_approved": False}}
+                              "protective_policy_id": bench.protective_controls.policy_id, "uvlo_approved": False,
+                              "best_effort_approved": False, "accepted_deviations_sha256": None,
+                              "instrument_timed_bound_s": None, "program_clause_level_exactly": False}}
+
+
+def _output_thresholds(dut: DutProfile, floor_V: float, *, startup_interval_s: float = 5.0) -> dict[str, Any]:
+    """The supply_profile block a best-effort test carries for its output classification and expected-off scoping."""
+    on_minimum, off_maximum = _thresholds(dut)
+    minimum = dut.ratings.input_voltage_min_V
+    return {"floor_V": floor_V, "startup_interval_s": startup_interval_s, "output_on_minimum_V": on_minimum,
+            "output_off_maximum_V": off_maximum, "expected_off_below_V": minimum, "expected_on_above_V": minimum}
+
+
+def _best_effort_notes(number: str, sheets: list[DeviationSheet], params: dict[str, Any], *, below_minimum: bool,
+                       bound_s: float | None, exact: bool) -> str:
+    """The shared tail of a best-effort recipe description: statements, OVP suggestion, mock-only refusal, approvals."""
+    statements = " ".join(sheet.statement for sheet in sheets)
+    text = (f"{statements} Suggested source OVP {params['ovp_suggestion_V']:g} V (acts between -0.5 % - 0.5 V and +0.5 % + 0.5 V of "
+            f"that setting, DS5); the bench's protective policy must set dut_input_overvoltage_V above the top level and never "
+            f"treats the source OVP as protection of the converter output (brief 7.4). Observed output states come from about 1 s "
+            f"polling; states shorter than the poll interval are not visible to this bench. Synthetic plant only: a real bench "
+            f"refuses this test type as {S.REAL_HARDWARE_REFUSAL}. {S.BEST_EFFORT_APPROVAL_HOW}.")
+    if exact:
+        text += " This recipe programs the clause level exactly (authorization.program_clause_level_exactly, owner decision 6)."
+    elif params.get("level_equals_dut_maximum"):
+        text += (f" The clause level {params['level_V']:g} V equals the converter's stated maximum: this recipe programs "
+                 f"{params['programmed_level_V']:g} V (approximated); regenerate with program_clause_level_exactly for {params['level_V']:g} V.")
+    if below_minimum:
+        text += f" Levels below the DUT's stated minimum take the approved UVLO-style path (brief 7.5): {S.APPROVAL_HOW}."
+    if bound_s is not None:
+        text += " " + S.LONG_BOUND_APPROVAL_HOW.format(bound=bound_s, deadline=S.REAL_SOFTWARE_DEADLINE_S, timer=S.REAL_SOURCE_TIMER_S) + "."
+    return text
 
 
 def ramp_levels(start_V: float, floor_V: float, observation_step_V: float = RAMP_OBSERVATION_STEP_V) -> list[float]:
@@ -260,8 +343,15 @@ def staircase_levels(usmin_V: float, lows_V: list[float]) -> list[float]:
     return levels
 
 
-def build_recipe(number: str, system: str, dut: DutProfile | dict, bench: BenchProfile | dict) -> dict[str, Any]:
-    """A saved-recipe dict for a tickable ISO 16750-2 clause; validated against ``TestRecipe`` before it is returned."""
+def build_recipe(number: str, system: str, dut: DutProfile | dict, bench: BenchProfile | dict, *, variant: str | None = None,
+                 program_clause_level_exactly: bool = False) -> dict[str, Any]:
+    """A saved-recipe dict for a tickable ISO 16750-2 clause; validated against ``TestRecipe`` before it is returned.
+
+    ``variant`` restricts a multi-variant best-effort clause (``standards.CLAUSE_VARIANTS``)
+    to one realisation; by default every variant becomes one test of the recipe,
+    the clause's default first. ``program_clause_level_exactly`` programs the
+    clause level at the converter's maximum instead of the margin setting.
+    """
     bench_model, dut_model = _models(bench, dut)
     clause = S.ISO16750_2.clause(number)
     params = S.recipe_parameters(clause, system, dut_model)
@@ -270,6 +360,10 @@ def build_recipe(number: str, system: str, dut: DutProfile | dict, bench: BenchP
     ratings = dut_model.ratings
     on_minimum, off_maximum = _thresholds(dut_model)
     data = _base(number, system, dut_model, bench_model)
+    if number in S.SHEET_CLAUSES:
+        return _best_effort_recipe(number, system, dut_model, params, data, variant=variant, exact=program_clause_level_exactly)
+    if variant is not None or program_clause_level_exactly:
+        raise ValueError(f"{clause.citation} offers no variants and no exact-level setting")
     if number == "4.2":
         levels = [params["UA_V"], params["Usmin_V"], params["Usmax_V"]]
         data["tests"] = [{"id": f"iso16750-2-4-2-{system.lower()}", "type": "steady_state_load_sweep",
@@ -325,4 +419,92 @@ def build_recipe(number: str, system: str, dut: DutProfile | dict, bench: BenchP
                                f"{S.APPROVAL_HOW}.")
     else:
         raise ValueError(f"{clause.citation} has no recipe generator yet")
+    if number == "4.5":
+        data["authorization"]["instrument_timed_bound_s"] = S.INSTRUMENT_TIMED_BOUND_S["4.5"][system]
+        data["description"] += (" " + S.LONG_BOUND_APPROVAL_HOW.format(bound=S.INSTRUMENT_TIMED_BOUND_S["4.5"][system],
+                                                                       deadline=S.REAL_SOFTWARE_DEADLINE_S, timer=S.REAL_SOURCE_TIMER_S) + ".")
+    return TestRecipe.model_validate(data).model_dump()
+
+
+def _best_effort_recipe(number: str, system: str, dut: DutProfile, params: dict[str, Any], data: dict[str, Any], *,
+                        variant: str | None, exact: bool) -> dict[str, Any]:
+    """The best-effort recipes: one test per variant, each with its stimulus block and declared deviation sheet."""
+    clause = S.ISO16750_2.clause(number)
+    variants = S.CLAUSE_VARIANTS.get(number)
+    if variants is None:
+        if variant is not None:
+            raise ValueError(f"{clause.citation} offers no variants")
+        chosen = [None]
+    elif variant is None:
+        chosen = list(variants)
+    elif variant in variants:
+        chosen = [variant]
+    else:
+        raise ValueError(f"{clause.citation} has no variant {variant!r}; it offers {', '.join(variants)}")
+    if exact and clause.recipe_kind not in S.EXACT_LEVEL_RECIPE_KINDS and clause.recipe_kind != "jump_start":
+        raise ValueError(f"{clause.citation} has no clause level to program exactly")
+    stem = f"iso16750-2-{number.replace('.', '-')}-{system.lower()}"
+    minimum = dut.ratings.input_voltage_min_V
+    tests, sheets = [], []
+    below_minimum, bound_s = False, None
+    for item in chosen:
+        sheet = S.deviation_sheet(number, system, dut, variant=item, program_clause_level_exactly=exact)
+        sheets.append(sheet)
+        test_id = stem if item is None else f"{stem}-{item.lower()}"
+        policy: dict[str, Any] = {"clause": number, "variant": item, "deviation_sheet": sheet.model_dump()}
+        if clause.recipe_kind in ("overvoltage_hold", "jump_start", "transient_overvoltage"):
+            level = S.programmed_level_V(params["level_V"], dut, program_clause_level_exactly=exact)
+            targets = [params["base_V"], level]
+            hold = params["variants"][item]["duration_s"] if item is not None else params["duration_s"]
+            mechanism = params["variants"][item]["mechanism"] if item is not None else params["mechanism"]
+            policy.update(level_V=level, hold_s=hold, repeats=params["repeats"], recovery_s=params.get("rest_s"), mechanism=mechanism)
+            test_type = TRANSIENT_HOLD_TEST_TYPE
+            if clause.recipe_kind == "overvoltage_hold":
+                bound_s = params["instrument_timed_bound_s"]
+        elif clause.recipe_kind == "momentary_drop":
+            targets = [params["from_V"], params["drop_level_V"]]
+            policy.update(drop_level_V=params["drop_level_V"], drop_s=params["variants"][item]["duration_s"], repeats=params["repeats"],
+                          recovery_s=params["recovery_window_s"], mechanism=params["variants"][item]["mechanism"])
+            test_type = MOMENTARY_DROP_TEST_TYPE
+        elif clause.recipe_kind == "long_interruptions":
+            case = params["offered"][item]
+            targets = [params["base_V"]]
+            policy.update(interruption_s=case["interruption_s"], recovery_s=case["recovery_s"], repeats=params["repeats"],
+                          mechanism=case["mechanism"])
+            test_type = MICRO_INTERRUPTION_TEST_TYPE
+        else:
+            targets = [params["base_V"]]
+            policy.update(interruption_s=params["interruption_s"], recovery_s=params["recovery_window_s"], repeats=params["repeats"],
+                          mechanism=params["mechanism"])
+            test_type = LINE_INTERRUPTION_TEST_TYPE
+        # Output OFF takes the input to 0 V, below the stated minimum, exactly like a drop level below it (proposal §4.1).
+        below_minimum = below_minimum or min(targets) < minimum or test_type in (MICRO_INTERRUPTION_TEST_TYPE, LINE_INTERRUPTION_TEST_TYPE)
+        tests.append({"id": test_id, "type": test_type, "input_voltage_targets_V": targets, "output_current_targets_A": [PROFILE_LOAD_A],
+                      "best_effort": policy, "supply_profile": _output_thresholds(dut, min(targets))})
+    data["tests"] = tests
+    data["authorization"]["program_clause_level_exactly"] = exact
+    if bound_s is not None:
+        data["authorization"]["instrument_timed_bound_s"] = bound_s
+        # A one-hour hold polled every 0.5 s would exceed the simulated-run budget (planning.best_effort_mock_estimate);
+        # 2 s is the slow end of the real path's 1-2 s polling and plenty for a DC hold.
+        data["acquisition"].update(duration_s=8.0, target_poll_interval_s=2.0)
+    if number == "4.3.1.1":
+        stimulus = f"UA {params['base_V']:g} V, then the level held {params['duration_s']:g} s timed by the supply, then UA again"
+    elif number == "4.3.1.2":
+        stimulus = (f"{params['base_V']:g} V -> {tests[0]['best_effort']['level_V']:g} V held {params['duration_s']:g} s -> "
+                    f"{params['base_V']:g} V with a {params['rest_s']:g} s rest, commanded over LAN")
+    elif number == "4.3.2":
+        stimulus = (f"{params['repeats']} steps {params['base_V']:g} V -> {tests[0]['best_effort']['level_V']:g} V -> {params['base_V']:g} V "
+                    f"with a {params['rest_s']:g} s rest, one test per variant")
+    elif number == "4.6.1.1":
+        stimulus = (f"Usmin {params['from_V']:g} V -> {params['drop_level_V']:g} V -> {params['from_V']:g} V, one test per variant, "
+                    f"observed {params['recovery_window_s']:g} s after the restore")
+    elif number == "4.6.1.2":
+        stimulus = f"base {params['base_V']:g} V, the source output switched OFF and ON again, one test per offered case; {params['not_covered']}"
+    else:
+        stimulus = (f"base {params['base_V']:g} V, the source output switched OFF for {params['interruption_s']:g} s then ON, observed "
+                    f"{params['recovery_window_s']:g} s; {params['method']}; not covered: {params['not_covered']}")
+    data["description"] = (f"{clause.citation} as a best-effort procedure on the synthetic plant (owner decisions of 2026-10-01): {stimulus} "
+                           f"at a fixed {PROFILE_LOAD_A:g} A load (rated-load mode 3.4 is not reachable from the 1 A source). "
+                           + _best_effort_notes(number, sheets, params, below_minimum=below_minimum, bound_s=bound_s, exact=exact))
     return TestRecipe.model_validate(data).model_dump()

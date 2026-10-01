@@ -26,23 +26,41 @@ Verdicts
     A procedure or explicitly bounded subset is available (4.2 is a DC-level
     subset on either bench; inspect coverage and conditions).
 ``runs_after_approval``
-    The procedure exists on this bench but the generated recipe steps below
-    the DUT's stated minimum, so it plans as ``approval_blocked`` until the
-    owner approves the saved recipe under the bench's protective policy
-    (brief §7.5). Approval is recorded in the saved recipe file, not on the
-    bench page; ``APPROVAL_HOW`` says exactly where.
+    The procedure exists on this bench and every parameter of the clause is
+    met or approximated, but the generated recipe needs the owner's approval
+    before it plans as executable: it steps below the DUT's stated minimum
+    (brief §7.5), or its longest phase exceeds the real path's 660 s / 720 s
+    policy and the recipe declares its own ``instrument_timed_bound_s``
+    (owner decision 1 of 2026-10-01), or its level equals the converter's
+    stated maximum (36.0 V exactly only with ``program_clause_level_exactly``,
+    otherwise the 35.8 V margin setting, recorded as approximated; owner
+    decision 6). Approval is recorded in the saved recipe file, not on the
+    bench page; the verdict's ``approval_how`` says exactly where.
+``best_effort``
+    The bench can hold every level of the clause and command every timing,
+    but at least one specified parameter (an edge time, a pulse or
+    interruption duration, an open-circuit impedance) is realised by a
+    mechanism whose achievable value lies outside the clause's tolerance or
+    cannot be measured here (docs/standards/best-effort-proposal.md). The
+    clause record declares the substitute for every missing instrument token
+    (``Clause.best_effort``); the verdict carries the deviation sheet
+    (``deviations``, ``deviation_summary``). Tickable, never pre-ticked,
+    approval-gated like the UVLO ramp (``BEST_EFFORT_APPROVAL_HOW``); on a
+    real profile it reads ``mock_only`` until a real procedure exists.
 ``mock_only``
     The procedure exists on the synthetic plant only and the profile is a
     real bench: planning refuses the test type as not yet approved for real
-    hardware (``planning.REAL_HARDWARE_NOT_APPROVED``). 4.5 and 4.6.2 today.
+    hardware (``planning.REAL_HARDWARE_NOT_APPROVED``). 4.3.1.1, 4.5, 4.6.2
+    and every best-effort clause today.
 ``needs_split``
-    The recipe fits the bench's capability but its longest single stretch
-    (a hold, a ramp direction, a staircase) exceeds the real path's run
-    envelope: one 660 s software deadline per run and a verified 720 s
-    one-shot source timer per input-voltage phase (``extended.py``,
-    ``real_backend.prepare_real_plan``, docs/configured-runs.md). The
-    synthetic plant runs on a virtual clock and has no such bound, so the
-    same clause is a condition, not a refusal, on a mock profile.
+    Retained for a recipe whose longest single stretch exceeds the real
+    path's run envelope (one 660 s software deadline per run and a verified
+    720 s one-shot source timer per input-voltage phase: ``extended.py``,
+    ``real_backend.prepare_real_plan``, docs/configured-runs.md) and that
+    cannot declare its own bound. Since owner decision 1 every ISO 16750-2
+    recipe may declare ``authorization.instrument_timed_bound_s``, so the
+    long clauses (4.3.1.1, 4.5) carry that as an approval condition instead
+    and no clause of this catalog produces ``needs_split`` any more.
 ``needs_instrument`` / ``not_on_this_bench`` / ``excluded_by_policy`` /
 ``outside_dut_rating`` / ``not_applicable``
     As their names say; each carries the missing tokens or the rating.
@@ -111,10 +129,23 @@ Policy exclusions (implementation brief §2 and §7.5)
 Reverse voltage, short circuit, overload and load dump are fault-injection
 tests that this release excludes even if an instrument existed. Steps below
 the DUT's stated minimum input are allowed only through the approved
-UVLO-style recipe path; a level equal to the DUT maximum is refused because
-the endpoint method is not approved (the project programs 35.8 V for a
-nominal 36 V). Ordinary supply/load polling is never labelled as a ripple,
-transient, inrush or load-step measurement.
+UVLO-style recipe path. A level equal to the DUT maximum is refused for the
+generic DC recipes because the endpoint method is not approved (the project
+programs 35.8 V for a nominal 36 V); for the overvoltage holds (4.3.1.1,
+4.3.2) the owner approves the endpoint per recipe (decision 6 of 2026-10-01):
+the default recipe programs the margin setting and records it as
+approximated, ``program_clause_level_exactly`` programs the clause value.
+Ordinary supply/load polling is never labelled as a ripple, transient,
+inrush or load-step measurement.
+
+Best-effort deviation sheets (docs/standards/best-effort-proposal.md §2.2)
+----------------------------------------------------------------------------
+``deviation_sheet(number, system, dut, variant=..., program_clause_level_exactly=...)``
+builds one ``DeviationSheet`` per best-effort clause and variant from
+``recipe_parameters()`` and the tagged bounds below (``DS5`` DP800 datasheet
+p. 5, ``LAN`` measured round trips, ``PG`` programming guide, clause 4.1
+general tolerances). The classification is ``domain.classify_deviation``;
+nothing here overrides it.
 """
 from __future__ import annotations
 
@@ -122,7 +153,9 @@ from typing import Any, Literal
 
 from pydantic import Field
 
-from .domain import RESET_STAIRCASE_TEST_TYPE, SLOW_SUPPLY_RAMP_TEST_TYPE, BenchProfile, Contract, DutProfile
+from .domain import (LINE_INTERRUPTION_TEST_TYPE, MICRO_INTERRUPTION_TEST_TYPE, MOMENTARY_DROP_TEST_TYPE,
+                     RESET_STAIRCASE_TEST_TYPE, SLOW_SUPPLY_RAMP_TEST_TYPE, TRANSIENT_HOLD_TEST_TYPE, BenchProfile, Contract,
+                     DeviationAchievable, DeviationEntry, DeviationRequired, DeviationSheet, DutProfile, classify_deviation)
 
 System = Literal["12V", "24V"]
 SYSTEMS: tuple[str, ...] = ("12V", "24V")
@@ -199,7 +232,39 @@ FUNCTIONAL_STATUS_CLASSES: dict[str, str] = {
 # The endpoint margin the project already uses: a nominal 36 V is programmed at 35.8 V.
 ENDPOINT_MARGIN_V = 0.2
 ENDPOINT_REASON = "equals the DUT ceiling; endpoint method not approved"
+# Owner decision 6 (2026-10-01): for the overvoltage holds the endpoint is the owner's call per recipe.
+EXACT_LEVEL_RECIPE_KINDS: frozenset[str] = frozenset({"overvoltage_hold", "transient_overvoltage"})
+EXACT_LEVEL_NOTE = ("equals the converter's stated maximum; programmed exactly only with program_clause_level_exactly, "
+                    f"otherwise {{margin:g}} V (approximated)")
 POLICY_CITATION = "implementation brief §2 and §7.5"
+
+# --- Tagged bounds of the deviation sheets (docs/standards/best-effort-proposal.md, basis tags) -----------------
+BASIS_ISO = "ISO 16750-2:2023"
+BASIS_ISO_GENERAL = "ISO 16750-2:2023 clause 4.1 general tolerance"
+BASIS_ISO_FIGURE = "ISO 16750-2:2023 figure value, confirmed by the owner 2026-10-01"
+BASIS_DS5 = "DS5: DP800 datasheet p. 5"
+BASIS_LAN = "LAN: measured round trips of the project's own queries (M2 evidence Table A4)"
+BASIS_PG = "PG: DP800 programming guide, Timer/Delayer group times in whole seconds"
+BASIS_UNV = "UNV: not stated in any document read"
+BASIS_HOST = "host clock: the bench computer counts and timestamps its own commands"
+# DP821A CH1 voltage programming control speed (1 % settle): rise < 110 ms loaded / < 30 ms unloaded,
+# fall < 110 ms loaded / < 800 ms unloaded; command processing < 118 ms; programming accuracy 0.1 % + 25 mV.
+DS5_RISE_S = (0.030, 0.110)
+DS5_FALL_S = (0.110, 0.800)
+DS5_COMMAND_PROCESSING_S = 0.118
+DS5_PROGRAMMING_FRACTION, DS5_PROGRAMMING_OFFSET_V = 0.001, 0.025
+# Measured LAN round trips: 4.1 ms min, 55 ms max.
+LAN_ROUND_TRIP_S = (0.004, 0.055)
+# Worst-case skew of an interval between two LAN commands: one transport maximum plus one processing maximum.
+LAN_INTERVAL_SKEW_S = round(LAN_ROUND_TRIP_S[1] + DS5_COMMAND_PROCESSING_S, 3)
+GENERAL_TIME_TOLERANCE = 0.05       # clause 4.1: frequency and time +/- 5 %
+GENERAL_VOLTAGE_TOLERANCE_V = 0.2   # clause 4.1: voltage +/- 0.2 V
+# Instrument-timed bounds the long recipes declare (owner decision 1): the hold or ramp direction plus margin.
+INSTRUMENT_TIMED_BOUND_S = {"4.3.1.1": 3700.0, "4.5": {"12V": 1800.0, "24V": 3400.0}}
+# Bench observation windows the best-effort recipes declare (bench choices, not clause parameters).
+DROP_RECOVERY_WINDOW_S = 5.0
+INTERRUPTION_RECOVERY_WINDOW_S = 10.0
+OVP_SUGGESTION_MARGIN_V, OVP_SUGGESTION_FLOOR_V = 2.0, 14.0
 
 # The real path's run envelope (docs/configured-runs.md): the real workers stop at one software deadline per run
 # (extended.SOFTWARE_DEADLINE_S) and every input-voltage phase carries a verified one-shot source timer
@@ -215,9 +280,40 @@ APPROVAL_HOW = ("Approval happens in the saved recipe, not on the bench page: se
                 "authorization.protective_policy_id to the bench profile's protective_controls.policy_id, and declare "
                 "source_current_limit_A, dut_output_overvoltage_V and output_overcurrent_A in that bench profile; the "
                 "recipe is written unapproved and every level below the DUT minimum plans as approval_blocked until then")
+# Where a best-effort recipe's approval is recorded (planning.best_effort_approval_gaps checks every item; owner decision 4).
+BEST_EFFORT_APPROVAL_HOW = ("Approval happens in the saved recipe, not on the bench page: set authorization.best_effort_approved "
+                            "to true, authorization.accepted_deviations_sha256 to the hash of the recipe's deviation sheet "
+                            "(planning.recipe_deviations_sha256; a change to the sheet invalidates it) and "
+                            "authorization.protective_policy_id to the bench profile's protective_controls.policy_id, and declare "
+                            "source_current_limit_A, dut_input_overvoltage_V, dut_output_overvoltage_V and output_overcurrent_A in "
+                            "that bench profile; the recipe is written unapproved and plans as approval_blocked until then, and "
+                            "wherever the input goes below the DUT minimum (a drop level, output OFF) authorization.uvlo_approved "
+                            "is needed as well")
+# Where the approval of a recipe longer than the real path's policy is recorded (owner decision 1; planning checks the bound).
+LONG_BOUND_APPROVAL_HOW = ("The recipe declares its own per-phase bound in authorization.instrument_timed_bound_s ({bound:g} s "
+                           "for this recipe, above the real path's {deadline:g} s software deadline and {timer:g} s source timer) and "
+                           "the operator approves that recipe; the planner refuses a phase longer than the declared bound and "
+                           "plans the recipe as approval_blocked until it is approved")
 # Recipe kind of a clause -> the saved-recipe test type its generated recipe uses.
 RECIPE_TEST_TYPES: dict[str, str] = {"steady_min_max": "steady_state_load_sweep", "slow_ramp": SLOW_SUPPLY_RAMP_TEST_TYPE,
-                                     "reset_staircase": RESET_STAIRCASE_TEST_TYPE}
+                                     "reset_staircase": RESET_STAIRCASE_TEST_TYPE, "overvoltage_hold": TRANSIENT_HOLD_TEST_TYPE,
+                                     "jump_start": TRANSIENT_HOLD_TEST_TYPE, "transient_overvoltage": TRANSIENT_HOLD_TEST_TYPE,
+                                     "momentary_drop": MOMENTARY_DROP_TEST_TYPE, "long_interruptions": MICRO_INTERRUPTION_TEST_TYPE,
+                                     "line_interruption": LINE_INTERRUPTION_TEST_TYPE}
+# Default variant of the clauses whose recipe offers more than one (owner decisions 7 and 8).
+DEFAULT_VARIANTS: dict[str, str | None] = {"4.6.1.1": "B", "4.3.2": "A", "4.6.1.2": "case1-1s", "4.9.1": "method-1-positive-line"}
+# Every variant a clause's recipe generates, in recipe order.
+CLAUSE_VARIANTS: dict[str, list[str]] = {"4.6.1.1": ["B", "A"], "4.3.2": ["A", "B"],
+                                         "4.6.1.2": ["case1-100ms", "case1-1s", "case1-2s", "case2-100ms", "case2-1s", "case2-10s"],
+                                         "4.9.1": ["method-1-positive-line"]}
+# Substitutes a clause may declare for a missing instrument token (proposal §2.1 step 2). Tokens absent here have no
+# honest substitute and keep their clause at needs_instrument.
+SUBSTITUTE_MECHANISMS: dict[str, str] = {
+    EDGE_10MS: "the supply's own slew (DS5 1 % settle bounds), not a defined edge",
+    PULSE_MS: "a LAN-commanded voltage step or output OFF/ON, host-timestamped; whole seconds by the supply's Timer or Delayer",
+    LINE_SWITCH: "source output OFF/ON (the OFF-state impedance is not stated)",
+    PULSE_US: "not substituted: the sub-100 ms cases are not offered (coverage partial)",
+}
 
 ISO16750_2_ID = "ISO 16750-2:2023"
 ISO7637_2_ID = "ISO 7637-2:2011"
@@ -234,10 +330,10 @@ CATEGORY_ISO7637_2 = "iso7637_2_transients"
 CATEGORY_EMC = "emc"
 CATEGORY_ENVIRONMENTAL = "environmental"
 
-FeasibilityStatus = Literal["runs_here", "runs_after_approval", "mock_only", "needs_split", "needs_instrument",
+FeasibilityStatus = Literal["runs_here", "runs_after_approval", "best_effort", "mock_only", "needs_split", "needs_instrument",
                             "not_on_this_bench", "excluded_by_policy", "outside_dut_rating", "not_applicable"]
 # Statuses whose clause can be ticked on the bench page (its recipe is generated and planned on this bench).
-RUNNABLE_STATUSES: frozenset[str] = frozenset({"runs_here", "runs_after_approval"})
+RUNNABLE_STATUSES: frozenset[str] = frozenset({"runs_here", "runs_after_approval", "best_effort"})
 Coverage = Literal["full", "room_temperature_only", "partial", "none"]
 
 
@@ -275,6 +371,10 @@ class Clause(Contract):
     # For a clause the bench could run but has no procedure for yet: the concrete
     # requirement a procedure would have to meet (shown on the checklist row).
     procedure_gap: str | None = None
+    # Best-effort declaration (proposal §2.1 step 2): for each instrument token the bench lacks, the mechanism this
+    # bench substitutes. Every missing token must be declared or the verdict stays needs_instrument; a token whose
+    # declaration begins with "not substituted" marks the part of the clause that is not offered (coverage partial).
+    best_effort: dict[str, str] = Field(default_factory=dict)
     notes: list[str] = Field(default_factory=list)
 
     @property
@@ -319,10 +419,16 @@ class Feasibility(Contract):
     missing: list[str] = Field(default_factory=list)
     conditions: list[str] = Field(default_factory=list)
     coverage: Coverage = "none"
-    # The generated recipe steps below the DUT's stated minimum: brief §7.5 approval before it plans as executable.
+    # The generated recipe needs the owner's approval before it plans as executable: it steps below the DUT's stated
+    # minimum (brief §7.5), carries a best-effort deviation sheet, declares a per-phase bound above the real path's
+    # policy, or programs a level equal to the converter's maximum. ``approval_how`` says where that is recorded.
     needs_approval: bool = False
+    approval_how: str | None = None
     # Longest single stretch (hold, ramp direction or staircase) the recipe needs; compared with the real path's deadline.
     longest_phase_s: float | None = None
+    # Best-effort clauses: the declared deviation sheet of the default variant and its one-line summary.
+    deviations: list[DeviationEntry] = Field(default_factory=list)
+    deviation_summary: str | None = None
 
 
 class CatalogEntry(Contract):
@@ -402,18 +508,39 @@ def _staircase_levels(usmin: float) -> list[float]:
     return levels + [0.0]
 
 
+def programmed_level_V(clause_level_V: float, dut: DutProfile, *, program_clause_level_exactly: bool = False) -> float:
+    """The level a recipe programs for a clause level: the clause value, or the project's margin setting at the DUT maximum.
+
+    A clause level equal to the converter's stated maximum is programmed at
+    ``ENDPOINT_MARGIN_V`` below it (35.8 V for 36 V) unless the recipe declares
+    ``program_clause_level_exactly`` (owner decision 6). Levels above the
+    maximum are never programmed; callers refuse them first.
+    """
+    if clause_level_V >= dut.ratings.input_voltage_max_V and not program_clause_level_exactly:
+        return round(dut.ratings.input_voltage_max_V - ENDPOINT_MARGIN_V, 4)
+    return clause_level_V
+
+
+def ovp_suggestion_V(top_level_V: float) -> float:
+    """The source OVP a best-effort recipe suggests: just above its top level (proposal §4.1), at least 14 V."""
+    return max(round(top_level_V + OVP_SUGGESTION_MARGIN_V, 2), OVP_SUGGESTION_FLOOR_V)
+
+
 def recipe_parameters(clause: Clause, system: str, dut: DutProfile) -> dict[str, Any] | None:
     """Concrete levels, holds and ramp rates a recipe would need; None when nothing runs here.
 
     Computed from the standard's parameters and the DUT ratings only. Levels
-    that are not below the DUT's maximum give None: no recipe is derived for a
-    level the project refuses.
+    above the DUT's maximum give None: no recipe is derived for a level the
+    project refuses. A level equal to the maximum is kept for the overvoltage
+    holds (``EXACT_LEVEL_RECIPE_KINDS``) with ``programmed_level_V`` the margin
+    setting and ``exact_level_V`` the clause value (owner decision 6).
     """
     _check_system(system)
     if clause.recipe_kind is None or system not in clause.systems:
         return None
     ratings = dut.ratings
     dut_min, dut_max = ratings.input_voltage_min_V, ratings.input_voltage_max_V
+    params = clause.parameters.get(system, {})
 
     if clause.recipe_kind == "steady_min_max":
         code, usmin, usmax, notes = select_supply_code(system, dut)
@@ -435,14 +562,102 @@ def recipe_parameters(clause: Clause, system: str, dut: DutProfile) -> dict[str,
 
     if clause.recipe_kind == "overvoltage_hold":
         level = clause.peak_voltage_V[system]
-        if level >= dut_max:
+        if level > dut_max:
             return None
+        programmed = programmed_level_V(level, dut)
         return {
-            "clause": clause.citation, "system": system, "recipe_kind": clause.recipe_kind, "level_V": level, "duration_s": 3600.0,
+            "clause": clause.citation, "system": system, "recipe_kind": clause.recipe_kind, "level_V": level,
+            "programmed_level_V": programmed, "exact_level_V": level, "level_equals_dut_maximum": level == dut_max,
+            "base_V": UA_V[system], "duration_s": float(params["duration_s"]), "duration_tolerance_s": round(params["duration_s"] * GENERAL_TIME_TOLERANCE, 3),
+            "repeats": 1, "mechanism": "supply_timer", "instrument_timed_bound_s": INSTRUMENT_TIMED_BOUND_S["4.3.1.1"],
+            "ovp_suggestion_V": ovp_suggestion_V(programmed),
             "operating_mode": "3.4 (bounded by the 1 A source)", "functional_status": "C minimum",
             "temperature": "(Tmax - 20) K conditioning is not provided; the hold runs at room temperature and the "
                            "report records that deviation",
-            "notes": ["a reviewed protective policy must set the DUT input overvoltage guard above the level"],
+            "notes": ["a reviewed protective policy must set the DUT input overvoltage guard above the level",
+                      "the base level UA before and after the hold is the project's choice of operating point; the clause "
+                      "specifies the level and the duration only"]
+                     + ([EXACT_LEVEL_NOTE.format(margin=programmed)] if level == dut_max else []),
+        }
+
+    if clause.recipe_kind == "jump_start":
+        level = clause.peak_voltage_V[system]
+        if level > dut_max:
+            return None
+        programmed = programmed_level_V(level, dut)
+        return {
+            "clause": clause.citation, "system": system, "recipe_kind": clause.recipe_kind, "level_V": level,
+            "programmed_level_V": programmed, "exact_level_V": level, "level_equals_dut_maximum": level == dut_max,
+            "base_V": float(params["Usmin_V"]), "duration_s": float(params["ttrans_s"]), "duration_tolerance_s": float(params["ttrans_tolerance_s"]),
+            "rest_s": float(params["trest_s"]), "rest_tolerance_s": round(params["trest_s"] * GENERAL_TIME_TOLERANCE, 3),
+            "edge_max_s": float(params["trise_max_s"]), "repeats": int(params["n"]), "mechanism": "lan_voltage_step",
+            "ovp_suggestion_V": ovp_suggestion_V(programmed),
+            "operating_mode": "2.2 or 2.3 approximated as the converter enabled with the load input OFF or a light load",
+            "functional_status": "C minimum",
+            "temperature": "Tmin conditioning is not provided; the hold runs at room temperature and the report records that deviation",
+            "notes": ["the level needs a reviewed protective policy whose DUT input overvoltage guard lies above it"],
+        }
+
+    if clause.recipe_kind == "transient_overvoltage":
+        level = clause.peak_voltage_V[system]
+        if level > dut_max:
+            return None
+        _code, _usmin, usmax, _notes = select_supply_code(system, dut)
+        programmed = programmed_level_V(level, dut)
+        return {
+            "clause": clause.citation, "system": system, "recipe_kind": clause.recipe_kind, "level_V": level,
+            "programmed_level_V": programmed, "exact_level_V": level, "level_equals_dut_maximum": level == dut_max,
+            "base_V": usmax, "duration_s": float(params["ttrans_s"]), "duration_tolerance_s": round(params["ttrans_s"] * GENERAL_TIME_TOLERANCE, 3),
+            "rest_s": float(params["trest_s"]), "rest_tolerance_s": round(params["trest_s"] * GENERAL_TIME_TOLERANCE, 3),
+            "edge_max_s": float(params["trise_s"]), "repeats": int(params["n"]),
+            "variants": {"A": {"duration_s": float(params["ttrans_s"]), "mechanism": "lan_voltage_step",
+                               "label": "clause-timed 400 ms plateau commanded over LAN"},
+                         "B": {"duration_s": 1.0, "mechanism": "supply_timer", "label": "longer 1 s plateau timed by the supply"}},
+            "ovp_suggestion_V": ovp_suggestion_V(programmed),
+            "operating_mode": "3.4 (bounded by the 1 A source)", "functional_status": "B minimum",
+            "notes": ["owner decision 7 (2026-10-01): hold the level as fast as the supply allows, 400 ms or longer, five times"]
+                     + ([EXACT_LEVEL_NOTE.format(margin=programmed)] if level == dut_max else []),
+        }
+
+    if clause.recipe_kind == "momentary_drop":
+        _code, usmin, _usmax, notes = select_supply_code(system, dut)
+        if usmin > dut_max:
+            return None
+        drop = float(params["drop_level_V"])
+        return {
+            "clause": clause.citation, "system": system, "recipe_kind": clause.recipe_kind, "from_V": usmin, "drop_level_V": drop,
+            "drop_duration_s": float(params["drop_duration_s"]),
+            "drop_duration_tolerance_s": round(params["drop_duration_s"] * GENERAL_TIME_TOLERANCE, 4),
+            "edge_max_s": float(params["edge_max_s"]), "repeats": 1, "recovery_window_s": DROP_RECOVERY_WINDOW_S,
+            "variants": {"A": {"duration_s": float(params["drop_duration_s"]), "mechanism": "lan_voltage_step",
+                               "label": "clause-timed 100 ms drop commanded over LAN"},
+                         "B": {"duration_s": 1.0, "mechanism": "supply_timer", "label": "supply-timed 1 s drop (default)"}},
+            "ovp_suggestion_V": ovp_suggestion_V(usmin),
+            "operating_mode": "3.4 (bounded by the 1 A source)", "functional_status": "B minimum",
+            "below_dut_minimum": drop < dut_min,
+            "approval": "a drop level below the DUT minimum needs the approved UVLO-style recipe (brief §7.5)",
+            "notes": notes + ["drop level and duration are figure values confirmed by the owner (2026-10-01)"],
+        }
+
+    if clause.recipe_kind == "line_interruption":
+        base = UB_V[system]
+        if base > dut_max:
+            return None
+        method = params.get("method_1", params)
+        return {
+            "clause": clause.citation, "system": system, "recipe_kind": clause.recipe_kind, "base_V": base,
+            "interruption_s": float(method["interruption_s"]), "interruption_tolerance_s": float(method["tolerance_s"]),
+            "open_resistance_ohm": float(method["open_resistance_ohm"]),
+            "transition_max_s": float(method["transition_max_s"]) if "transition_max_s" in method else None,
+            "repeats": 1, "recovery_window_s": INTERRUPTION_RECOVERY_WINDOW_S, "mechanism": "lan_output_off",
+            "method": "method 1 on the positive line only" if clause.number == "4.9.1" else "the whole connector, realised as the positive line",
+            "not_covered": ("method 2 (100 us bursts) and the return line" if clause.number == "4.9.1"
+                            else "a two-wire input has only the positive line to interrupt"),
+            "ovp_suggestion_V": ovp_suggestion_V(base),
+            "operating_mode": ("3.4 (bounded by the 1 A source); outputs active / inactive as load ON / OFF variants"
+                               if clause.number == "4.9.1" else "2.1 approximated as the converter enabled with the load input OFF; 3.4 bounded"),
+            "functional_status": "C minimum",
+            "approval": "output OFF takes the input to 0 V, below the DUT minimum: the approved UVLO-style recipe path applies (brief §7.5)",
         }
 
     if clause.recipe_kind == "slow_ramp":
@@ -486,11 +701,23 @@ def recipe_parameters(clause: Clause, system: str, dut: DutProfile) -> dict[str,
             "test_case_1": {"interruption_s": [round(1.0 + 0.1 * k, 1) for k in range(11)],
                             "recovery_s": "at least 5 s and until the DUT is fully serviceable"},
             "test_case_2": {"interruption_s": 1.0, "recovery_s": [float(k) for k in range(1, 11)]},
-            "not_covered": "interruptions from 10 us to below 1 s and recoveries from 100 us to below 1 s",
-            "method_deviation": "the source output is switched OFF/ON by LAN command instead of a series switch "
-                                "opening to 10 MOhm within 10 us; the output-off edge is not characterised",
+            # What the best-effort recipe offers (proposal §3, owner decision 7): the clause's own decade steps from
+            # 100 ms up. 100 ms over LAN (commanded, not measured); 1 s and 2 s, and the 1 s and 10 s recoveries, timed
+            # by the supply's Delayer in whole seconds.
+            "offered": {"case1-100ms": {"interruption_s": 0.1, "recovery_s": 5.0, "mechanism": "lan_output_off"},
+                        "case1-1s": {"interruption_s": 1.0, "recovery_s": 5.0, "mechanism": "supply_delayer"},
+                        "case1-2s": {"interruption_s": 2.0, "recovery_s": 5.0, "mechanism": "supply_delayer"},
+                        "case2-100ms": {"interruption_s": 1.0, "recovery_s": 0.1, "mechanism": "lan_output_off"},
+                        "case2-1s": {"interruption_s": 1.0, "recovery_s": 1.0, "mechanism": "supply_delayer"},
+                        "case2-10s": {"interruption_s": 1.0, "recovery_s": 10.0, "mechanism": "supply_delayer"}},
+            "recovery_minimum_s": 5.0, "repeats": 1, "open_resistance_ohm": 1e7, "switch_reaction_max_s": 1e-5,
+            "not_covered": "interruptions from 10 us to 10 ms and recoveries from 100 us to 10 ms (not offered)",
+            "method_deviation": "the source output is switched OFF/ON by LAN command or by the supply's Delayer instead of a "
+                                "series switch opening to 10 MOhm within 10 us; the output-off edge is not characterised",
+            "ovp_suggestion_V": ovp_suggestion_V(base),
             "operating_mode": "3.4 (bounded by the 1 A source)",
             "functional_status": "C minimum for interruptions longer than 100 us",
+            "approval": "output OFF takes the input to 0 V, below the DUT minimum: the approved UVLO-style recipe path applies (brief §7.5)",
         }
     return None
 
@@ -515,7 +742,249 @@ def longest_phase_s(params: dict[str, Any] | None) -> tuple[float, str] | None:
         return round(len(lows) * params["low_hold_s"] + (len(lows) + 1) * params["recovery_hold_s"], 1), "staircase of declared holds"
     if kind == "steady_min_max":
         return float(params["t2_s"]), "hold at one level"
+    if kind in ("jump_start", "transient_overvoltage"):
+        return max(float(params["duration_s"]), float(params["rest_s"])), "hold or rest"
+    if kind == "momentary_drop":
+        return float(params["recovery_window_s"]), "recovery observation after the drop"
+    if kind == "long_interruptions":
+        return max(max(case["interruption_s"], case["recovery_s"]) for case in params["offered"].values()), "interruption or recovery"
+    if kind == "line_interruption":
+        return max(float(params["interruption_s"]), float(params["recovery_window_s"])), "interruption or recovery"
     return None
+
+
+# ---------------------------------------------------------------------------
+# Deviation sheets (docs/standards/best-effort-proposal.md §2.2)
+# ---------------------------------------------------------------------------
+
+CLASSIFICATION_WORDS = {"met": "met", "approximated": "approximated", "not_met_but_documented": "not met (documented)",
+                        "unknown_until_measured": "not measured (commanded)"}
+# Clauses whose recipe carries a deviation sheet (every best-effort test type).
+SHEET_CLAUSES: tuple[str, ...] = ("4.3.1.1", "4.3.1.2", "4.3.2", "4.6.1.1", "4.6.1.2", "4.9.1", "4.9.2")
+
+
+def _programming_bound(level_V: float) -> list[float]:
+    accuracy = DS5_PROGRAMMING_FRACTION * level_V + DS5_PROGRAMMING_OFFSET_V
+    return [round(level_V - accuracy, 4), round(level_V + accuracy, 4)]
+
+
+def _timed_bound(seconds: float, mechanism: str) -> tuple[list[float], str]:
+    """The interval a commanded duration is bounded to, with its basis: whole seconds by the instrument, +/- skew over LAN."""
+    if mechanism in ("supply_timer", "supply_delayer"):
+        return [seconds, seconds], f"{BASIS_PG}; executed by the instrument clock (clock accuracy not stated)"
+    skew = LAN_INTERVAL_SKEW_S
+    return ([round(max(0.0, seconds - skew), 3), round(seconds + skew, 3)],
+            f"{BASIS_LAN} 4-55 ms and {BASIS_DS5} command processing < 118 ms: +/- {skew * 1000:g} ms on an interval between two commands")
+
+
+def _entry(parameter: str, unit: str | None, required: DeviationRequired, achievable: DeviationAchievable, mechanism: str,
+           measured_by: str, note: str | None = None) -> DeviationEntry:
+    return DeviationEntry(parameter=parameter, unit=unit, required=required, achievable=achievable, mechanism=mechanism,
+                          measured_by=measured_by, classification=classify_deviation(required, achievable), note=note)
+
+
+def _level_entry(parameter: str, clause_V: float, programmed_V: float, mechanism: str, measured_by: str, *,
+                 basis: str = BASIS_ISO, note: str | None = None) -> DeviationEntry:
+    substitute = programmed_V != clause_V
+    required = DeviationRequired(value=clause_V, tolerance=GENERAL_VOLTAGE_TOLERANCE_V, basis=f"{basis}; {BASIS_ISO_GENERAL} +/- 0.2 V")
+    achievable = DeviationAchievable(value=programmed_V, bound=_programming_bound(programmed_V),
+                                     basis=f"{BASIS_DS5}: programming accuracy 0.1 % + 25 mV", substitute=substitute)
+    if substitute:
+        note = (f"programmed at the project's {programmed_V:g} V margin setting below the converter's stated maximum; "
+                "program_clause_level_exactly programs the clause value (owner decision 6)" + (f"; {note}" if note else ""))
+    return _entry(parameter, "V", required, achievable, mechanism, measured_by, note)
+
+
+def _time_entry(parameter: str, clause_s: float, tolerance_s: float | None, commanded_s: float, mechanism: str, *,
+                kind: str = "nominal", basis: str = BASIS_ISO, note: str | None = None) -> DeviationEntry:
+    required = DeviationRequired(value=clause_s, tolerance=tolerance_s, kind=kind, basis=basis)
+    bound, bound_basis = _timed_bound(commanded_s, mechanism)
+    achievable = DeviationAchievable(value=commanded_s, bound=bound, basis=bound_basis, substitute=commanded_s != clause_s and kind == "nominal")
+    measured_by = "host_clock" if mechanism.startswith("lan_") else "none"
+    if measured_by == "none":
+        note = "timed by the instrument; the host observes the program state at its ~1 s polls" + (f"; {note}" if note else "")
+    else:
+        note = "host-side command interval only; the interval at the converter terminals is not measured" + (f"; {note}" if note else "")
+    return _entry(parameter, "s", required, achievable, mechanism, measured_by, note)
+
+
+def _edge_entry(parameter: str, clause_max_s: float, direction: str, mechanism: str) -> DeviationEntry:
+    figures = DS5_RISE_S if direction == "rise" else DS5_FALL_S
+    words = "rise < 110 ms loaded / < 30 ms unloaded" if direction == "rise" else "fall < 110 ms loaded / < 800 ms unloaded"
+    required = DeviationRequired(value=clause_max_s, kind="maximum", basis=BASIS_ISO)
+    achievable = DeviationAchievable(value=None, bound=list(figures),
+                                     basis=f"{BASIS_DS5}: voltage programming control speed (1 % settle), {words}")
+    return _entry(parameter, "s", required, achievable, mechanism, "none",
+                  "the supply's own slew, not a defined edge; the datasheet 1 % settle figures are treated as the edge figure "
+                  "and are not measured on this unit")
+
+
+def _count_entry(n: int, mechanism: str) -> DeviationEntry:
+    required = DeviationRequired(value=float(n), tolerance=0.0, basis=BASIS_ISO)
+    achievable = DeviationAchievable(value=float(n), bound=[float(n), float(n)], basis=BASIS_HOST)
+    return _entry("repetitions", None, required, achievable, mechanism, "host_clock")
+
+
+def _open_circuit_entry(minimum_ohm: float, mechanism: str) -> DeviationEntry:
+    required = DeviationRequired(value=minimum_ohm, kind="minimum", basis=BASIS_ISO)
+    achievable = DeviationAchievable(value=None, bound=None, basis=f"{BASIS_UNV}: OFF-state impedance of the DP821A output", substitute=True)
+    return _entry("open_resistance_ohm", "ohm", required, achievable, mechanism, "none",
+                  "source output OFF stops sourcing; it is not a demonstrated >= 10 MOhm open, and the converter's input "
+                  "capacitance discharges into its own draw and whatever the OFF output presents")
+
+
+def _transition_entry(clause_max_s: float, mechanism: str) -> DeviationEntry:
+    required = DeviationRequired(value=clause_max_s, kind="maximum", basis=BASIS_ISO)
+    achievable = DeviationAchievable(value=None, bound=None, basis=f"{BASIS_DS5}: the OFF command acts within < 118 ms; fall shape after OFF {BASIS_UNV}")
+    return _entry("transition_s", "s", required, achievable, mechanism, "none",
+                  "the DS5 speed figures bound setpoint changes, not an OFF command; no bound exists for the open transition")
+
+
+def _switch_reaction_entry(clause_max_s: float, mechanism: str) -> DeviationEntry:
+    required = DeviationRequired(value=clause_max_s, kind="maximum", basis=BASIS_ISO)
+    achievable = DeviationAchievable(value=None, bound=[LAN_ROUND_TRIP_S[0], LAN_INTERVAL_SKEW_S],
+                                     basis=f"{BASIS_LAN} 4-55 ms plus {BASIS_DS5} command processing < 118 ms")
+    return _entry("switch_reaction_s", "s", required, achievable, mechanism, "none",
+                  "a LAN command reaches the output after one round trip and its processing time; no series switch exists")
+
+
+def _statement(number: str, asks: str, did: str, entries: list[DeviationEntry]) -> str:
+    counts = {"met": 0, "approximated": 0, "not_met_but_documented": 0, "unknown_until_measured": 0}
+    for entry in entries:
+        counts[entry.classification] += 1
+    met = counts["met"]
+    return (f"ISO 16750-2 clause {number} asks for {asks}; this bench produced {did} "
+            f"({met} parameter{'s' if met != 1 else ''} met, {counts['approximated']} approximated, "
+            f"{counts['not_met_but_documented']} not met, {counts['unknown_until_measured']} not measured; see the deviation sheet).")
+
+
+def deviation_sheet(number: str, system: str, dut: DutProfile, *, variant: str | None = None,
+                    program_clause_level_exactly: bool = False) -> DeviationSheet:
+    """The declared deviation sheet of a best-effort clause for this system and converter.
+
+    One entry per parameter the clause records (level, hold or pulse duration,
+    edges, rest or recovery, repetitions, open-circuit impedance, transition or
+    switch reaction), built from ``recipe_parameters()`` and the tagged bounds;
+    ``variant`` selects the realisation where the recipe offers more than one
+    (``CLAUSE_VARIANTS``; None means the clause's default).
+    """
+    clause = ISO16750_2.clause(number)
+    params = recipe_parameters(clause, system, dut)
+    if params is None or number not in SHEET_CLAUSES:
+        raise ValueError(f"{clause.citation} has no deviation sheet for a {system} system and this converter")
+    variants = CLAUSE_VARIANTS.get(number)
+    if variant is None:
+        variant = DEFAULT_VARIANTS.get(number)
+    if (variants is None and variant is not None) or (variants is not None and variant not in variants):
+        raise ValueError(f"{clause.citation} has no variant {variant!r}")
+    entries: list[DeviationEntry]
+    if clause.recipe_kind == "overvoltage_hold":
+        level = programmed_level_V(params["level_V"], dut, program_clause_level_exactly=program_clause_level_exactly)
+        mechanism = params["mechanism"]
+        entries = [_level_entry("level_V", params["level_V"], level, mechanism, "supply_readback",
+                                note="the supply's ~1 s readback observes the held level at the source terminals"),
+                   _time_entry("hold_s", params["duration_s"], params["duration_tolerance_s"], params["duration_s"], mechanism),
+                   _count_entry(params["repeats"], mechanism)]
+        asks = f"{params['level_V']:g} V held for {params['duration_s']:g} s"
+        did = f"a {level:g} V level timed by the supply for {params['duration_s']:g} s from a {params['base_V']:g} V base"
+    elif clause.recipe_kind == "jump_start":
+        level = programmed_level_V(params["level_V"], dut, program_clause_level_exactly=program_clause_level_exactly)
+        mechanism = params["mechanism"]
+        entries = [_level_entry("level_V", params["level_V"], level, mechanism, "supply_readback",
+                                note="the supply's ~1 s readback observes the held level at the source terminals"),
+                   _time_entry("hold_s", params["duration_s"], params["duration_tolerance_s"], params["duration_s"], mechanism),
+                   _edge_entry("edge_rise_s", params["edge_max_s"], "rise", mechanism),
+                   _edge_entry("edge_fall_s", params["edge_max_s"], "fall", mechanism),
+                   _time_entry("rest_s", params["rest_s"], params["rest_tolerance_s"], params["rest_s"], mechanism),
+                   _count_entry(params["repeats"], mechanism)]
+        asks = (f"{params['level_V']:g} V for {params['duration_s']:g} +/- {params['duration_tolerance_s']:g} s from "
+                f"{params['base_V']:g} V with edges of at most {params['edge_max_s'] * 1000:g} ms and a {params['rest_s']:g} s rest")
+        did = (f"a voltage step {params['base_V']:g} V -> {level:g} V -> {params['base_V']:g} V commanded over LAN and held "
+               f"{params['duration_s']:g} s (edges are the supply's slew, datasheet-bounded, not measured)")
+    elif clause.recipe_kind == "transient_overvoltage":
+        level = programmed_level_V(params["level_V"], dut, program_clause_level_exactly=program_clause_level_exactly)
+        chosen = params["variants"][variant]
+        mechanism = chosen["mechanism"]
+        entries = [_level_entry("level_V", params["level_V"], level, mechanism, "none",
+                                note="a plateau shorter than or equal to the ~1 s readback refresh is not observed by the polls"),
+                   _time_entry("pulse_s", params["duration_s"], params["duration_tolerance_s"], chosen["duration_s"], mechanism),
+                   _edge_entry("edge_rise_s", params["edge_max_s"], "rise", mechanism),
+                   _edge_entry("edge_fall_s", params["edge_max_s"], "fall", mechanism),
+                   _time_entry("rest_s", params["rest_s"], params["rest_tolerance_s"], params["rest_s"], mechanism),
+                   _count_entry(params["repeats"], mechanism)]
+        asks = (f"{params['repeats']} pulses to {params['level_V']:g} V of {params['duration_s'] * 1000:g} ms from "
+                f"{params['base_V']:g} V with {params['edge_max_s'] * 1000:g} ms edges and a {params['rest_s']:g} s rest")
+        did = (f"{params['repeats']} voltage steps {params['base_V']:g} V -> {level:g} V -> {params['base_V']:g} V with a "
+               f"{chosen['duration_s'] * 1000:g} ms plateau {'commanded over LAN' if mechanism.startswith('lan_') else 'timed by the supply'} "
+               "(edges are the supply's slew, datasheet-bounded, not measured)")
+    elif clause.recipe_kind == "momentary_drop":
+        chosen = params["variants"][variant]
+        mechanism = chosen["mechanism"]
+        entries = [_level_entry("drop_level_V", params["drop_level_V"], params["drop_level_V"], mechanism, "none", basis=BASIS_ISO_FIGURE,
+                                note="programmed level; whether the terminals reach it within the drop is covered by the duration row"),
+                   _time_entry("drop_duration_s", params["drop_duration_s"], params["drop_duration_tolerance_s"], chosen["duration_s"],
+                               mechanism, basis=BASIS_ISO_FIGURE),
+                   _edge_entry("edge_fall_s", params["edge_max_s"], "fall", mechanism),
+                   _edge_entry("edge_rise_s", params["edge_max_s"], "rise", mechanism)]
+        asks = (f"a drop from Usmin {params['from_V']:g} V to {params['drop_level_V']:g} V for {params['drop_duration_s'] * 1000:g} ms "
+                f"with edges of at most {params['edge_max_s'] * 1000:g} ms")
+        did = (f"a voltage step to {params['drop_level_V']:g} V {'commanded for ' + format(chosen['duration_s'] * 1000, 'g') + ' ms over LAN' if mechanism.startswith('lan_') else 'held ' + format(chosen['duration_s'], 'g') + ' s by the supply timer'} "
+               "(depth and interval at the terminals not measured; supply fall time datasheet-bounded < 110 ms loaded / < 800 ms unloaded)")
+    elif clause.recipe_kind == "long_interruptions":
+        case = params["offered"][variant]
+        mechanism = case["mechanism"]
+        interruption = _time_entry("interruption_s", case["interruption_s"], round(case["interruption_s"] * GENERAL_TIME_TOLERANCE, 4),
+                                   case["interruption_s"], mechanism, basis=f"{BASIS_ISO} decade step; {BASIS_ISO_GENERAL} +/- 5 %")
+        if variant.startswith("case1"):
+            recovery = _time_entry("recovery_s", params["recovery_minimum_s"], None, case["recovery_s"], mechanism, kind="minimum",
+                                   note="the clause asks for at least this and until the converter is fully serviceable")
+        else:
+            recovery = _time_entry("recovery_s", case["recovery_s"], round(case["recovery_s"] * GENERAL_TIME_TOLERANCE, 4), case["recovery_s"],
+                                   mechanism, basis=f"{BASIS_ISO} decade step; {BASIS_ISO_GENERAL} +/- 5 %")
+        entries = [_level_entry("base_V", params["base_V"], params["base_V"], mechanism, "supply_readback",
+                                basis="ISO 16750-1 UB (alternator stopped), the base of ISO 16750-2:2023 clause 4.6.1.2",
+                                note="the supply's ~1 s readback observes the base level at the source terminals"),
+                   interruption, recovery, _open_circuit_entry(params["open_resistance_ohm"], mechanism),
+                   _switch_reaction_entry(params["switch_reaction_max_s"], mechanism), _count_entry(params["repeats"], mechanism)]
+        asks = (f"an interruption of {case['interruption_s']:g} s at {params['base_V']:g} V with a recovery of "
+                f"{'at least ' if variant.startswith('case1') else ''}{case['recovery_s']:g} s through a switch opening to >= 10 MOhm within 10 us")
+        did = (f"source output OFF for {case['interruption_s']:g} s then ON for {case['recovery_s']:g} s, "
+               f"{'commanded over LAN (commanded, not measured)' if mechanism.startswith('lan_') else 'timed by the supply Delayer in whole seconds'}")
+    else:  # line_interruption
+        mechanism = params["mechanism"]
+        entries = [_level_entry("base_V", params["base_V"], params["base_V"], mechanism, "supply_readback",
+                                basis=f"ISO 16750-1 UB (alternator stopped), the base of ISO 16750-2:2023 clause {number}",
+                                note="the supply's ~1 s readback observes the base level at the source terminals"),
+                   _time_entry("interruption_s", params["interruption_s"], params["interruption_tolerance_s"], params["interruption_s"], mechanism),
+                   _open_circuit_entry(params["open_resistance_ohm"], mechanism)]
+        if params["transition_max_s"] is not None:
+            entries.append(_transition_entry(params["transition_max_s"], mechanism))
+        entries.append(_count_entry(params["repeats"], mechanism))
+        asks = (f"{'one line' if number == '4.9.1' else 'the whole connector'} opened for {params['interruption_s']:g} +/- "
+                f"{params['interruption_tolerance_s']:g} s to >= 10 MOhm" + (" within 10 ms" if params["transition_max_s"] else ""))
+        did = (f"source output OFF for {params['interruption_s']:g} s on the positive line, commanded over LAN "
+               "(the OFF-state impedance and the open transition are not measured)")
+    return DeviationSheet(clause=number, variant=variant, entries=entries, statement=_statement(number, asks, did, entries))
+
+
+def parameter_words(parameter: str) -> str:
+    """``drop_duration_s`` -> ``drop duration``: the sheet's parameter name without its unit suffix."""
+    for suffix in ("_s", "_V", "_ohm"):
+        if parameter.endswith(suffix):
+            parameter = parameter[: -len(suffix)]
+            break
+    return parameter.replace("_", " ")
+
+
+def deviation_summary(sheet: DeviationSheet) -> str:
+    """One line per sheet: each parameter with its classification word."""
+    parts = []
+    for entry in sheet.entries:
+        value = entry.required.value
+        shown = "" if value is None else (f" {value:g}" + (f" {entry.unit}" if entry.unit else ""))
+        bound = {"maximum": "<=", "minimum": ">="}.get(entry.required.kind, "")
+        parts.append(f"{parameter_words(entry.parameter)}{(' ' + bound) if bound else ''}{shown} {CLASSIFICATION_WORDS[entry.classification]}")
+    return "; ".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -567,16 +1036,16 @@ def feasibility(clause: Clause, bench: BenchProfile, dut: DutProfile, system: st
         return Feasibility(**base, status="not_on_this_bench", missing=missing, coverage="none",
                            reason=_sentence(f"{clause.title} belongs to a different laboratory: it needs "
                                             f"{_describe(facility)}, not a supply and load bench"))
-    if missing:
-        partial = clause.recipe_kind == "long_interruptions" and DC_STEP_1S in env.tokens
-        conditions = (["Only interruptions of 1 s and longer can be reproduced here, by switching the source output off "
-                       "at the command cadence; recipe_parameters lists that subset as partial coverage"] if partial else [])
-        return Feasibility(**base, status="needs_instrument", missing=missing, coverage="partial" if partial else "none",
-                           conditions=conditions,
+    # Proposal §2.1 step 2: a missing instrument token is acceptable only when the clause itself declares the
+    # mechanism this bench substitutes; one undeclared token keeps the clause at needs_instrument.
+    substituted = bool(missing) and all(token in clause.best_effort for token in missing)
+    if missing and not substituted:
+        return Feasibility(**base, status="needs_instrument", missing=missing, coverage="none",
                            reason=_sentence(f"{clause.title} needs {_describe(missing)}, which the bench supply "
                                             f"cannot produce; the {env.max_voltage_V:g} V DC envelope alone does not cover it"
                                             if env.max_voltage_V else
                                             f"{clause.title} needs {_describe(missing)}, which the bench supply cannot produce"))
+    not_offered = [text for token, text in clause.best_effort.items() if token in missing and text.startswith("not substituted")]
 
     peak = clause.peak_voltage_V.get(system)
     if clause.uses_supply_code:
@@ -589,8 +1058,17 @@ def feasibility(clause: Clause, bench: BenchProfile, dut: DutProfile, system: st
         floor = clause.minimum_voltage_V.get(system)
         level_text = f"{peak:g} V" if peak is not None else "its levels"
 
+    programmed_peak = peak
+    endpoint_condition = None
     if peak is not None:
-        if peak == ratings.input_voltage_max_V:
+        if peak == ratings.input_voltage_max_V and clause.recipe_kind in EXACT_LEVEL_RECIPE_KINDS:
+            # Owner decision 6: the endpoint is the owner's call per recipe for the overvoltage holds.
+            programmed_peak = programmed_level_V(peak, dut)
+            endpoint_condition = (f"The {peak:g} V level {EXACT_LEVEL_NOTE.format(margin=programmed_peak)}; programming {peak:g} V "
+                                  f"exactly also needs a source whose maximum is at least {peak:g} V"
+                                  + (f", which this bench's {env.max_voltage_V:g} V source is not"
+                                     if env.max_voltage_V is not None and env.max_voltage_V < peak else ""))
+        elif peak == ratings.input_voltage_max_V:
             return Feasibility(**base, status="outside_dut_rating", coverage="none",
                                missing=[f"{peak:g} V level vs DUT input maximum {ratings.input_voltage_max_V:g} V"],
                                reason=_sentence(f"The {peak:g} V level of {clause.citation} {ENDPOINT_REASON}"))
@@ -599,21 +1077,25 @@ def feasibility(clause: Clause, bench: BenchProfile, dut: DutProfile, system: st
                                missing=[f"{peak:g} V level vs DUT input maximum {ratings.input_voltage_max_V:g} V"],
                                reason=_sentence(f"The {peak:g} V level of {clause.citation} exceeds the DUT's rated "
                                                 f"input maximum of {ratings.input_voltage_max_V:g} V"))
-        if env.max_voltage_V is not None and peak > env.max_voltage_V:
+        if env.max_voltage_V is not None and programmed_peak > env.max_voltage_V:
             return Feasibility(**base, status="not_on_this_bench", coverage="none",
-                               missing=[f"{peak:g} V level vs source maximum {env.max_voltage_V:g} V"],
-                               reason=_sentence(f"The {peak:g} V level of {clause.citation} is above the source's "
+                               missing=[f"{programmed_peak:g} V level vs source maximum {env.max_voltage_V:g} V"],
+                               reason=_sentence(f"The {programmed_peak:g} V level of {clause.citation} is above the source's "
                                                 f"{env.max_voltage_V:g} V maximum"))
 
     conditions = list(code_notes)
+    approvals: list[str] = []
     coverage: Coverage = "full"
-    needs_approval = floor is not None and floor < ratings.input_voltage_min_V
-    if needs_approval:
+    below_minimum = floor is not None and floor < ratings.input_voltage_min_V
+    if below_minimum:
         conditions.append(f"Levels below the DUT's stated {ratings.input_voltage_min_V:g} V minimum need the approved "
                           f"UVLO-style recipe with a reviewed protective policy (brief §7.5)")
         conditions.append(APPROVAL_HOW)
-    if peak is not None and env.protective_input_ceiling_V is not None and peak >= env.protective_input_ceiling_V:
-        conditions.append(f"The {peak:g} V level is at or above the bench's approved DUT input overvoltage guard of "
+        approvals.append(APPROVAL_HOW)
+    if endpoint_condition:
+        conditions.append(endpoint_condition)
+    if programmed_peak is not None and env.protective_input_ceiling_V is not None and programmed_peak >= env.protective_input_ceiling_V:
+        conditions.append(f"The {programmed_peak:g} V level is at or above the bench's approved DUT input overvoltage guard of "
                           f"{env.protective_input_ceiling_V:g} V; a reviewed protective policy must raise it first")
     if clause.environment - env.tokens:
         coverage = "room_temperature_only" if coverage == "full" else coverage
@@ -630,33 +1112,58 @@ def feasibility(clause: Clause, bench: BenchProfile, dut: DutProfile, system: st
     if clause.mock_only_part:
         conditions.append(f"{clause.mock_only_part} exists on the synthetic plant only today")
 
-    # The real path's run envelope and the procedures that exist on the synthetic plant only.
+    # The deviation sheet of a best-effort-type recipe (proposal §2.2): its rows decide between a compliant run after
+    # approval (every row met or approximated) and best effort (a row not met or not measured). The sheet is
+    # bench-independent, so it travels with the mock_only verdict of a real profile as well.
+    params = recipe_parameters(clause, system, dut)
+    sheet = deviation_sheet(clause.number, system, dut) if clause.number in SHEET_CLAUSES and params is not None else None
+    deviations = list(sheet.entries) if sheet else []
+    summary = deviation_summary(sheet) if sheet else None
+    shortfall = [e.parameter for e in deviations if e.classification in ("not_met_but_documented", "unknown_until_measured")]
+    best_effort = substituted or bool(shortfall)
+    if not_offered:
+        coverage = "partial"
+        conditions.append("Partial coverage: " + "; ".join(not_offered))
+    if sheet is not None:
+        conditions.append(f"Deviation sheet ({sheet.variant + ', default variant' if sheet.variant else 'declared'}): {summary}")
+        conditions.append(BEST_EFFORT_APPROVAL_HOW)
+        approvals.append(BEST_EFFORT_APPROVAL_HOW)
+
+    # The real path's run envelope (owner decision 1: the recipe declares its own bound and is approved with it) and the
+    # procedures that exist on the synthetic plant only.
     real = bench.mode == "real"
     test_type = RECIPE_TEST_TYPES.get(clause.recipe_kind or "", clause.recipe_kind or "this")
-    stretch = longest_phase_s(recipe_parameters(clause, system, dut))
+    stretch = longest_phase_s(params)
     longest = stretch[0] if stretch else None
     over_deadline = longest is not None and longest > REAL_SOFTWARE_DEADLINE_S
-    if over_deadline and not real:
-        conditions.append(f"On the real path the {longest:g} s {stretch[1]} exceeds the {REAL_SOFTWARE_DEADLINE_S:g} s software "
-                          f"deadline and the {REAL_SOURCE_TIMER_S:g} s source timer per phase; a real run would need the recipe "
-                          f"split into phases that fit or a long-run procedure")
+    if over_deadline:
+        declared = INSTRUMENT_TIMED_BOUND_S.get(clause.number)
+        bound = declared.get(system) if isinstance(declared, dict) else declared
+        how = LONG_BOUND_APPROVAL_HOW.format(bound=bound if bound is not None else longest, deadline=REAL_SOFTWARE_DEADLINE_S,
+                                             timer=REAL_SOURCE_TIMER_S)
+        conditions.append(f"The {longest:g} s {stretch[1]} exceeds the real path's {REAL_SOFTWARE_DEADLINE_S:g} s software deadline "
+                          f"and {REAL_SOURCE_TIMER_S:g} s source timer per phase (the synthetic plant's virtual clock has no such bound); "
+                          f"{how[0].lower()}{how[1:]}")
+        approvals.append(how)
     if clause.procedure_status == "mock_only" and not real:
         conditions.append(f"Synthetic plant only: planning refuses {test_type} on a real bench as {REAL_HARDWARE_REFUSAL}")
-    verdict: dict[str, Any] = dict(**base, conditions=conditions, needs_approval=needs_approval, longest_phase_s=longest)
+    needs_approval = bool(approvals)
+    verdict: dict[str, Any] = dict(**base, conditions=conditions, needs_approval=needs_approval, missing=missing,
+                                   approval_how=" ".join(dict.fromkeys(approvals)) if approvals else None,
+                                   longest_phase_s=longest, deviations=deviations, deviation_summary=summary)
 
     if clause.procedure_status == "mock_only" and real:
-        if over_deadline:
-            verdict["conditions"].append(f"Its {longest:g} s {stretch[1]} also exceeds the real path's {REAL_SOFTWARE_DEADLINE_S:g} s "
-                                         f"software deadline and {REAL_SOURCE_TIMER_S:g} s source timer per phase")
+        kind_words = "best-effort " if best_effort else ""
         return Feasibility(**verdict, status="mock_only", coverage="none",
-                           reason=_sentence(f"The {test_type} procedure for {clause.citation} exists on the synthetic plant only; "
-                                            f"planning refuses it on a real bench as {REAL_HARDWARE_REFUSAL}"))
-    if over_deadline and real:
-        return Feasibility(**verdict, status="needs_split", coverage="none",
-                           reason=_sentence(f"The {longest:g} s {stretch[1]} of {clause.citation} exceeds the real path's "
-                                            f"{REAL_SOFTWARE_DEADLINE_S:g} s software deadline and {REAL_SOURCE_TIMER_S:g} s source "
-                                            f"timer per phase; no real run until the recipe is split into phases that fit or a "
-                                            f"long-run procedure exists"))
+                           reason=_sentence(f"The {kind_words}{test_type} procedure for {clause.citation} exists on the synthetic plant "
+                                            f"only; planning refuses it on a real bench as {REAL_HARDWARE_REFUSAL}"))
+
+    if best_effort:
+        words = ", ".join(parameter_words(p) for p in shortfall) if shortfall else "the substituted parameters"
+        reason = (f"The bench can only approximate {clause.citation}: {words} lie outside the clause tolerance or are not "
+                  f"measured here (recorded in the deviation sheet), and the saved recipe plans as executable only after the "
+                  f"owner approves it with the accepted deviations")
+        return Feasibility(**verdict, status="best_effort", reason=_sentence(reason), coverage=coverage)
 
     reason = (f"The bench source can hold {level_text} of {clause.citation} as DC levels within its "
               f"{env.max_voltage_V:g} V envelope and the DUT's {ratings.input_voltage_min_V:g}-{ratings.input_voltage_max_V:g} V rating"
@@ -669,8 +1176,16 @@ def feasibility(clause: Clause, bench: BenchProfile, dut: DutProfile, system: st
     if clause.recipe_kind == "steady_min_max":
         reason += "; only a DC level subset is implemented, with no t1/t2 hold profile or 1 V/s transitions"
     if needs_approval:
-        reason += (f", and its levels below the DUT's {ratings.input_voltage_min_V:g} V minimum plan as executable only after "
-                   f"the saved recipe is approved under the bench's protective policy (brief §7.5)")
+        why = []
+        if below_minimum:
+            why.append(f"levels below the {ratings.input_voltage_min_V:g} V DUT minimum")
+        if over_deadline:
+            why.append(f"a {longest:g} s {stretch[1]} above the {REAL_SOURCE_TIMER_S:g} s policy bound")
+        if endpoint_condition:
+            why.append(f"a {peak:g} V level at the converter's maximum")
+        if sheet is not None and not why:
+            why.append("its declared deviation sheet")
+        reason += f", and plans as executable only after the saved recipe is approved (brief §7.5) for {' and '.join(why)}"
         return Feasibility(**verdict, status="runs_after_approval", reason=_sentence(reason), coverage=coverage)
     return Feasibility(**verdict, status="runs_here", reason=_sentence(reason), coverage=coverage)
 
@@ -715,21 +1230,31 @@ def _iso16750_2() -> Standard:
                        "24V": {"level_V": 36.0, "duration_s": 3600.0, "temperature": "Tmax - 20 K", "operating_mode": "3.4"}},
            peak_voltage_V={"12V": 18.0, "24V": 36.0}, requires={DC_STEADY}, environment={CLIMATIC_CHAMBER},
            functional_status="C minimum; A where more stringent", recipe_kind="overvoltage_hold",
-           procedure_status="planned",
-           procedure_gap="60-min hold exceeds the 540 s run budget; needs a long-hold procedure"),
+           procedure_status="mock_only",
+           procedure="transient_hold recipe (synthetic plant only): the clause level held 3600 s from a UA base, timed by the "
+                     "supply; the recipe declares its own instrument_timed_bound_s (owner decision 1); refused on real benches",
+           notes=["at 24 V the 36 V level equals the converter's stated maximum: programmed at 35.8 V by default (approximated) "
+                  "or exactly with program_clause_level_exactly (owner decision 6)"]),
         _c("4.3.1.2", "Long term overvoltage: jump start (12 V systems only)",
            "Simulate a jump start from a 24 V donor without its engine running.", systems={"12V"},
            parameters={"12V": {"Utrans_V": 26.0, "ttrans_s": 60.0, "ttrans_tolerance_s": 6.0, "trise_max_s": 0.01,
                                "tfall_max_s": 0.01, "trest_s": 120.0, "Usmin_V": 10.8, "n": 1,
                                "temperatures": "room temperature and Tmin", "operating_mode": "2.2 if needed for engine start, else 2.3"}},
-           peak_voltage_V={"12V": 26.0}, requires={DC_STEADY, EDGE_10MS}, environment={CLIMATIC_CHAMBER},
-           functional_status="C minimum; A where more stringent"),
+           peak_voltage_V={"12V": 26.0}, minimum_voltage_V={"12V": 10.8}, requires={DC_STEADY, EDGE_10MS}, environment={CLIMATIC_CHAMBER},
+           functional_status="C minimum; A where more stringent", recipe_kind="jump_start", procedure_status="mock_only",
+           best_effort={EDGE_10MS: SUBSTITUTE_MECHANISMS[EDGE_10MS]},
+           procedure="transient_hold recipe (synthetic plant only, best effort): 10.8 V -> 26 V -> 10.8 V commanded over LAN, "
+                     "held 60 s, rest 120 s; the edges are the supply's slew and the deviation sheet says so"),
         _c("4.3.2", "Transient overvoltage", "Simulate switching loads that inject current into the distribution system.",
            parameters={"12V": {"Utrans_V": 18.0, "ttrans_s": 0.4, "trise_s": 0.001, "tfall_s": 0.001, "trest_s": 1.0, "n": 5,
                                "base": "Usmax", "operating_mode": "3.4"},
                        "24V": {"Utrans_V": 36.0, "ttrans_s": 0.4, "trise_s": 0.002, "tfall_s": 0.002, "trest_s": 1.0, "n": 5,
                                "base": "Usmax", "operating_mode": "3.4"}},
-           peak_voltage_V={"12V": 18.0, "24V": 36.0}, requires={PULSE_MS}, functional_status="B minimum; C by agreement"),
+           peak_voltage_V={"12V": 18.0, "24V": 36.0}, minimum_voltage_V={"12V": 16.0, "24V": 32.0}, requires={PULSE_MS},
+           functional_status="B minimum; C by agreement", recipe_kind="transient_overvoltage", procedure_status="mock_only",
+           best_effort={PULSE_MS: SUBSTITUTE_MECHANISMS[PULSE_MS]},
+           procedure="transient_hold recipe (synthetic plant only, best effort; owner decision 7): five steps Usmax -> level -> Usmax "
+                     "with a 400 ms plateau commanded over LAN (variant A) or a 1 s plateau timed by the supply (variant B)"),
         _c("4.4", "Superimposed alternating voltage", "Check immunity to ripple from an alternator or a DC/DC converter.",
            parameters={
                "12V": {"f1_Hz": [10.0, 30000.0], "f2_Hz": [30000.0, 200000.0],
@@ -762,8 +1287,11 @@ def _iso16750_2() -> Standard:
                                "figure_values": "drop level and duration appear in Figure 7 only; confirm on the printed copy"},
                        "24V": {"from": "Usmin", "drop_level_V": 9.0, "drop_duration_s": 0.1, "edge_max_s": 0.01, "operating_mode": "3.4",
                                "figure_values": "drop level and duration appear in Figure 8 only; confirm on the printed copy"}},
-           peak_voltage_V={"12V": 10.5, "24V": 22.0}, requires={PULSE_MS, EDGE_10MS},
-           functional_status="B minimum; C by agreement"),
+           peak_voltage_V={"12V": 10.5, "24V": 22.0}, minimum_voltage_V={"12V": 4.5, "24V": 9.0}, requires={PULSE_MS, EDGE_10MS},
+           functional_status="B minimum; C by agreement", recipe_kind="momentary_drop", procedure_status="mock_only",
+           best_effort={PULSE_MS: SUBSTITUTE_MECHANISMS[PULSE_MS], EDGE_10MS: SUBSTITUTE_MECHANISMS[EDGE_10MS]},
+           procedure="momentary_drop recipe (synthetic plant only, best effort): Usmin -> drop level -> Usmin; variant B holds the "
+                     "drop 1 s timed by the supply (default, owner decision 8), variant A commands the clause's 100 ms over LAN"),
         _c("4.6.1.2", "Micro interruption in supply voltage",
            "Simulate contact faults, relay bounce and switch-over to a redundant supply.",
            parameters={s: {"base_V": UB_V[s],
@@ -773,10 +1301,13 @@ def _iso16750_2() -> Standard:
                                            "trecovery": "100 us to 10 s in decade steps of 100 us, 1 ms, 10 ms, 100 ms, 1 s", "n": 1},
                            "switch": "reaction time at most 10 us, open resistance at least 10 MOhm, checked with 1 kOhm and 10 Ohm references",
                            "operating_mode": "3.4"} for s in both},
-           peak_voltage_V={"12V": 12.0, "24V": 24.0}, requires={PULSE_US, LINE_SWITCH},
+           peak_voltage_V={"12V": 12.0, "24V": 24.0}, minimum_voltage_V={"12V": 0.0, "24V": 0.0}, requires={PULSE_US, LINE_SWITCH},
            functional_status="A for interruptions up to 100 us; C minimum above", recipe_kind="long_interruptions",
-           procedure_status="planned",
-           procedure_gap=">=1 s interruptions only (source output switched off at the command cadence); needs an interruption procedure"),
+           procedure_status="mock_only",
+           best_effort={LINE_SWITCH: SUBSTITUTE_MECHANISMS[LINE_SWITCH],
+                        PULSE_US: "not substituted: interruptions and recoveries below 100 ms are not offered (coverage partial)"},
+           procedure="micro_interruption recipe (synthetic plant only, best effort, partial): source output OFF for 100 ms over LAN "
+                     "(commanded, not measured) and for 1 s / 2 s timed by the supply Delayer, recoveries 100 ms, 1 s, 5 s and 10 s"),
         _c("4.6.2", "Reset behaviour at voltage drop", "Check reset behaviour of microcontroller equipment at stepped voltage drops.",
            parameters={s: {"start": "Usmin of the chosen code", "step_fraction_of_Usmin": 0.05, "low_hold_min_s": 5.0,
                            "recovery_hold_min_s": 10.0, "functional_test": "at Usmin after each recovery", "end_V": 0.0,
@@ -843,11 +1374,21 @@ def _iso16750_2() -> Standard:
                            "method_2": {"tint_us": 100.0, "tint_cycle_ms": 1.0, "burst_s": 10.0, "recovery_s": 10.0, "n": 2,
                                         "transition_max_us": 10.0},
                            "operating_mode": "3.4"} for s in both},
-           requires={LINE_SWITCH, PULSE_US}, functional_status="C minimum; D by agreement"),
+           peak_voltage_V={"12V": 12.0, "24V": 24.0}, minimum_voltage_V={"12V": 0.0, "24V": 0.0},
+           requires={LINE_SWITCH, PULSE_US}, functional_status="C minimum; D by agreement", recipe_kind="line_interruption",
+           procedure_status="mock_only",
+           best_effort={LINE_SWITCH: SUBSTITUTE_MECHANISMS[LINE_SWITCH],
+                        PULSE_US: "not substituted: method 2 (100 us bursts) and the return line are not offered (coverage partial)"},
+           procedure="line_interruption recipe (synthetic plant only, best effort): method 1 on the positive line as source output "
+                     "OFF for 10 s commanded over LAN; the OFF-state impedance is not a demonstrated 10 MOhm open"),
         _c("4.9.2", "Multiple line interruption", "Simulate unplugging the whole connector.",
            parameters={s: {"interruption_s": 10.0, "tolerance_s": 1.0, "open_resistance_ohm": 1e7,
                            "operating_modes": "2.1 and 3.4"} for s in both},
-           requires={LINE_SWITCH}, functional_status="C minimum; D by agreement"),
+           peak_voltage_V={"12V": 12.0, "24V": 24.0}, minimum_voltage_V={"12V": 0.0, "24V": 0.0},
+           requires={LINE_SWITCH}, functional_status="C minimum; D by agreement", recipe_kind="line_interruption",
+           procedure_status="mock_only", best_effort={LINE_SWITCH: SUBSTITUTE_MECHANISMS[LINE_SWITCH]},
+           procedure="line_interruption recipe (synthetic plant only, best effort): the whole two-wire connector is the positive "
+                     "line, source output OFF for 10 s commanded over LAN; the OFF-state impedance is not a demonstrated 10 MOhm open"),
         _c("4.10", "Short circuit/overload protection", "Shorts and overloads on inputs and outputs.", kind="heading"),
         _c("4.10.2", "Short circuit in signal lines and load circuits", "Short every signal and load line to Usmax and to ground.",
            parameters={s: {"to": "Usmax and ground", "duration_s": 60.0, "duration_tolerance_pct": 10.0,

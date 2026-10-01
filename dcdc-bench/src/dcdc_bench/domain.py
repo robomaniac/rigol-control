@@ -1,6 +1,8 @@
 """Versioned contracts. Importing this module never opens an instrument."""
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 from typing import Any, Literal, Protocol
 
@@ -444,6 +446,16 @@ RESET_STAIRCASE_TEST_TYPE = "reset_staircase"
 SUPPLY_PROFILE_TEST_TYPES = (SLOW_SUPPLY_RAMP_TEST_TYPE, RESET_STAIRCASE_TEST_TYPE)
 # Procedures with a phase-scoped guard: each runs alone in its recipe.
 PHASE_SCOPED_TEST_TYPES = (UVLO_TEST_TYPE, *SUPPLY_PROFILE_TEST_TYPES)
+# Best-effort ISO 16750-2 procedures (docs/standards/best-effort-proposal.md, owner decisions of 2026-10-01):
+# the bench commands the clause's levels and timings with the mechanisms it has (LAN voltage steps, LAN output
+# OFF/ON, the supply's Timer or Delayer) and records what the clause asks against what the bench did in a
+# deviation sheet. Mock-only in this release; a real bench refuses the types at planning.
+TRANSIENT_HOLD_TEST_TYPE = "transient_hold"          # 4.3.1.1 long hold, 4.3.1.2 jump start, 4.3.2 repeated overvoltage
+MOMENTARY_DROP_TEST_TYPE = "momentary_drop"          # 4.6.1.1 (variant A clause-timed 100 ms, variant B supply-timed 1 s)
+MICRO_INTERRUPTION_TEST_TYPE = "micro_interruption"  # 4.6.1.2 output-OFF intervals (>= 1 s delayer-timed, 100 ms over LAN)
+LINE_INTERRUPTION_TEST_TYPE = "line_interruption"    # 4.9.1 method 1 / 4.9.2: output OFF 10 +/- 1 s, positive line only
+BEST_EFFORT_TEST_TYPES = (TRANSIENT_HOLD_TEST_TYPE, MOMENTARY_DROP_TEST_TYPE, MICRO_INTERRUPTION_TEST_TYPE,
+                          LINE_INTERRUPTION_TEST_TYPE)
 
 
 def uvlo_ramp_phases(targets: list[float]) -> list[str]:
@@ -608,6 +620,204 @@ class SupplyProfilePolicy(Contract):
         return "indeterminate"
 
 
+DeviationMechanism = Literal["lan_voltage_step", "lan_output_off", "supply_timer", "supply_delayer", "switch_box", "none"]
+DeviationMeasuredBy = Literal["host_clock", "supply_readback", "none", "scope"]
+DeviationClassification = Literal["met", "approximated", "not_met_but_documented", "unknown_until_measured"]
+DEVIATION_SHEET_STANDARD = "ISO 16750-2:2023"
+
+
+class DeviationRequired(Contract):
+    """What the clause asks for one parameter, as recorded in ``standards.py`` (cited by clause; no text reproduced).
+
+    ``value`` is the clause's figure in the entry's unit; ``tolerance`` is the
+    absolute half-width that applies (the clause's own, or the clause 4.1
+    general tolerances: time +/- 5 %, voltage +/- 0.2 V). ``kind`` says how the
+    acceptable interval is formed: ``nominal`` is ``value +/- tolerance``,
+    ``maximum`` is everything up to ``value`` (an edge of at most 10 ms),
+    ``minimum`` everything from ``value`` up (an open of at least 10 MOhm).
+    ``basis`` names the source of the figure.
+    """
+    value: float | None
+    tolerance: float | None = Field(default=None, ge=0)
+    kind: Literal["nominal", "maximum", "minimum"] = "nominal"
+    basis: str
+
+    def interval(self) -> tuple[float, float] | None:
+        """The acceptable interval, or None when the clause records no comparable figure."""
+        if self.value is None:
+            return None
+        if self.kind == "maximum":
+            return (-math.inf, self.value)
+        if self.kind == "minimum":
+            return (self.value, math.inf)
+        half = self.tolerance or 0.0
+        return (self.value - half, self.value + half)
+
+
+class DeviationAchievable(Contract):
+    """What this bench commands or is bounded to for the same parameter.
+
+    ``value`` is the commanded or programmed figure (None when the mechanism
+    has no setting for it, such as an edge time). ``bound`` is the
+    ``[low, high]`` interval the named basis guarantees (a datasheet figure,
+    the instrument clock, measured LAN round trips); None means no bound
+    exists and the figure is unknown until a scope or DAQ measures it.
+    ``substitute`` is true when the quantity is produced by a different kind
+    of mechanism than the clause's (an open circuit realised as source output
+    OFF, a 36 V level programmed at the project's 35.8 V margin setting).
+    """
+    value: float | None
+    bound: list[float] | None = Field(default=None, min_length=2, max_length=2)
+    basis: str
+    substitute: bool = False
+
+    @model_validator(mode="after")
+    def ordered_bound(self) -> DeviationAchievable:
+        if self.bound is not None and self.bound[0] > self.bound[1]:
+            raise ValueError("A deviation bound is [low, high]")
+        return self
+
+
+def classify_deviation(required: DeviationRequired, achievable: DeviationAchievable) -> str:
+    """The classification rule of the best-effort proposal (section 2.2); the only place a judgement is encoded.
+
+    ``met``: a bound that lies entirely inside the clause tolerance.
+    ``not_met_but_documented``: a bound entirely outside it.
+    ``unknown_until_measured``: no bound exists, or the bound straddles the tolerance.
+    ``approximated``: the quantity is produced by a different kind of mechanism
+    (``substitute``) and its comparable figure is not entirely outside the
+    tolerance (or the clause records no comparable figure); a substitute whose
+    bound lies entirely outside is still ``not_met_but_documented``.
+    """
+    interval, bound = required.interval(), achievable.bound
+    if interval is None or bound is None:
+        return "approximated" if achievable.substitute else "unknown_until_measured"
+    low, high = bound
+    accept_low, accept_high = interval
+    finite = [abs(edge) for edge in (accept_low, accept_high) if math.isfinite(edge)]
+    slack = 1e-9 * max([1.0, *finite])
+    if accept_low - slack <= low and high <= accept_high + slack:
+        return "approximated" if achievable.substitute else "met"
+    if high < accept_low - slack or low > accept_high + slack:
+        return "not_met_but_documented"
+    return "approximated" if achievable.substitute else "unknown_until_measured"
+
+
+class DeviationEntry(Contract):
+    """One row of a deviation sheet: a clause parameter against what the bench does for it.
+
+    ``classification`` must equal ``classify_deviation(required, achievable)``;
+    the contract refuses a sheet whose words disagree with its numbers. A
+    ``met`` row always carries the bound that justifies it. ``measured_by`` is
+    ``host_clock`` for intervals the bench computer timestamps itself,
+    ``supply_readback`` for levels the supply's ~1 s readback observes at the
+    source terminals, ``none`` for anything at the converter terminals until a
+    capture instrument exists, ``scope`` once one is bound.
+    """
+    parameter: str
+    unit: str | None
+    required: DeviationRequired
+    achievable: DeviationAchievable
+    mechanism: DeviationMechanism
+    measured_by: DeviationMeasuredBy
+    classification: DeviationClassification
+    note: str | None = None
+
+    @model_validator(mode="after")
+    def classification_follows_the_rule(self) -> DeviationEntry:
+        expected = classify_deviation(self.required, self.achievable)
+        if self.classification != expected:
+            raise ValueError(f"Deviation {self.parameter!r} is classified {self.classification!r} but the rule gives {expected!r}")
+        if self.classification == "met" and self.achievable.bound is None:
+            raise ValueError(f"A met deviation row ({self.parameter!r}) must name the bound that justifies it")
+        if not self.required.basis.strip() or not self.achievable.basis.strip():
+            raise ValueError(f"Deviation {self.parameter!r} needs a basis on both sides")
+        return self
+
+
+class DeviationSheet(Contract):
+    """The declared deviation sheet of one best-effort test: one entry per parameter the clause specifies.
+
+    ``statement`` is the deterministic first-page sentence ("ISO 16750-2
+    clause N asks for ...; this bench produced ... (k parameters met, m
+    approximated, p not met, q not measured; see the deviation sheet)").
+    ``sha256()`` hashes the canonical JSON of the sheet; a saved recipe's
+    ``authorization.accepted_deviations_sha256`` must equal it (or, for a
+    recipe with several best-effort tests, ``planning.recipe_deviations_sha256``),
+    so any change to the clause parameters or the bounds invalidates approval.
+    """
+    schema_version: Literal["1.0"] = "1.0"
+    standard: Literal["ISO 16750-2:2023"] = DEVIATION_SHEET_STANDARD
+    clause: str
+    variant: str | None = None
+    entries: list[DeviationEntry] = Field(min_length=1)
+    statement: str
+
+    @model_validator(mode="after")
+    def unique_parameters(self) -> DeviationSheet:
+        names = [entry.parameter for entry in self.entries]
+        if len(set(names)) != len(names):
+            raise ValueError("Deviation sheet parameters must be unique")
+        return self
+
+    @staticmethod
+    def classify(required: DeviationRequired, achievable: DeviationAchievable) -> str:
+        return classify_deviation(required, achievable)
+
+    def counts(self) -> dict[str, int]:
+        counts = {"met": 0, "approximated": 0, "not_met_but_documented": 0, "unknown_until_measured": 0}
+        for entry in self.entries:
+            counts[entry.classification] += 1
+        return counts
+
+    def sha256(self) -> str:
+        encoded = json.dumps(self.model_dump(mode="json"), sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+class BestEffortPolicy(Contract):
+    """Declared stimulus of a best-effort ISO 16750-2 test and its deviation sheet (owner decisions of 2026-10-01).
+
+    ``transient_hold``: ``input_voltage_targets_V`` is ``[base_V, level_V]``;
+    the source steps from the base to ``level_V``, holds ``hold_s``, returns
+    to the base and rests ``recovery_s`` (when declared), ``repeats`` times.
+    ``momentary_drop``: targets ``[from_V, drop_level_V]``; the source drops
+    to ``drop_level_V`` for ``drop_s`` and restores; ``recovery_s`` is the
+    observation window after the restore. ``micro_interruption`` and
+    ``line_interruption``: targets ``[base_V]``; the source output is switched
+    OFF for ``interruption_s`` and ON again, observed for ``recovery_s``,
+    ``repeats`` times. ``mechanism`` names how the timing is produced; the
+    sheet records what the clause asks against what this produces.
+    """
+    clause: str
+    variant: str | None = None
+    level_V: float | None = Field(default=None, gt=0)
+    hold_s: float | None = Field(default=None, gt=0)
+    repeats: int | None = Field(default=None, ge=1)
+    interruption_s: float | None = Field(default=None, gt=0)
+    recovery_s: float | None = Field(default=None, ge=0)
+    drop_level_V: float | None = Field(default=None, gt=0)
+    drop_s: float | None = Field(default=None, gt=0)
+    mechanism: DeviationMechanism
+    deviation_sheet: DeviationSheet
+
+    @model_validator(mode="after")
+    def sheet_names_the_clause(self) -> BestEffortPolicy:
+        if self.deviation_sheet.clause != self.clause:
+            raise ValueError("The deviation sheet must be the declared clause's sheet")
+        if self.deviation_sheet.variant != self.variant:
+            raise ValueError("The deviation sheet must carry the declared variant")
+        return self
+
+    def longest_phase_s(self, test_type: str) -> float:
+        """The longest single stretch at one source state; the planner compares it with the per-phase bound."""
+        if test_type == TRANSIENT_HOLD_TEST_TYPE:
+            return max(self.hold_s or 0.0, self.recovery_s or 0.0)
+        if test_type == MOMENTARY_DROP_TEST_TYPE:
+            return max(self.drop_s or 0.0, self.recovery_s or 0.0)
+        return max(self.interruption_s or 0.0, self.recovery_s or 0.0)
+
+
 class ThermalSettlingPolicy(Contract):
     """Separate from electrical settling: slope of rise above ambient over a window.
 
@@ -645,6 +855,9 @@ class TestDefinition(Contract):
     optional_quantities: list[str] = Field(default_factory=list)
     uvlo: UvloRampPolicy | None = None
     supply_profile: SupplyProfilePolicy | None = None
+    # Best-effort ISO 16750-2 stimulus and its deviation sheet (BEST_EFFORT_TEST_TYPES only). Such a test may
+    # also carry a supply_profile block for the output classification thresholds and expected-off scoping.
+    best_effort: BestEffortPolicy | None = None
     thermal_settling: ThermalSettlingPolicy | None = None
 
     @model_validator(mode="after")
@@ -674,9 +887,36 @@ class TestDefinition(Contract):
                 if self.supply_profile.low_hold_s is None:
                     raise ValueError("reset_staircase requires supply_profile.low_hold_s and recovery_hold_s")
                 staircase_level_kinds(self.input_voltage_targets_V)
-        elif self.supply_profile is not None:
-            raise ValueError("A supply_profile block is only valid for the slow_supply_ramp and reset_staircase test types")
+        elif self.supply_profile is not None and self.type not in BEST_EFFORT_TEST_TYPES:
+            raise ValueError("A supply_profile block is only valid for the slow_supply_ramp and reset_staircase test types "
+                             "(and, for its output thresholds, the best-effort types)")
+        if self.type in BEST_EFFORT_TEST_TYPES:
+            self._validate_best_effort()
+        elif self.best_effort is not None:
+            raise ValueError(f"A best_effort block is only valid for the {', '.join(BEST_EFFORT_TEST_TYPES)} test types")
         return self
+
+    def _validate_best_effort(self) -> None:
+        policy, targets = self.best_effort, self.input_voltage_targets_V
+        if policy is None:
+            raise ValueError(f"{self.type} requires a declared best_effort block with its deviation sheet")
+        if len(self.output_current_targets_A) != 1:
+            raise ValueError(f"{self.type} holds one fixed load")
+        if self.type == TRANSIENT_HOLD_TEST_TYPE:
+            if policy.level_V is None or policy.hold_s is None or policy.repeats is None:
+                raise ValueError("transient_hold requires best_effort.level_V, hold_s and repeats")
+            if len(targets) != 2 or targets[1] != policy.level_V or targets[0] == targets[1]:
+                raise ValueError("transient_hold declares input_voltage_targets_V as [base_V, level_V] with level_V the held level")
+        elif self.type == MOMENTARY_DROP_TEST_TYPE:
+            if policy.drop_level_V is None or policy.drop_s is None:
+                raise ValueError("momentary_drop requires best_effort.drop_level_V and drop_s")
+            if len(targets) != 2 or targets[1] != policy.drop_level_V or targets[1] >= targets[0]:
+                raise ValueError("momentary_drop declares input_voltage_targets_V as [from_V, drop_level_V] with the drop below the start")
+        else:
+            if policy.interruption_s is None or policy.recovery_s is None or policy.repeats is None:
+                raise ValueError(f"{self.type} requires best_effort.interruption_s, recovery_s and repeats")
+            if len(targets) != 1:
+                raise ValueError(f"{self.type} declares input_voltage_targets_V as [base_V]: the interruption is output OFF, not a level")
 
 
 class PlanningPolicy(Contract):
@@ -720,6 +960,18 @@ class AuthorizationPolicy(Contract):
     # range is refused unless this is true and protective_policy_id names the
     # bench's reviewed protective policy. It is not a global ignore_safety flag.
     uvlo_approved: bool = False
+    # Best-effort ISO 16750-2 approval (owner decisions of 2026-10-01, the same gate as the UVLO ramp): the saved
+    # recipe is approved together with the hash of the deviation sheet(s) it carried when the owner accepted them
+    # (planning.recipe_deviations_sha256); any later change to a sheet invalidates the approval.
+    best_effort_approved: bool = False
+    accepted_deviations_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    # A per-recipe bound for the longest source phase, above the real path's 660 s software deadline and 720 s
+    # one-shot source timer (owner decision 1): once the recipe is approved the planner compares every declared
+    # hold or recovery with this value instead of the policy constants.
+    instrument_timed_bound_s: float | None = Field(default=None, gt=0)
+    # Program the clause's level exactly (36.0 V for a 36 V converter maximum) instead of the project's 35.8 V
+    # margin setting (owner decision 6); the deviation sheet records which was used.
+    program_clause_level_exactly: bool = False
 
 
 class TestRecipe(Contract):
