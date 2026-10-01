@@ -16,15 +16,15 @@ from pathlib import Path
 from .standard_recipes import (OTHER_LABORATORIES_NOTE, STANDARDS_GROUP, build_recipe, clause_rows, default_system,
                                standard_cards)
 from .ui_models import (BENCH_NAMES, DEFAULT_CATEGORY, DELETE_PROMPTS, PLAN_STATUS_LEGEND, REAL_CAN, REAL_CANNOT,
-                        REPORTS_PAGE, SIMULATION_CAN, SIMULATION_CANNOT, SIMULATION_SEQUENCE, SIMULATION_TIME_ESTIMATE,
-                        START_LABELS, simulation_time_text,
+                        REPORTS_PAGE, RUN_DETAILS, RUN_TILES, RUN_TIMES, SIMULATION_CAN, SIMULATION_CANNOT,
+                        SIMULATION_SEQUENCE, SIMULATION_TIME_ESTIMATE, START_LABELS, simulation_time_text,
                         SYNTHETIC_UNCERTAINTY_NOTE, WORKING_STATES, activity_text, artifact_url, bench_equipment, bench_job,
                         bench_title, card_meta, deferred_text, dequeued, dut_approved, dut_subtitle, duration_text,
                         edited_dut, edited_recipe, elapsed_text, envelope_rows, event_text, filter_report_rows, friendly_error,
                         grouped_recipes, job_actions, limits_rows, limits_summary, local_time_text, plan_rows, quantity,
                         recipe_grid, recipe_title, report_became_ready, report_link_rows, report_rows, reports_count_text,
-                        saved_runs_key, sequence_step, shutdown_label, skip_reasons, state_label, summary_text, time_legend,
-                        time_lines)
+                        run_panel_key, run_panel_progress, run_panel_texts, saved_runs_key, sequence_step, shutdown_label,
+                        skip_reasons, state_label, summary_text, time_legend, time_lines)
 
 
 STYLE = '''
@@ -455,6 +455,9 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                  # Reports auto-refresh and the "Report ready" notice from the same poll.
                  'seen': {},
                  'events_open': {},
+                 # run_panel_key of the snapshot the Run panel was last built for; a poll with the same key
+                 # updates the panel's elements in place instead of rebuilding them (show_status).
+                 'run_key': None,
                  # Reports: the number of (matching) saved runs listed, 30 more per "Show older runs", and the
                  # text filter; both survive the list's own refreshes and reset only when the filter changes.
                  'reports_shown': REPORTS_PAGE, 'reports_filter': '',
@@ -1689,91 +1692,108 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
                 for label, relative in rows:
                     ui.link(label, artifact_url(snapshot['job_id'], relative), new_tab=True).classes('bench-artifact')
 
+        run_widgets: dict = {}
+
+        def render_events(snapshot):
+            """The 'Recent events' lines inside their expansion, rewritten only when the last twelve events changed:
+            the expansion itself (its header is the focusable part) and its open state are never recreated."""
+            lines = [event_text(event) for event in (snapshot.get('events') or [])[-12:]]
+            if lines == run_widgets.get('events_lines'):
+                return
+            run_widgets['events_lines'] = lines
+            box = run_widgets['events']
+            box.clear()
+            with box:
+                for line in lines:
+                    ui.label(line).classes('bench-muted')
+
+        def update_status(snapshot, texts):
+            """A poll that changed only texts and values: set them on the existing elements."""
+            for name, text in texts.items():
+                run_widgets[name].set_text(text)
+            run_widgets['progress'].set_value(run_panel_progress(snapshot))
+            if 'events' in run_widgets:
+                render_events(snapshot)
+
         def show_status(snapshot):
+            """The Run panel. Its elements are built once per structure (run_panel_key: the job, its state, which
+            notes, links and controls exist); a poll that changes only texts and values updates them in place, so
+            keyboard focus on a report link, the queue button or the events expansion survives the two-second tick."""
+            texts = run_panel_texts(snapshot)
+            key = run_panel_key(snapshot, texts)
+            if key == state['run_key'] and run_widgets:
+                update_status(snapshot, texts)
+                return
+            state['run_key'] = key
+            run_widgets.clear()
             panel = panels['run']
             panel.clear()
             panel.set_visibility(True)
+
+            def slot(name, classes='bench-muted'):
+                """One label of the panel; a later poll sets its text by name (update_status)."""
+                run_widgets[name] = ui.label(texts[name]).classes(classes)
+                return run_widgets[name]
+
             with panel:
                 ui.label('Run').classes('bench-h2')
                 with ui.column().classes('bench-run gap-3'):
-                    ui.label(state_label(snapshot)).classes('bench-k-label').style('font-size:17px')
-                    ui.label('Simulation · synthetic data · no instrument is touched' if snapshot.get('mode') == 'mock'
-                             else 'Real bench · measured data').classes('bench-message')
+                    slot('state', 'bench-k-label').style('font-size:17px')
+                    slot('mode', 'bench-message')
                     if sequence_step(snapshot) is not None:
                         render_sequence(snapshot)
-                    if snapshot.get('state') == 'reporting':
-                        ui.label('The measurements are saved. Preparing the interactive plots and PDF can take several minutes on a Raspberry Pi. You can reconnect later; this job continues independently.').classes('bench-message')
-                    if snapshot.get('state') == 'report-queued':
-                        waiting = deferred_text(snapshot)
-                        note = ui.label('The measurements are saved and both outputs are verified OFF. Report generation is queued and starts automatically when no test is running and enough memory is free.'
-                                        + (' ' + waiting + '.' if waiting else '')).classes('bench-message')
-                        if snapshot.get('deferred_reason'):
-                            note.tooltip('Dispatcher reason: ' + str(snapshot['deferred_reason'])
-                                         + (' · checked ' + local_time_text(snapshot['deferred_utc']) if snapshot.get('deferred_utc') else ''))
-                    ui.label('Run ' + str(snapshot.get('run_id') or snapshot['job_id'])).classes('bench-muted')
-                    # Local wall-clock display only; job.json and the run evidence keep UTC.
-                    for key, label in [('created_utc', 'Started'), ('acquisition_cancelled_utc', 'Stop requested'),
-                                       ('queued_utc', 'Report queued'), ('dispatched_utc', 'Report started')]:
-                        if snapshot.get(key):
-                            ui.label(f'{label}: {local_time_text(snapshot[key])}').classes('bench-muted')
-                    progress = snapshot.get('progress') or {}
-                    complete, total = progress.get('completed', 0), progress.get('total', 0)
-                    ui.linear_progress(value=complete / total if total else 0, show_value=False).props('rounded size=10px').classes('w-full')
-                    ui.label(f'{complete} / {total} load points accepted').classes('bench-muted')
-                    if progress.get('current') and snapshot.get('state') == 'acquiring':
-                        ui.label('Measuring this condition').classes('bench-muted')
-                    if progress.get('requested_input_V') is not None:
-                        ui.label('Requested input: ' + quantity(progress['requested_input_V'], 'V') +
-                                 ' · Requested load: ' + quantity(progress.get('requested_output_A'), 'A')).classes('bench-muted')
-                    latest = snapshot.get('latest') or {}
-                    reading_kind = 'Simulated' if snapshot.get('mode') == 'mock' else 'Measured'
+                    if 'reporting' in texts:
+                        slot('reporting', 'bench-message')
+                    if 'queued' in texts:
+                        note = slot('queued', 'bench-message')
+                        if 'queued_tip' in texts:
+                            with note:
+                                run_widgets['queued_tip'] = ui.tooltip(texts['queued_tip'])
+                    slot('run_id')
+                    for key, _ in RUN_TIMES:
+                        if 'time:' + key in texts:
+                            slot('time:' + key)
+                    run_widgets['progress'] = ui.linear_progress(value=run_panel_progress(snapshot), show_value=False).props(
+                        'rounded size=10px').classes('w-full')
+                    slot('points')
+                    if 'measuring' in texts:
+                        slot('measuring')
+                    if 'requested' in texts:
+                        slot('requested')
                     with ui.row().classes('w-full gap-3'):
-                        for key, label, unit in [('Vin_V', reading_kind + ' input', 'V'), ('Iin_A', 'Supply current', 'A'),
-                                                  ('Vout_V', reading_kind + ' output', 'V'), ('Iout_A', 'Load current', 'A')]:
+                        for key, _, _ in RUN_TILES:
                             with ui.column().classes('bench-stat-tile gap-1'):
-                                ui.label(label).classes('bench-muted')
-                                ui.label(quantity(latest.get(key), unit)).classes('bench-stat-value')
-                    for key, label in [('phase', 'Stage'), ('elapsed_s', 'Elapsed seconds'), ('latest_age_s', 'Last measurement age (s)'),
-                                       ('source_mode', 'Supply mode')]:
-                        value = snapshot.get(key, latest.get(key))
-                        if value is not None:
-                            if key.endswith('_s') and isinstance(value, (int, float)):
-                                value = f'{value:.0f}'
-                            ui.label(f'{label}: {value}').classes('bench-muted')
-                    if snapshot.get('latest_kind') == 'startup':
-                        ui.label('Latest readings are from startup; they are not a qualified efficiency result.').classes('bench-muted')
-                    elif latest:
-                        ui.label('Latest raw readings. Qualified averages and efficiency are available in the final report.').classes('bench-muted')
-                    if snapshot.get('error'):
-                        ui.label(str(snapshot['error'])).classes('bench-message bench-warning')
-                    if snapshot.get('report_note'):
-                        ui.label(str(snapshot['report_note'])).classes('bench-message bench-warning')
-                    ui.label(shutdown_label(snapshot)).classes('bench-message')
+                                slot('tile_label:' + key)
+                                slot('tile:' + key, 'bench-stat-value')
+                    for key, _ in RUN_DETAILS:
+                        if 'detail:' + key in texts:
+                            slot('detail:' + key)
+                    if 'latest_note' in texts:
+                        slot('latest_note')
+                    if 'error' in texts:
+                        slot('error', 'bench-message bench-warning')
+                    if 'report_note' in texts:
+                        slot('report_note', 'bench-message bench-warning')
+                    slot('shutdown', 'bench-message')
                     if 'dequeue' in job_actions(snapshot):
                         ui.button('Remove from report queue', on_click=lambda: dequeue_report(snapshot['job_id']),
                                   icon='playlist_remove').props('outline no-caps aria-label="Remove from report queue"')
                     report_links(snapshot)
-                    if snapshot.get('mode') == 'mock' and report_link_rows(snapshot):
-                        ui.label(SYNTHETIC_UNCERTAINTY_NOTE).classes('bench-muted')
-                    artifacts = snapshot.get('report_artifacts') or {}
-                    terminal = snapshot.get('state') in ('completed', 'aborted', 'failed', 'cancelled')
-                    removed = dequeued(snapshot)
-                    failed_formats = [name.upper() for name in ('html', 'pdf')
-                                      if terminal and not removed and snapshot.get('run_dir') and artifacts.get(name, {}).get('status') not in ('success', 'unverified')]
-                    if terminal and not snapshot.get('run_dir'):
-                        ui.label('No measurements were acquired for this job.').classes('bench-muted')
-                    if removed:
-                        ui.label('Removed from the report queue: no report was generated and none failed. The saved measurements are preserved; '
-                                 '"Regenerate report" in Reports builds one from them.').classes('bench-message')
-                    if failed_formats:
-                        ui.label('Report generation needs attention: ' + ', '.join(failed_formats) + '. Saved measurements are preserved. Use "Regenerate report" in Reports.').classes('bench-message bench-warning')
-                    events = snapshot.get('events') or []
-                    if events:
+                    if 'synthetic' in texts:
+                        slot('synthetic')
+                    if 'no_measurements' in texts:
+                        slot('no_measurements')
+                    if 'removed' in texts:
+                        slot('removed', 'bench-message')
+                    if 'failed' in texts:
+                        slot('failed', 'bench-message bench-warning')
+                    if snapshot.get('events'):
                         job_id = snapshot['job_id']
                         with ui.expansion('Recent events', icon='list', value=state['events_open'].get(job_id, False),
                                           on_value_change=lambda e, job_id=job_id: state['events_open'].__setitem__(job_id, e.value)).classes('w-full'):
-                            for event in events[-12:]:
-                                ui.label(event_text(event)).classes('bench-muted')
+                            run_widgets['events'] = ui.column().classes('w-full gap-1')
+                        run_widgets['events_lines'] = None
+                        render_events(snapshot)
 
         async def select_job(job_id):
             state['job_id'] = job_id
@@ -1942,6 +1962,7 @@ def run_ui(root: Path, inventory_path: Path | None = None, *, host: str = '127.0
             except (ValueError, OSError, RuntimeError) as exc:
                 if state['job_id'] is None:
                     return
+                state['run_key'] = None  # the error text replaces the panel; the next good poll rebuilds it
                 panels['run'].clear()
                 panels['run'].set_visibility(True)
                 with panels['run']:

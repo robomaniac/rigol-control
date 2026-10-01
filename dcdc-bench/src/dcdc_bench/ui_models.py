@@ -727,3 +727,101 @@ def run_option_text(job: dict, *, zone: tzinfo | None = None) -> str:
     """'<converter> · <local start> · Simulation · synthetic data · Complete' for a run chooser such as /annotations."""
     return ' · '.join((job_title(job, zone=zone), REPORT_BENCH_LABELS['real' if job.get('mode') == 'real' else 'mock'],
                        state_label(job)))
+
+
+# --- The Run panel ------------------------------------------------------------------------------------------------
+
+RUN_TIMES = (('created_utc', 'Started'), ('acquisition_cancelled_utc', 'Stop requested'),
+             ('queued_utc', 'Report queued'), ('dispatched_utc', 'Report started'))
+RUN_DETAILS = (('phase', 'Stage'), ('elapsed_s', 'Elapsed seconds'), ('latest_age_s', 'Last measurement age (s)'),
+               ('source_mode', 'Supply mode'))
+RUN_TILES = (('Vin_V', '{kind} input', 'V'), ('Iin_A', 'Supply current', 'A'),
+             ('Vout_V', '{kind} output', 'V'), ('Iout_A', 'Load current', 'A'))
+TERMINAL_STATES = ('completed', 'aborted', 'failed', 'cancelled')
+
+
+def run_panel_progress(snapshot: dict) -> float:
+    """Accepted load points as a fraction of the plan, for the progress bar."""
+    progress = snapshot.get('progress') or {}
+    total = progress.get('total', 0)
+    return progress.get('completed', 0) / total if total else 0
+
+
+def run_panel_texts(snapshot: dict) -> dict[str, str]:
+    """The text of every label in the Run panel, by slot name, in document order.
+
+    A slot that does not apply to the snapshot is absent. The page builds the panel from the slot names once
+    and, while the same slots exist (run_panel_key), each two-second poll only sets their texts in place, so
+    keyboard focus on a report link, the queue button or the events expansion survives the tick (ui.py show_status).
+    """
+    mock = snapshot.get('mode') == 'mock'
+    progress = snapshot.get('progress') or {}
+    latest = snapshot.get('latest') or {}
+    texts = {'state': state_label(snapshot),
+             'mode': 'Simulation · synthetic data · no instrument is touched' if mock else 'Real bench · measured data'}
+    if snapshot.get('state') == 'reporting':
+        texts['reporting'] = ('The measurements are saved. Preparing the interactive plots and PDF can take several minutes '
+                              'on a Raspberry Pi. You can reconnect later; this job continues independently.')
+    if snapshot.get('state') == 'report-queued':
+        waiting = deferred_text(snapshot)
+        texts['queued'] = ('The measurements are saved and both outputs are verified OFF. Report generation is queued and '
+                           'starts automatically when no test is running and enough memory is free.'
+                           + (' ' + waiting + '.' if waiting else ''))
+        if snapshot.get('deferred_reason'):
+            texts['queued_tip'] = ('Dispatcher reason: ' + str(snapshot['deferred_reason'])
+                                   + (' · checked ' + local_time_text(snapshot['deferred_utc']) if snapshot.get('deferred_utc') else ''))
+    texts['run_id'] = 'Run ' + str(snapshot.get('run_id') or snapshot['job_id'])
+    # Local wall-clock display only; job.json and the run evidence keep UTC.
+    for key, label in RUN_TIMES:
+        if snapshot.get(key):
+            texts['time:' + key] = f'{label}: {local_time_text(snapshot[key])}'
+    texts['points'] = f"{progress.get('completed', 0)} / {progress.get('total', 0)} load points accepted"
+    if progress.get('current') and snapshot.get('state') == 'acquiring':
+        texts['measuring'] = 'Measuring this condition'
+    if progress.get('requested_input_V') is not None:
+        texts['requested'] = ('Requested input: ' + quantity(progress['requested_input_V'], 'V')
+                              + ' · Requested load: ' + quantity(progress.get('requested_output_A'), 'A'))
+    kind = 'Simulated' if mock else 'Measured'
+    for key, label, unit in RUN_TILES:
+        texts['tile_label:' + key] = label.format(kind=kind)
+        texts['tile:' + key] = quantity(latest.get(key), unit)
+    for key, label in RUN_DETAILS:
+        value = snapshot.get(key, latest.get(key))
+        if value is not None:
+            if key.endswith('_s') and isinstance(value, (int, float)):
+                value = f'{value:.0f}'
+            texts['detail:' + key] = f'{label}: {value}'
+    if snapshot.get('latest_kind') == 'startup':
+        texts['latest_note'] = 'Latest readings are from startup; they are not a qualified efficiency result.'
+    elif latest:
+        texts['latest_note'] = 'Latest raw readings. Qualified averages and efficiency are available in the final report.'
+    if snapshot.get('error'):
+        texts['error'] = str(snapshot['error'])
+    if snapshot.get('report_note'):
+        texts['report_note'] = str(snapshot['report_note'])
+    texts['shutdown'] = shutdown_label(snapshot)
+    if mock and report_link_rows(snapshot):
+        texts['synthetic'] = SYNTHETIC_UNCERTAINTY_NOTE
+    terminal = snapshot.get('state') in TERMINAL_STATES
+    removed = dequeued(snapshot)
+    if terminal and not snapshot.get('run_dir'):
+        texts['no_measurements'] = 'No measurements were acquired for this job.'
+    if removed:
+        texts['removed'] = ('Removed from the report queue: no report was generated and none failed. The saved measurements '
+                            'are preserved; "Regenerate report" in Reports builds one from them.')
+    artifacts = snapshot.get('report_artifacts') or {}
+    failed = [name.upper() for name in ('html', 'pdf') if terminal and not removed and snapshot.get('run_dir')
+              and artifacts.get(name, {}).get('status') not in ('success', 'unverified')]
+    if failed:
+        texts['failed'] = ('Report generation needs attention: ' + ', '.join(failed)
+                           + '. Saved measurements are preserved. Use "Regenerate report" in Reports.')
+    return texts
+
+
+def run_panel_key(snapshot: dict, texts: dict[str, str] | None = None) -> tuple:
+    """What decides which elements the Run panel holds: the job, its state and simulation step, the set of text
+    slots, and whether the queue button, which report links and the events log exist. While a poll returns the
+    same key the panel is updated in place; a different key rebuilds it."""
+    texts = run_panel_texts(snapshot) if texts is None else texts
+    return (snapshot['job_id'], snapshot.get('state'), sequence_step(snapshot), tuple(texts),
+            'dequeue' in job_actions(snapshot), tuple(report_link_rows(snapshot)), bool(snapshot.get('events')))

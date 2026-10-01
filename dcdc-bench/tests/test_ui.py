@@ -21,9 +21,9 @@ from dcdc_bench.ui_models import (PLAN_STATUS_LEGEND, REAL_CAN, REAL_CANNOT, REP
                                   envelope_rows, event_text, filter_report_rows, friendly_error, grouped_recipes, job_actions,
                                   job_title, limits_rows, limits_summary, local_time_text, number, plan_rows, point_count,
                                   quantity, recipe_category, recipe_grid, recipe_title, report_became_ready, report_link_rows,
-                                  report_rows, reports_count_text, run_option_text, saved_runs_key, sequence_step,
-                                  shutdown_label, skip_reasons, state_label, summary_text, target_values, time_legend,
-                                  time_lines)
+                                  report_rows, reports_count_text, run_option_text, run_panel_key, run_panel_progress,
+                                  run_panel_texts, saved_runs_key, sequence_step, shutdown_label, skip_reasons, state_label,
+                                  summary_text, target_values, time_legend, time_lines)
 
 LOS_ANGELES = ZoneInfo('America/Los_Angeles')
 DOCS = Path(__file__).resolve().parents[1] / 'docs'
@@ -1725,7 +1725,7 @@ NOT_UI_LABELS = {'8082', '8081', 'Ports → Forward a Port → 8082', 'no job is
                  'Exit 0', 'Exit 4', 'Exit 2'}
 # Labels the guide quotes with a placeholder or a runtime value: the literal fragments the page source must contain.
 COMPOSED_LABELS = {'Measured input / Supply current / Measured output / Load current':
-                       ('Measured', "reading_kind + ' input'", 'Supply current', "reading_kind + ' output'", 'Load current'),
+                       ('Measured', "'{kind} input'", 'Supply current', "'{kind} output'", 'Load current'),
                    'Acquiring… point n of m': ('Acquiring… point ', ' of '),
                    'Simulation: Acquiring… point 2 of 21': ('Simulation: ', 'Acquiring… point ', ' of '),
                    'Waiting for free memory: 96 MiB available, 150 MiB needed': ('Waiting for free memory: ', ' MiB available', ' MiB needed'),
@@ -2226,6 +2226,104 @@ def test_reports_page_through_older_runs_and_filter_by_converter_bench_or_status
                 await click(button(client, 'Refresh saved runs'))
                 assert len(grid_rows(reports)) == 35 and '35 of 40 saved runs match "12t12".' in texts(reports)
                 assert field(client, 'Filter runs') is filter_field and filter_field.value == '12t12'
+            assert page.errors == []
+        finally:
+            client.delete()
+    asyncio.run(scenario())
+
+
+def test_run_panel_slots_follow_the_snapshot_and_the_key_changes_only_with_the_structure():
+    """Codex review item 2, the pure part: which labels the Run panel holds and when it must be rebuilt."""
+    queued = snapshot('job-1', 'report-queued', run_dir='/w/r', deferred_reason='MemAvailable below 150 MiB',
+                      deferred_memory={'available_mib': 96.}, events=[{'event': 'started'}])
+    texts = run_panel_texts(queued)
+    assert list(texts)[:4] == ['state', 'mode', 'queued', 'queued_tip'] and 'reporting' not in texts
+    assert texts['state'] == 'Measurements saved — report queued' and texts['points'] == '1 / 4 load points accepted'
+    assert texts['queued'].endswith('Waiting for free memory: 96 MiB available, 150 MiB needed.')
+    assert texts['tile_label:Vin_V'] == 'Simulated input' and texts['tile:Vin_V'] == quantity(None, 'V')
+    assert texts['detail:elapsed_s'] == 'Elapsed seconds: 12' and 'measuring' not in texts
+    key = run_panel_key(queued)
+    ticked = {**queued, 'deferred_memory': {'available_mib': 120.}, 'elapsed_s': 30., 'events': [{'event': 'started'}, {'event': 'deferred'}]}
+    assert run_panel_key(ticked) == key, 'texts change, the structure does not'
+    assert run_panel_texts(ticked)['queued'] != texts['queued']
+    assert run_panel_key({**queued, **REPORT_DONE}) != key, 'links appear, the queue button goes'
+    assert run_panel_key({**queued, 'events': []}) != key and run_panel_key({**queued, 'job_id': 'job-2'}) != key
+    assert run_panel_key({**queued, 'error': 'worker exited'}) != key, 'a new note is a new slot'
+    assert run_panel_progress(queued) == .25 and run_panel_progress({**queued, 'progress': {}}) == 0
+    real = snapshot('job-3', 'acquiring', mode='real', latest={'Vin_V': 24.},
+                    progress={'completed': 0, 'total': 4, 'current': 'p1', 'requested_input_V': 24., 'requested_output_A': .5})
+    texts = run_panel_texts(real)
+    assert texts['mode'] == 'Real bench · measured data' and texts['tile_label:Vout_V'] == 'Measured output'
+    assert texts['measuring'] == 'Measuring this condition' and texts['requested'].startswith('Requested input: ')
+    assert texts['latest_note'].startswith('Latest raw readings')
+    assert run_panel_texts({**real, 'latest_kind': 'startup'})['latest_note'].startswith('Latest readings are from startup')
+    done = snapshot('job-4', **REPORT_DONE)
+    assert 'synthetic' in run_panel_texts(done) and 'failed' not in run_panel_texts(done)
+    assert 'failed' in run_panel_texts({**done, 'report_artifacts': {'html': {'status': 'success'}}})
+    assert 'no_measurements' in run_panel_texts(snapshot('job-5', 'failed', error='x'))
+
+
+def test_polling_updates_the_run_panel_in_place_so_a_focused_control_survives(tmp_path, monkeypatch):
+    """Codex review item 2: show_status() rebuilt the Run panel on every two-second poll, so an element the operator
+    had focused (a report link, Remove from report queue, the events expansion) was replaced and keyboard focus fell
+    to the page body. A poll that changes only texts and values now updates the existing elements; the panel is
+    rebuilt only when its structure (job, state, which notes, links and controls exist) changes."""
+    from nicegui import ui
+    jobs = {'job-1': snapshot('job-1', 'report-queued', run_dir='/w/jobs/job-1/runs/r-0001', queued_utc='2026-09-29T20:50:00+00:00',
+                              deferred_reason='MemAvailable below 150 MiB', deferred_memory={'available_mib': 96.},
+                              events=[{'event': 'started'}])}
+
+    def run_panel(client):
+        return find(client, css='bench-run')
+
+    def in_panel(client, **props):
+        return [child for child in descendants(run_panel(client)) if all(child._props.get(k) == v for k, v in props.items())]
+
+    def html_link(client):
+        return next(child for child in descendants(run_panel(client)) if child.tag == 'nicegui-link' and child.text == 'Open HTML')
+
+    def expansion(client):
+        return next(child for child in descendants(run_panel(client)) if isinstance(child, ui.expansion))
+
+    async def scenario():
+        page = await open_bench_page(monkeypatch, tmp_path, jobs)
+        client, poll = page.client, page.poll
+        try:
+            with client:
+                panel = run_panel(client)
+                remove = in_panel(client, label='Remove from report queue')[0]
+                events = expansion(client)
+                events.open()  # the operator focused the expansion header and pressed Enter
+                assert 'Waiting for free memory: 96 MiB available, 150 MiB needed' in ' '.join(texts(panel))
+                assert 'Elapsed seconds: 12' in texts(panel) and event_text({'event': 'started'}) in texts(panel)
+                # A tick: more memory, more time, another event. Texts and values change; the structure does not.
+                jobs['job-1'].update(deferred_memory={'available_mib': 120.}, elapsed_s=14.,
+                                     events=[{'event': 'started'}, {'event': 'deferred'}])
+                await poll()
+                await poll()
+                assert run_panel(client) is panel, 'the panel was not rebuilt'
+                assert in_panel(client, label='Remove from report queue')[0] is remove, 'the focused button is the same element'
+                assert expansion(client) is events and events.value, 'the expansion and its open state survive'
+                assert all(element.id in client.elements for element in (panel, remove, events))
+                assert 'Waiting for free memory: 120 MiB available, 150 MiB needed' in ' '.join(texts(panel))
+                assert 'Elapsed seconds: 14' in texts(panel) and event_text({'event': 'deferred'}) in texts(panel)
+                # The report becomes ready: links replace the queue button, so the panel is rebuilt once...
+                jobs['job-1'].update(REPORT_DONE)
+                await poll()
+                assert run_panel(client) is not panel and in_panel(client, label='Remove from report queue') == []
+                panel, link = run_panel(client), html_link(client)
+                assert expansion(client).value, 'the rebuilt log stays open for the same job'
+                # ...and later ticks keep the report links and the events log in place again.
+                jobs['job-1'].update(elapsed_s=20., events=[{'event': 'started'}, {'event': 'deferred'}, {'event': 'completed'}])
+                await poll()
+                await poll()
+                assert run_panel(client) is panel and html_link(client) is link
+                assert 'Elapsed seconds: 20' in texts(panel) and event_text({'event': 'completed'}) in texts(panel)
+                # Viewing another run is a new structure: the panel follows it (the newest run is listed first).
+                jobs['job-2'] = snapshot('job-2', 'completed', error='worker exited')
+                await click(button(client, 'Refresh saved runs'))
+                await click([child for child in descendants(find(client, css='bench-reports')) if child._props.get('label') == 'View run'][0])
+                assert run_panel(client) is not panel and 'No measurements were acquired for this job.' in texts(run_panel(client))
             assert page.errors == []
         finally:
             client.delete()
